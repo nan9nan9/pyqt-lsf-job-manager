@@ -106,7 +106,9 @@ def test_close_after_terminal(qtbot, manager, fake_lsf, submitted):
         manager.query_once(submitted)
     manager.close_jobset(submitted)
     assert manager.store.get_jobset(submitted).closed is True
-    assert len(fake_lsf.calls_of("bgdel")) == 1
+    # bgdel은 worker 스레드에서 비동기 수행 (main 스레드 LSF 호출 금지)
+    qtbot.waitUntil(lambda: len(fake_lsf.calls_of("bgdel")) == 1,
+                    timeout=10000)
 
 
 # ----------------------------------------------------------------------

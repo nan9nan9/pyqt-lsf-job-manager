@@ -136,6 +136,8 @@ def _validate(key: str, value: Any) -> Any:
     if key in ("auto_poll", "verify_kill"):
         return bool(value)
     if key == "tags":
+        if isinstance(value, str):
+            return (value,)               # tuple("ab") == ('a','b') 방지
         return tuple(value)
     if key in ("label", "description", "queue"):
         return str(value)

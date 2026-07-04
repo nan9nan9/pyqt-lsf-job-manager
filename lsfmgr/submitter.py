@@ -151,28 +151,31 @@ class BulkSubmitter(QObject):
         with self._ctx_lock:
             self._contexts[jobset_id] = ctx
 
-        # CREATED 레코드 선생성 → 요약 불변식(합계==intended) 즉시 성립
-        for idx, spec in enumerate(specs):
-            key = f"{jobset_id}_{idx}"
-            self.store.add_job(JobRecord(
-                job_id=None, array_index=None, jobset_id=jobset_id,
-                lsf_job_name=key, state=JobState.CREATED,
-                command=spec.command))
+        # CREATED 레코드 선생성 → 요약 불변식(합계==intended) 즉시 성립.
+        # 배치 API 필수 — 건당 insert는 Sqlite에서 caller 스레드 블로킹.
+        self.store.add_jobs([
+            JobRecord(job_id=None, array_index=None, jobset_id=jobset_id,
+                      lsf_job_name=f"{jobset_id}_{idx}",
+                      state=JobState.CREATED, command=spec.command)
+            for idx, spec in enumerate(specs)])
         for idx, spec in enumerate(specs):
             pool.start(_SubmitTask(self, ctx, f"{jobset_id}_{idx}", spec, 0))
         if not specs:
-            self._finish_if_done(ctx, force=True)
+            # 동기 emit 금지 — caller(manager.submit)가 아직 핸들을 만들기
+            # 전이라 finished가 유실된다. 이벤트 루프 한 바퀴 뒤로 지연.
+            QTimer.singleShot(0, lambda: self._finish_if_done(ctx, force=True))
 
     def submit_array(self, jobset_id: str, spec: ArrayJobSpec,
                      options: Options) -> None:
         """[async→Signal] array job submit (FR-1.3) — bsub 1회."""
         n = spec.size
-        for i in range(1, n + 1):
-            self.store.add_job(JobRecord(
-                job_id=None, array_index=i, jobset_id=jobset_id,
-                lsf_job_name=f"{jobset_id}[{i}]", state=JobState.CREATED,
-                command=(spec.commands[i - 1] if spec.commands
-                         else (spec.command or ""))))
+        self.store.add_jobs([
+            JobRecord(job_id=None, array_index=i, jobset_id=jobset_id,
+                      lsf_job_name=f"{jobset_id}[{i}]",
+                      state=JobState.CREATED,
+                      command=(spec.commands[i - 1] if spec.commands
+                               else (spec.command or "")))
+            for i in range(1, n + 1)])
         ctx = _SubmitContext(
             jobset_id=jobset_id, total=1,
             max_retry=options.max_retry,

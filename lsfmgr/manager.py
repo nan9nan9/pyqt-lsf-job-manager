@@ -69,6 +69,8 @@ class LsfJobManager(QObject):
         # --- 옵션 분리: manager 전용 / 공통(②) — 오타는 TypeError (OPT-2) ---
         mgr_only = {k: kwargs.pop(k) for k in list(kwargs)
                     if k in MANAGER_ONLY_KEYS}
+        mgr_only = validate_options(mgr_only, allowed=MANAGER_ONLY_KEYS,
+                                    where="LsfJobManager()")   # 범위 검증 (OPT-3)
         shared = validate_options(kwargs, allowed=SHARED_KEYS,
                                   where="LsfJobManager()")
 
@@ -375,10 +377,17 @@ class LsfJobManager(QObject):
         return self.store.search(tag=tag, label=label, since=since)
 
     def close_jobset(self, jobset_id: str, *, force: bool = False) -> None:
-        """[sync] 종결 (전원 terminal일 때) — 핸들도 파괴."""
+        """[sync] 종결 (전원 terminal일 때) — 핸들도 파괴.
+        전원 terminal이 아니면 예외 — polling/핸들은 건드리지 않고 유지.
+        LSF group 정리(bgdel)는 worker 스레드에서 비동기 수행 (QT-1)."""
+        js = self.jobsets.close_jobset(jobset_id, force=force,
+                                       run_bgdel=False)   # 실패 시 여기서 예외
         self.polling.stop_polling(jobset_id)
-        self.jobsets.close_jobset(jobset_id, force=force)
         self._invalidate_handle(jobset_id)
+        if js.lsf_group_paths:
+            paths = list(js.lsf_group_paths)
+            self._misc_pool.start(_CallTask(
+                lambda: [self.command.bgdel(p) for p in paths]))
 
     def list_jobsets(self) -> List[JobSetRecord]:
         """[sync, snapshot] 현재 세션의 JobSet 목록."""
@@ -506,6 +515,21 @@ class LsfJobManager(QObject):
             h.error.emit(message)
 
 
+class _CallTask(QRunnable):
+    """임의 callable을 worker 스레드에서 실행 (bgdel 등 fire-and-forget)."""
+
+    def __init__(self, fn):
+        super().__init__()
+        self.setAutoDelete(True)
+        self._fn = fn
+
+    def run(self):
+        try:
+            self._fn()
+        except Exception:                    # noqa: BLE001 — CS-5
+            log.exception("백그라운드 작업 실패")
+
+
 class _ReconcileTask(QRunnable):
     """recover된 jobset의 상태 대조 — worker 스레드 (FR-6.2)."""
 
@@ -520,8 +544,7 @@ class _ReconcileTask(QRunnable):
             result = self.mgr.querier.query(self.jobset_id)
             report = ReconcileReport(
                 jobset_id=self.jobset_id,
-                checked=len([r for r in self.mgr.store.get_jobs(self.jobset_id)
-                             if r.state.is_on_lsf]) + len(result.changed),
+                checked=result.checked,
                 transitioned=len(result.changed), lost=len(result.lost),
                 summary=dict(result.summary))
             log.info("reconcile %s: %d건 갱신, %d건 LOST",

@@ -119,11 +119,14 @@ class LsfCommand:
             raise SubmitError("bsub timeout", fail_reason="BSUB_TIMEOUT")
 
         if res.returncode != 0:
-            # 부착물 지정이 원인으로 보이면 부착물 없이 재시도 (FR-1.4)
-            if (group_path or job_name) and "group" in res.stderr.lower():
-                log.warning("bsub group 거부 — 부착물 없이 재시도: %s",
+            # group 지정이 원인으로 보이면 group만 빼고 재시도 (FR-1.4).
+            # job_name은 유지 — name 패턴 조회/손실 복구의 fallback 식별자.
+            # group_path 없는 재시도에서는 이 분기에 다시 들어오지 않는다.
+            if group_path and "group" in res.stderr.lower():
+                log.warning("bsub group 거부 — LSF group 없이 재시도: %s",
                             res.stderr.strip())
-                return self.bsub(command, queue=queue, resources=resources,
+                return self.bsub(command, queue=queue, job_name=job_name,
+                                 resources=resources,
                                  outfile=outfile, errfile=errfile,
                                  extra_args=extra_args, timeout_s=timeout_s)
             raise SubmitError(

@@ -28,6 +28,7 @@ class QueryResult:
     summary: dict
     changed: Tuple[JobRecord, ...] = ()      # 이번 조회로 상태가 바뀐 레코드
     lost: Tuple[JobRecord, ...] = ()         # 이번 조회로 LOST 전이된 레코드
+    checked: int = 0                         # 조회 대상(is_on_lsf)이었던 job 수
 
 
 class JobsetQuerier:
@@ -116,7 +117,7 @@ class JobsetQuerier:
                                 rec.job_key, rec.job_id)
 
         return QueryResult(jobset_id, self.store.summary(jobset_id),
-                           tuple(changed), tuple(lost))
+                           tuple(changed), tuple(lost), len(targets))
 
     @staticmethod
     def _try(fn, what: str) -> None:

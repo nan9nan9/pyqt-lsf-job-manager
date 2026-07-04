@@ -255,6 +255,27 @@ class SqliteStore(JobSetStore):
             self._put_job(con, record)
         return record
 
+    def add_jobs(self, records) -> List[JobRecord]:
+        """단일 트랜잭션 일괄 insert — 대량 submit 시 caller 스레드 블로킹 방지
+        (건당 트랜잭션이면 5,000건에 수 초 소요, NFR-3 위반)."""
+        records = list(records)
+        if not records:
+            return []
+        now = datetime.now()
+        out: List[JobRecord] = []
+        with self._write() as con:
+            for jsid in {r.jobset_id for r in records}:
+                cur = con.execute("SELECT 1 FROM jobsets WHERE jobset_id=?",
+                                  (jsid,))
+                if not cur.fetchone():
+                    raise JobSetNotFoundError(jsid)
+            for r in records:
+                if r.updated_at is None:
+                    r = replace(r, updated_at=now)
+                self._put_job(con, r)
+                out.append(r)
+        return out
+
     def update_job(self, record: JobRecord) -> JobRecord:
         record = replace(record, updated_at=datetime.now())
         with self._write() as con:

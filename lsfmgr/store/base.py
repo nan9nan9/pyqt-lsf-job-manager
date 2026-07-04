@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 from ..errors import PersistenceNotSupportedError
 from ..states import JobRecord, JobSetRecord, JobState
@@ -46,6 +46,11 @@ class JobSetStore(ABC):
     # ------------------------------------------------------------------
     @abstractmethod
     def add_job(self, record: JobRecord) -> JobRecord: ...
+
+    def add_jobs(self, records: Sequence[JobRecord]) -> List[JobRecord]:
+        """여러 JobRecord 일괄 추가 — 대량 submit의 CREATED 선생성용.
+        백엔드는 단일 lock/트랜잭션으로 최적화할 것 (기본: 순차 add_job)."""
+        return [self.add_job(r) for r in records]
 
     @abstractmethod
     def update_job(self, record: JobRecord) -> JobRecord: ...

@@ -168,8 +168,12 @@ class JobSetManager:
     # ------------------------------------------------------------------
     # 종결 (FR-5.7)
     # ------------------------------------------------------------------
-    def close_jobset(self, jobset_id: str, *, force: bool = False) -> JobSetRecord:
-        """전원 terminal이면 close. LSF group은 bgdel로 정리."""
+    def close_jobset(self, jobset_id: str, *, force: bool = False,
+                     run_bgdel: bool = True) -> JobSetRecord:
+        """전원 terminal이면 close. LSF group은 bgdel로 정리.
+
+        run_bgdel=False면 bgdel을 생략 — 호출자(manager)가 worker 스레드에서
+        비동기 수행할 때 사용 (main 스레드 LSF 호출 방지, QT-1)."""
         js = self.store.get_jobset(jobset_id)
         records = self.store.get_jobs(jobset_id)
         not_terminal = [r for r in records if not r.state.is_terminal]
@@ -177,8 +181,9 @@ class JobSetManager:
             raise LsfmgrError(
                 f"terminal이 아닌 job {len(not_terminal)}개 — close 불가 "
                 f"(force=True로 강제 가능)")
-        for path in js.lsf_group_paths:
-            self.command.bgdel(path)
+        if run_bgdel:
+            for path in js.lsf_group_paths:
+                self.command.bgdel(path)
         return self.store.update_jobset(replace(js, closed=True))
 
 
@@ -203,7 +208,9 @@ def detect_array_template(commands: Sequence[str]) -> Optional[str]:
             if len(set(column)) != 1:
                 return None
         elif len(set(column)) != 1:             # 달라지는 숫자 — 인덱스여야
-            if all(int(column[i]) == i + 1 for i in range(len(column))):
+            # 문자열 비교 필수: int 비교면 "01" == 1로 오판해
+            # $LSB_JOBINDEX(=1) 치환 시 run_01 → run_1 오실행이 된다
+            if all(column[i] == str(i + 1) for i in range(len(column))):
                 template[pos] = "$LSB_JOBINDEX"
             else:
                 return None

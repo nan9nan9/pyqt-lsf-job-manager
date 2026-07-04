@@ -70,6 +70,19 @@ class InMemoryStore(JobSetStore):
             self._jobs[record.jobset_id][record.job_key] = record
             return record
 
+    def add_jobs(self, records) -> List[JobRecord]:
+        out: List[JobRecord] = []
+        now = datetime.now()
+        with self._lock:                        # lock 1회로 일괄 처리
+            for record in records:
+                if record.jobset_id not in self._jobsets:
+                    raise JobSetNotFoundError(record.jobset_id)
+                if record.updated_at is None:
+                    record = replace(record, updated_at=now)
+                self._jobs[record.jobset_id][record.job_key] = record
+                out.append(record)
+        return out
+
     def update_job(self, record: JobRecord) -> JobRecord:
         with self._lock:
             jobs = self._jobs.get(record.jobset_id)
