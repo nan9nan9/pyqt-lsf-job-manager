@@ -1,0 +1,49 @@
+"""lsfmgr 예외 계층 (Qt 비의존 순수 Python)."""
+from __future__ import annotations
+
+from typing import Optional
+
+
+class LsfmgrError(Exception):
+    """lsfmgr 모든 예외의 base."""
+
+
+class PersistenceNotSupportedError(LsfmgrError):
+    """InMemoryStore에서 Sqlite 전용 API 호출 시 발생."""
+
+
+class JobSetNotFoundError(LsfmgrError):
+    """존재하지 않는 jobset_id 접근."""
+
+
+class JobSetClosedError(LsfmgrError):
+    """close/삭제되어 파괴된 JobSet 핸들 접근 (v7 §1.3)."""
+
+
+class JobNotFoundError(LsfmgrError):
+    """jobset 내에 없는 job_key 접근."""
+
+
+class LsfCommandError(LsfmgrError):
+    """LSF 명령 실행 실패 (bsub 제외 — bsub는 SubmitError)."""
+
+    def __init__(self, message: str, returncode: Optional[int] = None,
+                 stderr: str = ""):
+        super().__init__(message)
+        self.returncode = returncode
+        self.stderr = stderr
+
+
+class SubmitError(LsfmgrError):
+    """bsub 실패. fail_reason은 JobRecord.fail_reason으로 그대로 기록된다."""
+
+    def __init__(self, message: str, fail_reason: str,
+                 returncode: Optional[int] = None, stderr: str = ""):
+        super().__init__(message)
+        self.fail_reason = fail_reason
+        self.returncode = returncode
+        self.stderr = stderr
+
+
+class ArgMaxExceededError(LsfmgrError):
+    """단일 chunk가 ARG_MAX 한도를 초과 — chunk_size 조정 필요 (NFR-5)."""

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lsfmgr"
+version = "0.1.0"
+description = "LSF Job Manager for Qt applications (qtpy 기반, PyQt5/PySide2/PyQt6/PySide6 호환)"
+requires-python = ">=3.9"
+dependencies = ["qtpy>=2.0"]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-qt"]
+
+[tool.setuptools.packages.find]
+include = ["lsfmgr*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
