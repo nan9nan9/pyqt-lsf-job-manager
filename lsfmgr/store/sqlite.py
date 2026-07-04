@@ -130,7 +130,13 @@ class SqliteStore(JobSetStore):
 
         def __enter__(self) -> sqlite3.Connection:
             self._store._wlock.acquire()
-            return self._store._conn()
+            try:
+                return self._store._conn()
+            except BaseException:
+                # connection 생성 실패 시 __exit__이 호출되지 않으므로
+                # 여기서 직접 해제 — 누수되면 이후 모든 쓰기가 데드락
+                self._store._wlock.release()
+                raise
 
         def __exit__(self, exc_type, exc, tb):
             con = self._store._conn()

@@ -87,13 +87,17 @@ class _KillTask(QRunnable):
             calls += k.command.bkill_by_ids(self.job_ids)
             strategies.append("chunk")
         elif self.only_state is not None:
-            # 부분 kill (FR-3.2) — Store에서 해당 상태 ID를 골라 chunking.
+            # 부분 kill (FR-3.2) — Store에서 해당 상태 job을 골라 chunking.
             # (bkill -stat은 LSF 버전 의존이라 결정적 방식을 기본으로 한다)
+            # array element는 반드시 "id[idx]"로 지정 — parent id로 죽이면
+            # 다른 상태의 element까지 전부 kill된다.
             recs = k.store.get_jobs(self.jobset_id, states={self.only_state})
-            ids = [r.job_id for r in recs if r.job_id is not None]
-            requested = len(ids)
-            if ids:
-                calls += k.command.bkill_by_ids(ids)
+            targets = [f"{r.job_id}[{r.array_index}]"
+                       if r.array_index is not None else str(r.job_id)
+                       for r in recs if r.job_id is not None]
+            requested = len(targets)
+            if targets:
+                calls += k.command.bkill_targets(targets)
                 strategies.append(f"chunk(state={self.only_state.value})")
         else:
             requested, calls = self._kill_whole_jobset(strategies, errors)
@@ -121,40 +125,50 @@ class _KillTask(QRunnable):
         calls = 0
         covered = False
         for path in js.lsf_group_paths:                      # ①
-            if self._attempt(lambda p=path: k.command.bkill_by_group(p),
-                             f"group:{path}", strategies, errors):
+            matched = self._attempt(
+                lambda p=path: k.command.bkill_by_group(p),
+                f"group:{path}", strategies, errors)
+            if matched is not None:
                 calls += 1
-                covered = True
+                covered = covered or matched
         for aid in js.array_job_ids:                         # ②
-            if self._attempt(lambda a=aid: k.command.bkill_array(a),
-                             f"array:{aid}", strategies, errors):
+            matched = self._attempt(
+                lambda a=aid: k.command.bkill_array(a),
+                f"array:{aid}", strategies, errors)
+            if matched is not None:
                 calls += 1
-                covered = True
+                covered = covered or matched
         if not covered:
             for pattern in js.name_patterns:                 # ③
-                if self._attempt(
-                        lambda pt=pattern: k.command.bkill_by_name(pt),
-                        f"name:{pattern}", strategies, errors):
+                matched = self._attempt(
+                    lambda pt=pattern: k.command.bkill_by_name(pt),
+                    f"name:{pattern}", strategies, errors)
+                if matched is not None:
                     calls += 1
-                    covered = True
+                    covered = covered or matched
         if not covered:                                      # ④ 최후 수단
-            ids = [r.job_id for r in alive if r.job_id is not None]
-            if ids:
-                calls += k.command.bkill_by_ids(ids)
+            # array element는 parent id 1개로 전체가 죽으므로 dedupe
+            targets = sorted({str(r.job_id) for r in alive
+                              if r.job_id is not None})
+            if targets:
+                calls += k.command.bkill_targets(targets)
                 strategies.append("chunk")
         return requested, calls
 
     @staticmethod
     def _attempt(fn, name: str, strategies: List[str],
-                 errors: List[str]) -> bool:
+                 errors: List[str]) -> Optional[bool]:
+        """전략 1회 시도. 반환: True=대상 kill / False=no-match(커버 실패,
+        부착물이 유실됐거나 job이 부착물에 안 붙은 경우 — fallback 필요) /
+        None=실행 자체 실패(예외)."""
         try:
-            fn()
+            matched = fn()
         except LsfmgrError as e:
             errors.append(f"{name}: {e}")
             log.warning("kill 전략 실패 %s: %s", name, e)
-            return False
-        strategies.append(name)
-        return True
+            return None
+        strategies.append(name if matched else f"{name}(no-match)")
+        return matched
 
     def _verify(self) -> int:
         """재조회로 실제 종료 확인 (FR-3.3). 잔존(alive) job 수 반환."""

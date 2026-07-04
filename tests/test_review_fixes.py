@@ -146,6 +146,82 @@ def test_empty_submit_finished_reaches_handle(qtbot, manager, fake_lsf):
 
 
 # ----------------------------------------------------------------------
+# 버그 9 (2차): kill 전략의 no-match를 커버 성공으로 오판
+#   — group 부착이 거부된 jobset은 bkill -g가 no-match인데도 covered=True
+#     처리되어 fallback을 건너뛰고 job이 하나도 죽지 않았음
+# ----------------------------------------------------------------------
+def test_kill_falls_through_when_group_rejected(qtbot, manager, fake_lsf):
+    fake_lsf.reject_group = True            # 모든 job이 group 없이 submit됨
+    js = manager.submit([f"r {i}" for i in range(20)], mode="bulk",
+                        auto_poll=False)
+    with qtbot.waitSignal(js.finished, timeout=10000):
+        pass
+    assert all(j.group is None for j in fake_lsf.jobs.values())
+
+    with qtbot.waitSignal(js.killed, timeout=10000) as blocker:
+        js.kill()
+    rpt = blocker.args[0]
+    # group 전략은 no-match로 표시되고 name 패턴으로 fallback해 전부 kill
+    assert any("(no-match)" in s for s in rpt.strategies)
+    assert fake_lsf.alive_jobs() == [], "group 커버 오판으로 job이 살아남음"
+
+
+# ----------------------------------------------------------------------
+# 버그 10 (2차): array 부분 kill이 parent id로 전체를 죽임
+# ----------------------------------------------------------------------
+def test_array_partial_kill_only_pend(qtbot, manager, fake_lsf):
+    from lsfmgr import ArrayJobSpec
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        jsid = manager.submit_array(ArrayJobSpec(command="r", count=10))
+    parent = manager.get_jobs(jsid)[0].job_id
+    # element 1~5는 RUN으로 (fake + store 모두 반영)
+    for i in range(1, 6):
+        fake_lsf.set_job(parent, "RUN", array_index=i)
+        manager.store.transition(jsid, f"{jsid}[{i}]", JobState.RUN)
+
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
+        manager.kill_jobset(jsid, only_state=JobState.PEND)
+    rpt = blocker.args[1]
+    assert rpt.requested == 5                    # PEND element만
+    alive = fake_lsf.alive_jobs()
+    assert len(alive) == 5, "parent id kill로 RUN element까지 죽음"
+    assert all(j.stat == "RUN" for j in alive)
+
+
+# ----------------------------------------------------------------------
+# 버그 11 (2차): SqliteStore._Tx — connection 생성 실패 시 wlock 누수
+# ----------------------------------------------------------------------
+def test_sqlite_wlock_released_on_connect_error(tmp_path):
+    import sqlite3
+    from lsfmgr import SqliteStore
+    s = SqliteStore(str(tmp_path / "lock.db"))
+    orig_conn = s._conn
+    state = {"fail": True}
+
+    def flaky_conn():
+        if state["fail"]:
+            state["fail"] = False
+            raise sqlite3.OperationalError("disk I/O error (주입)")
+        return orig_conn()
+
+    s._conn = flaky_conn
+    with pytest.raises(sqlite3.OperationalError):
+        s.create_jobset(make_jobset("a"))
+    # lock이 해제되어 다음 쓰기는 성공해야 한다 (누수 시 여기서 데드락)
+    s.create_jobset(make_jobset("b"))
+    s.close()
+
+
+# ----------------------------------------------------------------------
+# 버그 12 (2차): 저수준 submit_bulk/submit_array의 tags="..." 문자 분해
+# ----------------------------------------------------------------------
+def test_lowlevel_submit_tags_string(qtbot, manager, fake_lsf):
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        jsid = manager.submit_bulk([JobSpec(command="x")], tags="sweep")
+    assert manager.store.get_jobset(jsid).tags == ["sweep"]
+
+
+# ----------------------------------------------------------------------
 # 버그 8: ReconcileReport.checked 이중 계산
 # ----------------------------------------------------------------------
 def test_query_result_checked_count(qtbot, manager, fake_lsf):

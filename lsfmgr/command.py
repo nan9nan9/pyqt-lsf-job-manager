@@ -282,37 +282,40 @@ class LsfCommand:
     # bkill — FR-3.1 전략별 변형. 반환값: 실제 LSF 호출 횟수
     # ------------------------------------------------------------------
     def bkill_by_group(self, group_path: str,
-                       state_filter: Optional[str] = None) -> int:
+                       state_filter: Optional[str] = None) -> bool:
+        """반환: 실제 kill 대상이 매칭되었는지. False(no-match)면 호출자는
+        이 부착물이 job을 커버하지 못한 것으로 보고 fallback해야 한다."""
         argv = [self.config.bkill_path, "-g", group_path]
         if state_filter:
             argv += ["-stat", state_filter.lower()]
         argv.append("0")                          # 0 == group 내 전체
-        self._run_kill(argv)
-        return 1
+        return self._run_kill(argv)
 
-    def bkill_by_name(self, pattern: str) -> int:
-        self._run_kill([self.config.bkill_path, "-J", pattern, "0"])
-        return 1
+    def bkill_by_name(self, pattern: str) -> bool:
+        return self._run_kill([self.config.bkill_path, "-J", pattern, "0"])
 
     def bkill_array(self, array_job_id: int,
-                    index_range: Optional[Tuple[int, int]] = None) -> int:
+                    index_range: Optional[Tuple[int, int]] = None) -> bool:
         target = (f"{array_job_id}[{index_range[0]}-{index_range[1]}]"
                   if index_range else str(array_job_id))
-        self._run_kill([self.config.bkill_path, target])
-        return 1
+        return self._run_kill([self.config.bkill_path, target])
 
-    def bkill_by_ids(self, job_ids: Sequence[int]) -> int:
-        """chunked bkill — ARG_MAX 안전 (④ 최후 수단)."""
+    def bkill_targets(self, targets: Sequence[str]) -> int:
+        """chunked bkill — "id" 또는 "id[idx]"(array element) 형태 허용.
+        ARG_MAX 안전 (④ 최후 수단). 반환: LSF 호출 횟수."""
         calls = 0
-        ids = [str(i) for i in job_ids]
         base = len(self.config.bkill_path) + 10
-        for chunk in chunk_args(ids, self.config.chunk_size,
+        for chunk in chunk_args(list(targets), self.config.chunk_size,
                                 self.config.arg_max, base):
             self._run_kill([self.config.bkill_path] + chunk)
             calls += 1
         return calls
 
-    def _run_kill(self, argv: List[str]) -> None:
+    def bkill_by_ids(self, job_ids: Sequence[int]) -> int:
+        return self.bkill_targets([str(i) for i in job_ids])
+
+    def _run_kill(self, argv: List[str]) -> bool:
+        """반환: 매칭된 job이 있었는지 (no-match는 예외가 아니라 False)."""
         try:
             res = self._run(argv, self.config.kill_timeout_s)
         except subprocess.TimeoutExpired:
@@ -320,10 +323,11 @@ class LsfCommand:
         if res.returncode != 0:
             msg = (res.stderr + res.stdout).lower()
             if any(p in msg for p in _NO_JOB_PATTERNS):
-                return                            # 이미 종료된 job — 정상
+                return False                      # 대상 없음 — 커버 실패 신호
             raise LsfCommandError(
                 f"bkill exit {res.returncode}: {res.stderr.strip()[:200]}",
                 returncode=res.returncode, stderr=res.stderr)
+        return True
 
     # ------------------------------------------------------------------
     # bmod / bgdel

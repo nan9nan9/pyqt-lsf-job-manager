@@ -240,7 +240,9 @@ class LsfJobManager(QObject):
                     jobset_id: Optional[str] = None) -> str:
         """[async→Signal] 대량 submit (Low-level) — jobset_id 반환.
         결과는 Facade Signal. polling은 자동 시작하지 않는다 (v6 계약)."""
-        kw: Dict[str, Any] = {"label": label, "tags": tuple(tags),
+        # tags는 원형 그대로 — tuple(str)은 문자 단위로 분해되므로
+        # 정규화는 options._validate에 일임
+        kw: Dict[str, Any] = {"label": label, "tags": tags,
                               "description": description}
         if not parallel:
             kw["workers"] = 1
@@ -259,7 +261,7 @@ class LsfJobManager(QObject):
                      tags: Sequence[str] = (),
                      jobset_id: Optional[str] = None) -> str:
         """[async→Signal] array job submit (Low-level) — jobset_id 반환."""
-        kw: Dict[str, Any] = {"label": label, "tags": tuple(tags)}
+        kw: Dict[str, Any] = {"label": label, "tags": tags}
         if max_retry is not None:
             kw["max_retry"] = max_retry
         opts = self.resolve_options(kw, context="submit")
