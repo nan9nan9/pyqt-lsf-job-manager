@@ -112,6 +112,15 @@ def _collect_by_specs(db: Database, specs: List[str]) -> Tuple[List[Job], List[s
     return jobs, missing
 
 
+def _purged(job: Job, now: float) -> bool:
+    """clean period(MOCKLSF_CLEAN_PERIOD) 초과로 bjobs 에서 사라진 완료 job 인지.
+
+    실제 LSF 처럼 완료(DONE/EXIT) 후 일정 시간이 지나면 mbatchd(bjobs)에서
+    purge 된다. bhist 는 events 기록으로 계속 조회 가능하다."""
+    return bool(job.stat in FINISHED_STATES and job.finish_time
+                and (now - job.finish_time) > config.CLEAN_PERIOD)
+
+
 # ===========================================================================
 # bsub
 # ===========================================================================
@@ -178,6 +187,7 @@ def cmd_bsub(argv: List[str]) -> int:
 
 def cmd_bjobs(argv: List[str]) -> int:
     db = Database()
+    now = time.time()
 
     show_all = False
     wide = False
@@ -254,6 +264,9 @@ def cmd_bjobs(argv: List[str]) -> int:
     had_missing = False
     if job_specs:
         jobs, missing = _collect_by_specs(db, job_specs)
+        # clean period 초과 완료 job 은 bjobs 에서 purge → 조회 시 not found.
+        missing += [j.display_id for j in jobs if _purged(j, now)]
+        jobs = [j for j in jobs if not _purged(j, now)]
         if missing and not jobs:
             for m in missing:
                 _err(f"Job <{m}>: No matching job found")
@@ -264,7 +277,8 @@ def cmd_bjobs(argv: List[str]) -> int:
         # 일부라도 매칭 실패가 있으면 실제 LSF 는 255 를 반환한다.
         had_missing = bool(missing)
     else:
-        jobs = db.all_jobs()
+        # purge 된 완료 job 은 bjobs -a 에서도 사라진다.
+        jobs = [j for j in db.all_jobs() if not _purged(j, now)]
         # 사용자 필터 (-u all 이면 전체).
         if user_filter != "all":
             jobs = [j for j in jobs if j.user == user_filter]

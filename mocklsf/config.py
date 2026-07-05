@@ -103,6 +103,11 @@ SCHED_INTERVAL = _env_float("MOCKLSF_SCHED_INTERVAL", 0.5)
 # 한 tick 에서 새로 dispatch 할 수 있는 최대 job 수(폭주 방지, 실제 LSF 유사).
 MAX_DISPATCH_PER_TICK = _env_int("MOCKLSF_MAX_DISPATCH_PER_TICK", 200)
 
+# 완료 job 보존 기간(초). 실제 LSF 의 MBD_CLEAN_PERIOD 흉내 — 완료(DONE/EXIT)
+# 후 이 시간이 지나면 bjobs 에서 purge 되어 사라진다(그 뒤엔 bhist 로만 조회).
+# 기본 3600(1시간). 데모/‏테스트에서 작게 주면 bhist fallback 경로를 태울 수 있다.
+CLEAN_PERIOD = _env_float("MOCKLSF_CLEAN_PERIOD", 3600.0)
+
 # job 번호 시작값.
 FIRST_JOB_ID = _env_int("MOCKLSF_FIRST_JOB_ID", 1000)
 

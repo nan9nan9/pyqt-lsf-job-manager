@@ -99,6 +99,17 @@ bjobs -a -json -o "jobid stat exec_host"
 | `MOCKLSF_EXIT_RATE` | 0.08 | 비정상 종료(EXIT) 확률 |
 | `MOCKLSF_SUSPEND_RATE` | 0.05 | 실행 중 시스템 suspend 확률 |
 | `MOCKLSF_SCHED_INTERVAL` | 0.5 | 스케줄러 tick 주기(초) |
+| `MOCKLSF_CLEAN_PERIOD` | 3600 | 완료 job 보존 기간(초). 초과 시 bjobs 에서 purge(→bhist 로만 조회). 작게 주면 bhist fallback 재현 |
+
+### 완료 job purge (MBD_CLEAN_PERIOD 흉내)
+
+실제 LSF 처럼 완료(DONE/EXIT) job 은 `MOCKLSF_CLEAN_PERIOD` 동안만 `bjobs -a` 에
+보이고, 그 후엔 **bjobs 에서 purge** 되어 `bjobs <id>` 가 `No matching job found`
+(exit 255)를 낸다. `bhist <id>` 는 계속 이력을 조회할 수 있다.
+
+lsfmgr 는 이 상황을 bhist fallback(FR-4.3)으로 처리한다 — bjobs 에서 사라진 job 을
+bhist 로 조회해 DONE/EXIT 를 확정한다. `MOCKLSF_CLEAN_PERIOD` 를 작게 주면 실제
+LSF 없이 이 경로를 재현·검증할 수 있다.
 
 ## 테스트
 

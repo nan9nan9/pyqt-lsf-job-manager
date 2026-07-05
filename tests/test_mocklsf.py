@@ -293,6 +293,65 @@ def test_bmod_moves_job_group():
         assert moved.job_group == "/lsfmgr/u/jsA"
 
 
+def test_clean_period_purges_from_bjobs_but_keeps_bhist():
+    """완료 job 은 clean period(MBD_CLEAN_PERIOD 흉내) 후 bjobs 에서 purge 되지만
+    bhist 에는 남는다 — lsfmgr 의 bhist fallback 경로를 재현한다."""
+    import io
+    from contextlib import redirect_stderr, redirect_stdout
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["MOCKLSF_CLEAN_PERIOD"] = "1"
+        try:
+            _, submit, _, dbmod = _fresh_env(tmp)
+            cli = _reload_cli(dbmod, submit)
+            db = dbmod.Database()
+            opts, cmd = submit.parse_args(["-J", "old", "sleep", "1"])
+            jobs, _, _ = submit.build_jobs(db.next_job_id(), opts, cmd)
+            j = jobs[0]
+            j.stat = "DONE"
+            j.finish_time = time.time() - 100     # clean period(1s) 훨씬 초과
+            db.insert_jobs([j])
+            db.log_event(j.job_id, None, "done", "", ts=j.finish_time)
+            db.close()
+
+            # bjobs -a → purge 되어 not found (rc 255)
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                rc = cli.cmd_bjobs(["-a", str(j.job_id)])
+            assert rc == 255
+            assert "no matching job" in err.getvalue().lower()
+
+            # bhist → 여전히 이력 조회 가능 (rc 0)
+            out = io.StringIO()
+            with redirect_stdout(out):
+                rc2 = cli.cmd_bhist([str(j.job_id)])
+            assert rc2 == 0
+            assert "sleep 1" in out.getvalue()
+        finally:
+            os.environ.pop("MOCKLSF_CLEAN_PERIOD", None)
+
+
+def test_recent_finished_job_still_in_bjobs_a():
+    """완료 직후(clean period 이내)엔 bjobs -a 에 여전히 보인다."""
+    import io
+    from contextlib import redirect_stdout
+    with tempfile.TemporaryDirectory() as tmp:
+        _, submit, _, dbmod = _fresh_env(tmp)   # 기본 CLEAN_PERIOD=3600
+        cli = _reload_cli(dbmod, submit)
+        db = dbmod.Database()
+        opts, cmd = submit.parse_args(["-J", "fresh", "sleep", "1"])
+        jobs, _, _ = submit.build_jobs(db.next_job_id(), opts, cmd)
+        j = jobs[0]
+        j.stat = "DONE"
+        j.finish_time = time.time()             # 방금 완료
+        db.insert_jobs([j])
+        db.close()
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = cli.cmd_bjobs(["-a", "-noheader", "-o", "jobid stat"])
+        assert rc == 0
+        assert "DONE" in out.getvalue()
+
+
 def test_bkill_already_finished_is_benign():
     """이미 끝난 job 을 kill 해도 오류(255)가 아니라 성공(0)이어야 한다.
 
