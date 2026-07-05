@@ -54,7 +54,7 @@ def test_auto4_index_pattern_substituted_to_array(qtbot, manager, fake_lsf):
         pass
     calls = fake_lsf.calls_of("bsub")
     assert len(calls) == 1                              # $LSB_JOBINDEX 치환
-    assert "hspice tt_$LSB_JOBINDEX.sp" in calls[0][-1]
+    assert "hspice tt_${LSB_JOBINDEX}.sp" in calls[0][-1]
 
 
 def test_auto4_mixed_commands_use_bulk(qtbot, manager, fake_lsf):
@@ -84,12 +84,12 @@ def test_auto4_forced_array_with_mixed_commands(qtbot, manager, fake_lsf):
 
 
 def test_detect_array_template():
-    assert detect_array_template(["a 1", "a 2", "a 3"]) == "a $LSB_JOBINDEX"
+    assert detect_array_template(["a 1", "a 2", "a 3"]) == "a ${LSB_JOBINDEX}"
     assert detect_array_template(["x.sh"] * 3) == "x.sh"
     assert detect_array_template(["a 1", "b 2"]) is None       # 골격 상이
     assert detect_array_template(["a 5", "a 2", "a 9"]) is None  # 인덱스 아님
     assert detect_array_template(["v2 run_1", "v2 run_2"]) \
-        == "v2 run_$LSB_JOBINDEX"                    # 상수 숫자는 유지
+        == "v2 run_${LSB_JOBINDEX}"                    # 상수 숫자는 유지
     assert detect_array_template(["only"]) is None
 
 

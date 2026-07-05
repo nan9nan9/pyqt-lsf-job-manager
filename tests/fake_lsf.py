@@ -26,6 +26,7 @@ class FakeJob:
     exit_code: Optional[int] = None
     vanished: bool = False       # bjobs에서 사라짐 (LOST 시나리오)
     in_bhist: bool = True        # vanished여도 bhist에는 남는지
+    env: Optional[str] = None    # bsub -env 원문
 
 
 _ARRAY_NAME_RE = re.compile(r"^(.*)\[(\d+)-(\d+)\]$")
@@ -43,6 +44,8 @@ class FakeLsf:
         self.fail_next_bsub = 0              # 앞으로 N회 bsub rc=1
         self.no_jobid_next_bsub = 0          # 앞으로 N회 id 파싱 불가 출력
         self.reject_group = False            # -g 지정 시 거부
+        self.fail_all_queries = False        # bjobs/bhist 장애 (LSF down)
+        self.fail_next_bkill = 0             # 앞으로 N회 bkill rc=255 에러
 
     # ------------------------------------------------------------------
     def __call__(self, argv, timeout) -> CommandResult:
@@ -94,7 +97,8 @@ class FakeLsf:
     # bsub
     # ------------------------------------------------------------------
     def _do_bsub(self, args: List[str]) -> CommandResult:
-        opts, rest = _parse_opts(args, {"-q", "-J", "-g", "-R", "-o", "-e"})
+        opts, rest = _parse_opts(args,
+                                 {"-q", "-J", "-g", "-R", "-o", "-e", "-env"})
         if self.reject_group and "-g" in opts:
             return CommandResult(255, "", "Bad job group name. Job not submitted.")
         if self.fail_next_bsub > 0:
@@ -111,17 +115,18 @@ class FakeLsf:
         group = opts.get("-g")
         command = rest[-1] if rest else ""
 
+        env = opts.get("-env")
         m = _ARRAY_NAME_RE.match(name)
         if m:
             base, lo, hi = m.group(1), int(m.group(2)), int(m.group(3))
             for i in range(lo, hi + 1):
                 self.jobs[f"{jid}[{i}]"] = FakeJob(
                     job_id=jid, array_index=i, name=f"{base}[{i}]",
-                    group=group, queue=queue, command=command)
+                    group=group, queue=queue, command=command, env=env)
         else:
             self.jobs[str(jid)] = FakeJob(
                 job_id=jid, array_index=None, name=name, group=group,
-                queue=queue, command=command)
+                queue=queue, command=command, env=env)
         return CommandResult(
             0, f"Job <{jid}> is submitted to queue <{queue}>.\n", "")
 
@@ -129,6 +134,8 @@ class FakeLsf:
     # bjobs
     # ------------------------------------------------------------------
     def _do_bjobs(self, args: List[str]) -> CommandResult:
+        if self.fail_all_queries:
+            return CommandResult(255, "", "LSF is down. Please wait ...\n")
         opts, rest = _parse_opts(args, {"-o", "-g", "-J"},
                                  flags={"-a", "-noheader"})
         matched = self._select(opts, rest, include_done="-a" in opts)
@@ -174,6 +181,9 @@ class FakeLsf:
     # bkill
     # ------------------------------------------------------------------
     def _do_bkill(self, args: List[str]) -> CommandResult:
+        if self.fail_next_bkill > 0:
+            self.fail_next_bkill -= 1
+            return CommandResult(255, "", "LSF error: cannot reach mbatchd\n")
         opts, rest = _parse_opts(args, {"-g", "-J", "-stat"})
         rest = [r for r in rest if r != "0"]   # "0" == 그룹/패턴 전체
         targets = self._select(opts, rest, include_done=False)
@@ -200,12 +210,15 @@ class FakeLsf:
     # bhist
     # ------------------------------------------------------------------
     def _do_bhist(self, args: List[str]) -> CommandResult:
+        if self.fail_all_queries:
+            return CommandResult(255, "", "LSF is down. Please wait ...\n")
         _, rest = _parse_opts(args, {"-n"}, flags={"-l"})
         blocks = []
         for a in rest:
             if not a.isdigit():
                 continue
             jid = int(a)
+            # 실제 bhist처럼 array는 element별 블록("Job <id[idx]>") 출력
             for j in self.jobs.values():
                 if j.job_id != jid or not j.in_bhist:
                     continue
@@ -215,8 +228,10 @@ class FakeLsf:
                     body = f"Exited with exit code {j.exit_code or 1}."
                 else:
                     body = "Job is still running."
-                blocks.append(f"Job <{jid}>, Job Name <{j.name}>\n  {body}\n")
-                break
+                jid_s = (f"{jid}[{j.array_index}]" if j.array_index
+                         else str(jid))
+                blocks.append(
+                    f"Job <{jid_s}>, Job Name <{j.name}>\n  {body}\n")
         if not blocks:
             return CommandResult(255, "", "No matching job found\n")
         return CommandResult(0, "\n".join(blocks), "")

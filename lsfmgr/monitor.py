@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from .command import JobStatus, LsfCommand
-from .errors import LsfmgrError
+from .errors import JobSetNotFoundError, LsfmgrError
 from .qt import QObject, QThread, QTimer, Signal, Slot
 from .states import JobRecord, JobState
 from .store.base import JobSetStore
@@ -56,15 +56,21 @@ class JobsetQuerier:
                     statuses.setdefault((st.job_id, None), st)
                 by_name[st.job_name] = st
 
-        for path in js.lsf_group_paths:
+        # 조회 수단 실패("장애")와 "job이 LSF에 없음"은 반드시 구분한다 —
+        # 장애를 없음으로 오판하면 LSF 순단 1회에 전원 LOST(terminal) 확정됨
+        probe_failed = False
+        probe_failed |= not all(
             self._try(lambda p=path: collect(
                 self.command.bjobs_by_group(p)), f"group {path}")
-        for aid in js.array_job_ids:
+            for path in js.lsf_group_paths)
+        probe_failed |= not all(
             self._try(lambda a=aid: collect(
                 self.command.bjobs_by_ids([a])), f"array {aid}")
-        for pattern in js.name_patterns:
+            for aid in js.array_job_ids)
+        probe_failed |= not all(
             self._try(lambda pt=pattern: collect(
                 self.command.bjobs_by_name(pt)), f"name {pattern}")
+            for pattern in js.name_patterns)
 
         # --- 2) 부착물로 커버 안 된 job은 chunked bjobs (graceful degradation) ---
         def lookup(rec: JobRecord) -> Optional[JobStatus]:
@@ -77,7 +83,7 @@ class JobsetQuerier:
         leftover_ids = sorted({r.job_id for r in targets
                                if r.job_id is not None and lookup(r) is None})
         if leftover_ids:
-            self._try(lambda: collect(
+            probe_failed |= not self._try(lambda: collect(
                 self.command.bjobs_by_ids(leftover_ids)), "chunk")
 
         # --- 3) 상태 반영 + bjobs 미발견분은 bhist fallback (FR-4.3) ---
@@ -96,17 +102,28 @@ class JobsetQuerier:
                     job_id=rec.job_id if rec.job_id is not None else st.job_id))
 
         if missing:
-            hist = {}
+            hist: Dict = {}
+            bhist_ok = True
             ids = sorted({r.job_id for r in missing if r.job_id is not None})
             if ids:
-                self._try(lambda: hist.update(
+                bhist_ok = self._try(lambda: hist.update(
                     self.command.bhist_states(ids)), "bhist")
             for rec in missing:
-                found = hist.get(rec.job_id) if rec.job_id is not None else None
+                # bhist 키는 (job_id, array_index) — array element별 구분
+                found = None
+                if rec.job_id is not None:
+                    found = (hist.get((rec.job_id, rec.array_index))
+                             or hist.get((rec.job_id, None)))
                 if found is not None:
                     state, exit_code = found
                     changed.append(self.store.transition(
                         jobset_id, rec.job_key, state, exit_code=exit_code))
+                elif probe_failed or not bhist_ok:
+                    # 조회 수단 실패가 섞인 사이클 — LOST 확정 보류.
+                    # LSF 순단이면 다음 사이클에서 정상 복구되고, 진짜
+                    # 소실이면 장애 해소 후 사이클에서 확정된다 (FR-4.3)
+                    log.warning("조회 실패로 %s 판단 보류 (LOST 확정 안 함)",
+                                rec.job_key)
                 else:
                     new = self.store.transition(
                         jobset_id, rec.job_key, JobState.LOST,
@@ -120,12 +137,15 @@ class JobsetQuerier:
                            tuple(changed), tuple(lost), len(targets))
 
     @staticmethod
-    def _try(fn, what: str) -> None:
-        """조회 수단 하나의 실패가 전체 polling을 죽이지 않게 격리 (CS-5)."""
+    def _try(fn, what: str) -> bool:
+        """조회 수단 하나의 실패가 전체 polling을 죽이지 않게 격리 (CS-5).
+        반환: 성공 여부 — False면 이번 사이클의 LOST 확정을 보류해야 한다."""
         try:
             fn()
         except LsfmgrError as e:
             log.warning("조회 실패(%s): %s", what, e)
+            return False
+        return True
 
 
 class _PollWorker(QObject):
@@ -141,6 +161,7 @@ class _PollWorker(QObject):
         self._timers: Dict[str, QTimer] = {}
         self._in_progress: set = set()       # CS-4 중복 polling 방지
         self._auto_stop = True
+        self._idle_counts: Dict[str, int] = {}   # 활동 없음 연속 사이클 수
 
     @Slot(str, float)
     def start_polling(self, jobset_id: str, interval_s: float) -> None:
@@ -154,6 +175,7 @@ class _PollWorker(QObject):
 
     @Slot(str)
     def stop_polling(self, jobset_id: str) -> None:
+        self._idle_counts.pop(jobset_id, None)
         timer = self._timers.pop(jobset_id, None)
         if timer is not None:
             timer.stop()
@@ -171,6 +193,11 @@ class _PollWorker(QObject):
         self._in_progress.add(jobset_id)
         try:
             result = self.querier.query(jobset_id)
+        except JobSetNotFoundError:
+            # merge/삭제된 jobset — 계속 polling하면 매 주기 error 폭주
+            log.info("jobset %s 삭제됨 — polling 자동 중지", jobset_id)
+            self.stop_polling(jobset_id)
+            return
         except Exception as e:               # noqa: BLE001 — 스레드 보호 (CS-5)
             log.exception("polling 실패: %s", jobset_id)
             self.error.emit(jobset_id, repr(e))
@@ -183,16 +210,39 @@ class _PollWorker(QObject):
         for rec in result.lost:
             self.lost.emit(jobset_id, rec)
 
-        # 전원 terminal이면 자동 중지 (불필요한 LSF 부하 방지, NFR-4)
-        if self._auto_stop and jobset_id in self._timers:
-            try:
-                remaining = self.querier.store.get_jobs(jobset_id)
-                if remaining and all(r.state.is_terminal for r in remaining):
-                    log.info("jobset %s 전원 terminal — polling 자동 중지",
-                             jobset_id)
-                    self.stop_polling(jobset_id)
-            except LsfmgrError:
-                pass
+        self._maybe_auto_stop(jobset_id)
+
+    def _maybe_auto_stop(self, jobset_id: str) -> None:
+        """AUTO-2 — 더 볼 것이 없으면 polling 자동 중지 (LSF 부하, NFR-4).
+
+        ① 전원 terminal → 즉시 중지.
+        ② 활동 없음(빈 jobset / cancel로 CREATED만 잔존): LSF에 있지도,
+           submit 진행 중(SUBMITTING/RETRY_WAIT)도 아닌 상태가 2사이클
+           연속이면 중지 — 1사이클 유예는 submit 직후 전원 CREATED인
+           정상 순간을 조기 중지하지 않기 위함.
+        """
+        if not self._auto_stop or jobset_id not in self._timers:
+            return
+        try:
+            remaining = self.querier.store.get_jobs(jobset_id)
+        except LsfmgrError:
+            return
+        if remaining and all(r.state.is_terminal for r in remaining):
+            log.info("jobset %s 전원 terminal — polling 자동 중지", jobset_id)
+            self.stop_polling(jobset_id)
+            return
+        active = any(r.state.is_on_lsf
+                     or r.state in (JobState.SUBMITTING, JobState.RETRY_WAIT)
+                     for r in remaining)
+        if active:
+            self._idle_counts.pop(jobset_id, None)
+            return
+        n = self._idle_counts.get(jobset_id, 0) + 1
+        self._idle_counts[jobset_id] = n
+        if n >= 2:
+            log.info("jobset %s 관찰 대상 없음(%d사이클) — polling 자동 중지",
+                     jobset_id, n)
+            self.stop_polling(jobset_id)
 
 
 class PollingService(QObject):

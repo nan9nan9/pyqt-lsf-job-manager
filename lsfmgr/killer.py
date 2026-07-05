@@ -124,30 +124,41 @@ class _KillTask(QRunnable):
 
         calls = 0
         covered = False
+        # 부착물 하나라도 "실행 실패"(예외)면 커버 여부를 신뢰할 수 없다 —
+        # merge된 jobset에서 group A 성공 + group B 장애 시 covered만 믿으면
+        # B 소속 job이 영원히 살아남는다. 장애 시 fallback을 강제한다.
+        had_error = False
         for path in js.lsf_group_paths:                      # ①
             matched = self._attempt(
                 lambda p=path: k.command.bkill_by_group(p),
                 f"group:{path}", strategies, errors)
-            if matched is not None:
+            if matched is None:
+                had_error = True
+            else:
                 calls += 1
                 covered = covered or matched
         for aid in js.array_job_ids:                         # ②
             matched = self._attempt(
                 lambda a=aid: k.command.bkill_array(a),
                 f"array:{aid}", strategies, errors)
-            if matched is not None:
+            if matched is None:
+                had_error = True
+            else:
                 calls += 1
                 covered = covered or matched
-        if not covered:
+        if not covered or had_error:
             for pattern in js.name_patterns:                 # ③
                 matched = self._attempt(
                     lambda pt=pattern: k.command.bkill_by_name(pt),
                     f"name:{pattern}", strategies, errors)
-                if matched is not None:
+                if matched is None:
+                    had_error = True
+                else:
                     calls += 1
                     covered = covered or matched
-        if not covered:                                      # ④ 최후 수단
-            # array element는 parent id 1개로 전체가 죽으므로 dedupe
+        if not covered or had_error:                         # ④ 최후 수단
+            # array element는 parent id 1개로 전체가 죽으므로 dedupe.
+            # 이미 죽은 job에 대한 중복 bkill은 no-match로 무해.
             targets = sorted({str(r.job_id) for r in alive
                               if r.job_id is not None})
             if targets:

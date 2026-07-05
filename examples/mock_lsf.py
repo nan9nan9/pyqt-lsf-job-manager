@@ -115,7 +115,8 @@ class SimulatedLsf:
     # bsub
     # ------------------------------------------------------------------
     def _do_bsub(self, args: List[str]) -> CommandResult:
-        opts, rest = _parse_opts(args, {"-q", "-J", "-g", "-R", "-o", "-e"})
+        opts, rest = _parse_opts(args,
+                                 {"-q", "-J", "-g", "-R", "-o", "-e", "-env"})
         self.bsub_calls += 1
         if self._rng.random() < self.submit_fail_rate:
             return CommandResult(1, "", "LSF error: queue busy (simulated)")
@@ -230,6 +231,7 @@ class SimulatedLsf:
             if not a.isdigit():
                 continue
             jid = int(a)
+            # 실제 bhist처럼 array는 element별 블록("Job <id[idx]>") 출력
             for j in self._jobs.values():
                 if j.job_id != jid or not j.visible_in_bhist(now):
                     continue
@@ -240,8 +242,10 @@ class SimulatedLsf:
                     body = f"Exited with exit code {ec or 1}."
                 else:
                     body = "Job is still running."
-                blocks.append(f"Job <{jid}>, Job Name <{j.name}>\n  {body}\n")
-                break
+                jid_s = (f"{jid}[{j.array_index}]" if j.array_index
+                         else str(jid))
+                blocks.append(
+                    f"Job <{jid_s}>, Job Name <{j.name}>\n  {body}\n")
         if not blocks:
             return CommandResult(255, "", "No matching job found\n")
         return CommandResult(0, "\n".join(blocks), "")

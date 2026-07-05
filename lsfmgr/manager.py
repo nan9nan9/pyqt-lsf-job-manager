@@ -109,6 +109,10 @@ class LsfJobManager(QObject):
             "chunk_size": cfg.chunk_size,
         }
         self._defaults.update(shared)
+        if cfg.retry_backoff > 1.0 and cfg.retry_backoff != 2.0:
+            log.warning("LsfConfig.retry_backoff=%s — v7 옵션 체계의 expo "
+                        "지수 밑은 2로 고정되어 배수가 그대로 반영되지 "
+                        "않습니다", cfg.retry_backoff)
 
         # --- 컴포넌트 조립 ---
         self.command = LsfCommand(self.config, runner)
@@ -201,10 +205,12 @@ class LsfJobManager(QObject):
         if mode == "array" and len(specs) >= 2:
             if template is None:
                 template = detect_array_template(commands)
+            common = _common_spec_options(specs)  # 상이 옵션이면 ValueError
             if template is not None:
-                spec = ArrayJobSpec(command=template, count=len(specs))
+                spec = ArrayJobSpec(command=template, count=len(specs),
+                                    **common)
             else:                                 # 상이 command → dispatch
-                spec = ArrayJobSpec(commands=tuple(commands))
+                spec = ArrayJobSpec(commands=tuple(commands), **common)
             jsid = self._submit_array_impl(spec, opts)
         else:
             jsid = self._submit_bulk_impl(specs, opts)
@@ -365,6 +371,9 @@ class LsfJobManager(QObject):
             keep_originals=keep_originals).jobset_id
         if not keep_originals:
             for old in jobset_ids:
+                # polling 중지 필수 — 삭제된 jobset을 계속 polling하면
+                # 매 주기 JobSetNotFoundError → error Signal 폭주
+                self.polling.stop_polling(old)
                 self._invalidate_handle(old)
         return new_id
 
@@ -565,6 +574,22 @@ class _ReconcileTask(QRunnable):
                 r.state.is_on_lsf
                 for r in self.mgr.store.get_jobs(self.jobset_id)):
             self.mgr.start_polling(self.jobset_id)
+
+
+def _common_spec_options(specs: List[JobSpec]) -> Dict[str, Any]:
+    """array 모드용 — 전 spec의 옵션이 동일해야 하며, 동일하면 그 값을
+    ArrayJobSpec 인자로 반환한다. 조용히 버리면 -q/-R/-o/-e/env가 소실되어
+    기본 queue·기본 리소스로 오실행되므로 상이하면 즉시 거부."""
+    fields = ("queue", "resources", "outfile", "errfile", "env",
+              "extra_args")
+    for name in fields:
+        values = {getattr(s, name) for s in specs}
+        if len(values) > 1:
+            raise ValueError(
+                f"mode='array'는 job별 상이 옵션({name})을 지원하지 않습니다"
+                f" — 동일 옵션으로 통일하거나 mode='bulk'를 사용하세요")
+    first = specs[0]
+    return {name: getattr(first, name) for name in fields}
 
 
 def _normalize_jobs(jobs: Sequence[Union[str, JobSpec]]

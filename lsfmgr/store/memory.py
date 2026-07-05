@@ -71,12 +71,16 @@ class InMemoryStore(JobSetStore):
             return record
 
     def add_jobs(self, records) -> List[JobRecord]:
+        records = list(records)
         out: List[JobRecord] = []
         now = datetime.now()
         with self._lock:                        # lock 1회로 일괄 처리
+            # 선검증 — 중간 실패 시 앞선 레코드만 반영되는 부분 적용을
+            # 막는다 (SqliteStore의 단일 트랜잭션 rollback과 계약 일치)
             for record in records:
                 if record.jobset_id not in self._jobsets:
                     raise JobSetNotFoundError(record.jobset_id)
+            for record in records:
                 if record.updated_at is None:
                     record = replace(record, updated_at=now)
                 self._jobs[record.jobset_id][record.job_key] = record
@@ -112,6 +116,7 @@ class InMemoryStore(JobSetStore):
 
     def transition(self, jobset_id: str, job_key: str, new_state: JobState,
                    **fields: Any) -> JobRecord:
+        self._reject_key_fields(fields)
         with self._lock:                        # read-modify-write 원자성 (CS-1)
             old = self.get_job(jobset_id, job_key)
             new = replace(old, state=new_state, updated_at=datetime.now(),

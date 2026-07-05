@@ -22,7 +22,7 @@ def test_template_rejects_leading_zero_indices():
 
     # zero-padding 없는 1..N은 여전히 array 가능
     cmds2 = [f"hspice run_{i}.sp" for i in range(1, 11)]
-    assert detect_array_template(cmds2) == "hspice run_$LSB_JOBINDEX.sp"
+    assert detect_array_template(cmds2) == "hspice run_${LSB_JOBINDEX}.sp"
 
 
 def test_leading_zero_commands_submitted_verbatim(qtbot, manager, fake_lsf):

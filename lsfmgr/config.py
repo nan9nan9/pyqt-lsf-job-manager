@@ -74,6 +74,7 @@ class ArrayJobSpec:
     resources: Optional[str] = None
     outfile: Optional[str] = None
     errfile: Optional[str] = None
+    env: Optional[Tuple[Tuple[str, str], ...]] = None
     extra_args: Tuple[str, ...] = ()
 
     def __post_init__(self):

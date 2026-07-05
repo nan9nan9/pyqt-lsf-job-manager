@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import getpass
 import logging
+import threading
 import uuid
 from dataclasses import replace
 from datetime import datetime
@@ -35,6 +36,11 @@ class JobSetManager:
         self.store = store
         self.command = command
         self.config = config or command.config
+        # JobSetRecord read-modify-write 직렬화 — Store는 개별 연산만
+        # 원자적이므로, intended_count/부착물 갱신처럼 "읽고-고쳐-쓰는"
+        # 경로가 겹치면 한쪽 갱신이 유실된다 (예: worker의
+        # add_array_attachment vs 사용자 스레드의 add_job)
+        self._meta_lock = threading.RLock()
 
     # ------------------------------------------------------------------
     # 생성/부착물
@@ -61,10 +67,11 @@ class JobSetManager:
         return self.store.create_jobset(record)
 
     def add_array_attachment(self, jobset_id: str, array_job_id: int) -> None:
-        js = self.store.get_jobset(jobset_id)
-        if array_job_id not in js.array_job_ids:
-            self.store.update_jobset(replace(
-                js, array_job_ids=js.array_job_ids + [array_job_id]))
+        with self._meta_lock:
+            js = self.store.get_jobset(jobset_id)
+            if array_job_id not in js.array_job_ids:
+                self.store.update_jobset(replace(
+                    js, array_job_ids=js.array_job_ids + [array_job_id]))
 
     # ------------------------------------------------------------------
     # job 추가 (FR-5.4)
@@ -72,14 +79,17 @@ class JobSetManager:
     def add_job(self, jobset_id: str, record: JobRecord, *,
                 sync_lsf: bool = True) -> JobRecord:
         """job을 jobset에 편입. sync_lsf=True면 bmod -g로 LSF group도 동기화."""
-        js = self.store.get_jobset(jobset_id)
         if record.jobset_id != jobset_id:
             record = replace(record, jobset_id=jobset_id)
-        rec = self.store.add_job(record)
-        # 수동 추가는 intended_count도 증가 (불변식 유지, FR-5.2)
-        jobs_n = len(self.store.get_jobs(jobset_id))
-        if jobs_n > js.intended_count:
-            self.store.update_jobset(replace(js, intended_count=jobs_n))
+        with self._meta_lock:
+            js = self.store.get_jobset(jobset_id)
+            rec = self.store.add_job(record)
+            # 수동 추가는 intended_count도 증가 (불변식 유지, FR-5.2)
+            jobs_n = len(self.store.get_jobs(jobset_id))
+            if jobs_n > js.intended_count:
+                self.store.update_jobset(
+                    replace(self.store.get_jobset(jobset_id),
+                            intended_count=jobs_n))
         if sync_lsf and rec.job_id is not None and js.lsf_group_paths:
             self.command.bmod_group([rec.job_id], js.lsf_group_paths[0])
         return rec
@@ -133,6 +143,19 @@ class JobSetManager:
         if len(jobset_ids) < 2:
             raise ValueError("merge는 2개 이상의 jobset이 필요합니다")
         sources = [self.store.get_jobset(i) for i in jobset_ids]
+
+        # job_key(lsf_job_name) 충돌 선검사 — silent overwrite로 레코드가
+        # 유실되면 intended_count 합산과 어긋나 유령 CREATED가 영구 잔존한다
+        seen_keys: set = set()
+        for src in sources:
+            for rec in self.store.get_jobs(src.jobset_id):
+                if rec.job_key in seen_keys:
+                    raise ValueError(
+                        f"merge 불가 — job 이름 충돌: {rec.job_key!r} "
+                        f"(동일 jobset을 중복 merge했거나 수동 추가된 "
+                        f"동명 job이 있습니다)")
+                seen_keys.add(rec.job_key)
+
         new_id = generate_jobset_id()
         merged = JobSetRecord(
             jobset_id=new_id,
@@ -211,7 +234,9 @@ def detect_array_template(commands: Sequence[str]) -> Optional[str]:
             # 문자열 비교 필수: int 비교면 "01" == 1로 오판해
             # $LSB_JOBINDEX(=1) 치환 시 run_01 → run_1 오실행이 된다
             if all(column[i] == str(i + 1) for i in range(len(column))):
-                template[pos] = "$LSB_JOBINDEX"
+                # 중괄호 필수: "run_$LSB_JOBINDEX_final"이면 셸이 변수명을
+                # LSB_JOBINDEX_final로 흡수해 빈 문자열로 확장된다
+                template[pos] = "${LSB_JOBINDEX}"
             else:
                 return None
     return "".join(template)

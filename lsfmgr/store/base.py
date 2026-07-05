@@ -68,7 +68,17 @@ class JobSetStore(ABC):
                    **fields: Any) -> JobRecord:
         """원자적 상태 전이 (read-modify-write, CS-1).
         fields로 job_id/exit_code/fail_reason 등 동시 갱신.
+        키 필드(lsf_job_name/jobset_id)는 변경 불가 — ValueError.
         Sqlite 모드에서는 전이 이력 event를 기록한다 (§2.2)."""
+
+    @staticmethod
+    def _reject_key_fields(fields: Dict[str, Any]) -> None:
+        """transition의 키 필드 변경 거부 — 허용하면 옛 키의 레코드가
+        잔존해 한 job이 이중 계상되거나(sqlite) 키-레코드 불일치(memory)."""
+        for key in ("lsf_job_name", "jobset_id"):
+            if key in fields:
+                raise ValueError(
+                    f"transition으로 키 필드({key})는 변경할 수 없습니다")
 
     # ------------------------------------------------------------------
     # 조회/검색

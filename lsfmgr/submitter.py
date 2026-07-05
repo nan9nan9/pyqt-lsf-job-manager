@@ -103,6 +103,7 @@ class _SubmitTask(QRunnable):
                 outfile=outfile,
                 errfile=errfile,
                 extra_args=self.spec.extra_args,
+                env=self.spec.env,
                 timeout_s=opts.submit_timeout_s)
         except SubmitError as e:
             sub._task_failed(ctx, self.job_key, self.spec, self.attempt, e)
@@ -203,6 +204,30 @@ class BulkSubmitter(QObject):
             ctx.cancel_event.set()
         for ctx in contexts:
             ctx.pool.waitForDone(-1)
+        # pending retry(QTimer/큐잉된 Signal)는 pool 밖에 있어 waitForDone이
+        # 기다려주지 않고, 이벤트 루프가 곧 끝나면 영영 실행되지 않는다 —
+        # RETRY_WAIT 잔류분을 여기서 SUBMIT_FAILED로 확정하지 않으면
+        # 비terminal로 영구 잔존(persistent 모드에서는 DB 오염)하고
+        # finished Signal도 발행되지 않는다. waitForDone 이후에는 새
+        # RETRY_WAIT 전이가 없으므로 안전.
+        for ctx in contexts:
+            with ctx.lock:
+                if ctx.finished:
+                    continue
+            try:
+                pending = self.store.get_jobs(ctx.jobset_id,
+                                              states={JobState.RETRY_WAIT})
+            except Exception:                   # noqa: BLE001 — 종료 경로 보호
+                continue
+            for rec in pending:
+                self.store.transition(ctx.jobset_id, rec.job_key,
+                                      JobState.SUBMIT_FAILED,
+                                      fail_reason=rec.fail_reason
+                                      or "SHUTDOWN")
+                with ctx.lock:
+                    ctx.done += 1
+                    ctx.failed += 1
+            self._finish_if_done(ctx)
 
     # ------------------------------------------------------------------
     # worker 콜백 (worker 스레드에서 호출됨 — Store는 thread-safe)
@@ -283,12 +308,16 @@ class BulkSubmitter(QObject):
             ctx = self._contexts.get(jobset_id)
         if ctx is None:
             return
-        if ctx.cancel_event.is_set() or self._shutdown:
+        if self._shutdown:
+            return          # shutdown()이 RETRY_WAIT 잔류를 일괄 확정함
+        if ctx.cancel_event.is_set():
             self._abandon_retry(ctx, job_key)
             return
 
         def fire():
-            if ctx.cancel_event.is_set() or self._shutdown:
+            if self._shutdown:
+                return      # 닫힌 store 접근 금지 — shutdown()이 확정함
+            if ctx.cancel_event.is_set():
                 self._abandon_retry(ctx, job_key)
                 return
             if isinstance(spec, _ArrayRetrySpec):
@@ -387,6 +416,7 @@ class _ArraySubmitTask(QRunnable):
                 resources=spec.resources or opts.resource_req,
                 outfile=spec.outfile, errfile=spec.errfile,
                 extra_args=spec.extra_args,
+                env=spec.env,
                 timeout_s=opts.submit_timeout_s)
         except SubmitError as e:
             if self.attempt < ctx.max_retry and not ctx.cancel_event.is_set():

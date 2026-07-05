@@ -100,6 +100,7 @@ class LsfCommand:
              outfile: Optional[str] = None,
              errfile: Optional[str] = None,
              extra_args: Sequence[str] = (),
+             env: Optional[Sequence[Tuple[str, str]]] = None,
              timeout_s: Optional[float] = None) -> int:
         """bsub 실행 후 'Job <id>' 파싱하여 job_id 반환.
 
@@ -111,7 +112,7 @@ class LsfCommand:
         argv = self._bsub_argv(command, queue=queue, job_name=job_name,
                                group_path=group_path, resources=resources,
                                outfile=outfile, errfile=errfile,
-                               extra_args=extra_args)
+                               extra_args=extra_args, env=env)
         try:
             res = self._run(argv, timeout_s if timeout_s is not None
                             else self.config.submit_timeout_s)
@@ -128,7 +129,8 @@ class LsfCommand:
                 return self.bsub(command, queue=queue, job_name=job_name,
                                  resources=resources,
                                  outfile=outfile, errfile=errfile,
-                                 extra_args=extra_args, timeout_s=timeout_s)
+                                 extra_args=extra_args, env=env,
+                                 timeout_s=timeout_s)
             raise SubmitError(
                 f"bsub exit {res.returncode}: {res.stderr.strip()[:200]}",
                 fail_reason=f"BSUB_EXIT_{res.returncode}",
@@ -142,7 +144,8 @@ class LsfCommand:
         return int(m.group(1))
 
     def _bsub_argv(self, command: str, *, queue, job_name, group_path,
-                   resources, outfile, errfile, extra_args) -> List[str]:
+                   resources, outfile, errfile, extra_args,
+                   env=None) -> List[str]:
         argv = [self.config.bsub_path]
         q = queue if queue is not None else self.config.default_queue
         if q:
@@ -157,6 +160,10 @@ class LsfCommand:
             argv += ["-o", outfile]
         if errfile:
             argv += ["-e", errfile]
+        if env:
+            # bsub -env "all, K=V, ..." — 기존 환경 유지 + 추가 변수
+            pairs = ", ".join(f"{k}={v}" for k, v in env)
+            argv += ["-env", f"all, {pairs}"]
         argv += list(extra_args)
         argv.append(command)
         total = sum(len(a) + 1 for a in argv)
@@ -168,7 +175,9 @@ class LsfCommand:
     # ------------------------------------------------------------------
     # bjobs — 조회 (FR-4.1 전략별 변형)
     # ------------------------------------------------------------------
-    _BJOBS_FMT = "jobid stat exit_code jobname delimiter=';'"
+    # 필드 폭 명시 필수 — LSF -o는 폭 미지정 시 기본 폭(JOBID 7자 등)으로
+    # 잘라내므로("js_2026*") 긴 job name/array id의 파싱·매칭이 전멸한다
+    _BJOBS_FMT = "jobid:20 stat:12 exit_code:12 jobname:128 delimiter=';'"
 
     def _bjobs(self, selector: List[str]) -> List[JobStatus]:
         argv = [self.config.bjobs_path, "-a", "-noheader",
@@ -243,9 +252,18 @@ class LsfCommand:
     # ------------------------------------------------------------------
     # bhist — fallback (FR-4.3)
     # ------------------------------------------------------------------
-    def bhist_states(self, job_ids: Sequence[int]) -> Dict[int, Tuple[JobState, Optional[int]]]:
-        """bhist -l 파싱 — job_id → (최종 상태, exit_code). 미발견 job은 미포함."""
-        result: Dict[int, Tuple[JobState, Optional[int]]] = {}
+    #: bhist 결과 키 — (job_id, array_index). 비array job은 index None.
+    BhistKey = Tuple[int, Optional[int]]
+
+    def bhist_states(self, job_ids: Sequence[int]
+                     ) -> Dict[BhistKey, Tuple[JobState, Optional[int]]]:
+        """bhist -l 파싱 — (job_id, array_index) → (최종 상태, exit_code).
+
+        array job은 element별 블록("Job <id[idx]>")이 나오므로 반드시
+        element 단위로 구분한다 — id 단일 키로 합치면 마지막 블록이
+        전 element를 덮어써 DONE/EXIT가 뒤섞인다. 미발견 job은 미포함.
+        """
+        result: Dict[LsfCommand.BhistKey, Tuple[JobState, Optional[int]]] = {}
         ids = [str(i) for i in job_ids]
         base = len(self.config.bhist_path) + 20
         for chunk in chunk_args(ids, self.config.chunk_size,
@@ -258,13 +276,16 @@ class LsfCommand:
         return result
 
     @staticmethod
-    def _parse_bhist(stdout: str) -> Dict[int, Tuple[JobState, Optional[int]]]:
-        result: Dict[int, Tuple[JobState, Optional[int]]] = {}
-        cur: Optional[int] = None
+    def _parse_bhist(stdout: str
+                     ) -> Dict["LsfCommand.BhistKey",
+                               Tuple[JobState, Optional[int]]]:
+        result: Dict[LsfCommand.BhistKey, Tuple[JobState, Optional[int]]] = {}
+        cur: Optional[LsfCommand.BhistKey] = None
         for line in stdout.splitlines():
-            m = re.search(r"Job <(\d+)", line)
+            m = re.search(r"Job <(\d+)(?:\[(\d+)\])?", line)
             if m:
-                cur = int(m.group(1))
+                cur = (int(m.group(1)),
+                       int(m.group(2)) if m.group(2) else None)
                 continue
             if cur is None:
                 continue
@@ -333,19 +354,28 @@ class LsfCommand:
     # bmod / bgdel
     # ------------------------------------------------------------------
     def bmod_group(self, job_ids: Sequence[int], group_path: str) -> None:
-        """기존 job을 LSF group에 편입 (FR-5.4 sync_lsf)."""
+        """기존 job을 LSF group에 편입 (FR-5.4 sync_lsf). 실패는 경고만
+        — timeout 포함 어떤 실패도 호출자에게 전파하지 않는다."""
         ids = [str(i) for i in job_ids]
         base = len(self.config.bmod_path) + len(group_path) + 10
         for chunk in chunk_args(ids, self.config.chunk_size,
                                 self.config.arg_max, base):
             argv = [self.config.bmod_path, "-g", group_path] + chunk
-            res = self._run(argv, self.config.kill_timeout_s)
+            try:
+                res = self._run(argv, self.config.kill_timeout_s)
+            except subprocess.TimeoutExpired:
+                log.warning("bmod -g timeout (무시)")
+                continue
             if res.returncode != 0:
                 log.warning("bmod -g 실패 (무시): %s", res.stderr.strip())
 
     def bgdel(self, group_path: str) -> None:
-        """LSF group 삭제 (FR-5.7 close). 실패는 경고만."""
-        res = self._run([self.config.bgdel_path, group_path],
-                          self.config.kill_timeout_s)
+        """LSF group 삭제 (FR-5.7 close). 실패는 경고만 — timeout 포함."""
+        try:
+            res = self._run([self.config.bgdel_path, group_path],
+                            self.config.kill_timeout_s)
+        except subprocess.TimeoutExpired:
+            log.warning("bgdel timeout (무시)")
+            return
         if res.returncode != 0:
             log.warning("bgdel 실패 (무시): %s", res.stderr.strip())

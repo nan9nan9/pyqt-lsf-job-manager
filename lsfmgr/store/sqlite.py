@@ -1,7 +1,10 @@
 """SqliteStore — 영속 저장소. WAL, 세션 복원, 이력, 통계 (§4.3, §4.4).
 
 스레드 안전 전략 (CS-3): connection은 thread-local로 스레드 간 공유 금지,
-쓰기는 프로세스 전역 RLock으로 직렬화. WAL + busy_timeout으로 다중 프로세스 대응.
+쓰기는 프로세스 전역 RLock으로 직렬화. WAL + busy_timeout은 다중 프로세스의
+"접근"(조회/orphan 복원)을 안전하게 할 뿐, 동시 쓰기의 원자성은 보장하지
+않는다 — 같은 jobset을 두 프로세스가 동시에 갱신하면 lost update 가능.
+활성 갱신은 프로세스 1개(단일 writer)를 전제로 한다.
 db_path는 로컬 디스크 권장 — NFS로 감지되면 경고 로깅 (CS-9).
 """
 from __future__ import annotations
@@ -140,11 +143,19 @@ class SqliteStore(JobSetStore):
 
         def __exit__(self, exc_type, exc, tb):
             con = self._store._conn()
-            if exc_type is None:
-                con.commit()
-            else:
-                con.rollback()
-            self._store._wlock.release()
+            try:
+                if exc_type is None:
+                    try:
+                        con.commit()
+                    except BaseException:
+                        # commit 실패분을 pending으로 남기면 같은 스레드의
+                        # 다음 commit에 유령처럼 함께 반영된다 — 즉시 폐기
+                        con.rollback()
+                        raise
+                else:
+                    con.rollback()
+            finally:
+                self._store._wlock.release()
             return False
 
     def _write(self) -> "_Tx":
@@ -310,7 +321,9 @@ class SqliteStore(JobSetStore):
                           (jobset_id,))
         if not cur.fetchone():
             raise JobSetNotFoundError(jobset_id)
-        if states:
+        if states is not None:                  # 빈 set == 0건 (계약 일치)
+            if not states:
+                return []
             marks = ",".join("?" * len(states))
             cur = con.execute(
                 f"SELECT * FROM jobs WHERE jobset_id=? AND state IN ({marks})",
@@ -322,6 +335,7 @@ class SqliteStore(JobSetStore):
 
     def transition(self, jobset_id: str, job_key: str, new_state: JobState,
                    **fields: Any) -> JobRecord:
+        self._reject_key_fields(fields)
         with self._write() as con:              # 원자적 read-modify-write
             old = self.get_job(jobset_id, job_key)
             new = replace(old, state=new_state, updated_at=datetime.now(),
