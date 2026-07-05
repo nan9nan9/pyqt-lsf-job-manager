@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import logging
-import threading
 from typing import List, Optional, Sequence
 
 from .command import LsfCommand
@@ -118,7 +117,6 @@ class _KillTask(QRunnable):
         js = k.store.get_jobset(self.jobset_id)
         alive = [r for r in k.store.get_jobs(self.jobset_id)
                  if r.state.is_on_lsf]
-        requested = len(alive)
         if not alive:
             return 0, 0
 
@@ -128,35 +126,25 @@ class _KillTask(QRunnable):
         # merge된 jobset에서 group A 성공 + group B 장애 시 covered만 믿으면
         # B 소속 job이 영원히 살아남는다. 장애 시 fallback을 강제한다.
         had_error = False
-        for path in js.lsf_group_paths:                      # ①
-            matched = self._attempt(
-                lambda p=path: k.command.bkill_by_group(p),
-                f"group:{path}", strategies, errors)
-            if matched is None:
-                had_error = True
-            else:
-                calls += 1
-                covered = covered or matched
-        for aid in js.array_job_ids:                         # ②
-            matched = self._attempt(
-                lambda a=aid: k.command.bkill_array(a),
-                f"array:{aid}", strategies, errors)
-            if matched is None:
-                had_error = True
-            else:
-                calls += 1
-                covered = covered or matched
-        if not covered or had_error:
-            for pattern in js.name_patterns:                 # ③
-                matched = self._attempt(
-                    lambda pt=pattern: k.command.bkill_by_name(pt),
-                    f"name:{pattern}", strategies, errors)
+
+        def run_tier(attempts) -> None:
+            nonlocal calls, covered, had_error
+            for name, fn in attempts:
+                matched = self._attempt(fn, name, strategies, errors)
                 if matched is None:
                     had_error = True
                 else:
                     calls += 1
                     covered = covered or matched
-        if not covered or had_error:                         # ④ 최후 수단
+
+        run_tier([(f"group:{p}", lambda p=p: k.command.bkill_by_group(p))
+                  for p in js.lsf_group_paths]                       # ①
+                 + [(f"array:{a}", lambda a=a: k.command.bkill_array(a))
+                    for a in js.array_job_ids])                      # ②
+        if not covered or had_error:
+            run_tier([(f"name:{pt}", lambda pt=pt: k.command.bkill_by_name(pt))
+                      for pt in js.name_patterns])                   # ③
+        if not covered or had_error:                                 # ④ 최후 수단
             # array element는 parent id 1개로 전체가 죽으므로 dedupe.
             # 이미 죽은 job에 대한 중복 bkill은 no-match로 무해.
             targets = sorted({str(r.job_id) for r in alive
@@ -164,7 +152,7 @@ class _KillTask(QRunnable):
             if targets:
                 calls += k.command.bkill_targets(targets)
                 strategies.append("chunk")
-        return requested, calls
+        return len(alive), calls
 
     @staticmethod
     def _attempt(fn, name: str, strategies: List[str],
@@ -185,7 +173,7 @@ class _KillTask(QRunnable):
         """재조회로 실제 종료 확인 (FR-3.3). 잔존(alive) job 수 반환."""
         k = self.killer
         try:
-            result = k.querier.query(self.jobset_id)
+            k.querier.query(self.jobset_id)      # Store 갱신 목적 (반환값 미사용)
         except LsfmgrError as e:
             log.warning("kill verify 조회 실패: %s", e)
             return -1

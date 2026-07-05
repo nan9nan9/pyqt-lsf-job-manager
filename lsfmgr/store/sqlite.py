@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from ..errors import JobNotFoundError, JobSetNotFoundError
 from ..states import JobRecord, JobSetRecord, JobState
-from .base import JobSetStore, make_summary
+from .base import JobSetStore
 
 log = logging.getLogger("lsfmgr.store")
 

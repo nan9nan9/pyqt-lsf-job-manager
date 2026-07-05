@@ -75,12 +75,37 @@ js = mgr.submit(jobs, workers=8, max_retry=0, queue="short",
 | `persistent` | False | 생성자 | True → SQLite 영속 모드 (§6) |
 | `db_path` | `~/.lsfmgr/jobsets.db` | 생성자 | persistent=True일 때 |
 | `chunk_size` | 200 | 생성자 | chunking fallback 크기 |
-| `bsub_path` 등 | PATH 탐색 | 생성자 | LSF 명령 경로 |
+| `bsub_path` 등 | PATH 탐색 | 생성자 | LSF 명령 경로 (문자열 또는 wrapper 토큰 목록) |
 
 - 오타 키워드는 즉시 `TypeError`, 범위 벗어나면 `ValueError` — 조용히
   무시되지 않습니다.
 - 옵션이 많은 설정을 파일/객체로 관리하고 싶으면 `LsfConfig`를 만들어
   `LsfJobManager(config=cfg)`로 주입할 수 있습니다 (kwargs가 우선).
+
+### 2.1 wrapper 커맨드로 제출 — `submit_wrapper` (예: `primesim_sub`)
+
+실제 환경처럼 job 마다 `primesim_sub`/`verilog_sub` 등 **서로 다른 제출 wrapper**를
+쓰는 경우, `submit_wrapper`에 wrapper 커맨드들을 그대로 넘깁니다. lsfmgr는 각
+커맨드를 **그대로 실행**하고 출력의 `Job <id>`를 파싱해 **job_id 기반**으로
+모니터링·kill 합니다(‑q/‑J/‑g 등 인자 조립·주입 없음).
+
+```python
+mgr = LsfJobManager()          # bsub_path 지정 불필요
+
+js = mgr.submit_wrapper([
+    "primesim_sub -q normal run_0.sp",         # job 마다 다른 wrapper 가능
+    ["verilog_sub", "-q", "long", "tb_1.v"],   # 문자열 또는 토큰 리스트
+    "primesim_sub -q short run_2.sp",
+], workers=8, max_retry=3)
+```
+
+- wrapper는 결국 `bsub`를 호출하고 그 `Job <id>` 출력·exit code를 그대로 통과시키면
+  됩니다. 재시도는 **비정상 종료(non-zero)만** 대상입니다.
+- 모니터링·kill용 `bjobs`/`bkill`은 실제 LSF면 PATH, mocklsf면 경로를 지정합니다.
+
+> 작성 규칙·실행 방식(멀티 프로세스)·검증·트러블슈팅, 그리고 lsfmgr가 직접 bsub를
+> 조립하는 저수준 `submit`(+`bsub_path`)은 **[`docs/wrapper_guide.md`](docs/wrapper_guide.md)**
+> 에 정리되어 있습니다.
 
 ---
 
@@ -268,3 +293,43 @@ worker 예외는 스레드를 죽이지 않고 로그 + `js.error` Signal로 전
 필요한 경우, manager의 전역 Signal을 직접 쓸 수 있습니다
 (`jobset_updated(jsid, summary)`, `jobs_updated(jsid, records)` 등 —
 핸들 Signal과 동일 이벤트의 이중 발행). 일반적인 경우엔 핸들 API로 충분합니다.
+
+---
+
+## 10. MockLSF — 실제 LSF 없이 테스트하기 (`mocklsf`)
+
+실제 LSF 서버가 없는 환경에서도 lsfmgr를 개발·테스트할 수 있도록,
+`bsub`/`bjobs`/`bkill` 등의 명령을 흉내내는 가상 스케줄러 `mocklsf` 패키지가
+함께 포함되어 있습니다. 표준 라이브러리만 사용하며 별도 의존성이 없습니다.
+
+`bin/`의 래퍼 스크립트를 PATH 앞에 두면 앱이 부르는 LSF 명령이 그대로 가상
+구현으로 대체됩니다.
+
+```bash
+export PATH="$PWD/bin:$PATH"
+mocklsfd start                 # 가상 스케줄러 데몬 기동 (bsub 최초 호출 시 자동 기동도 됨)
+
+bsub -q normal -J myjob sleep 30
+bjobs                          # PEND→RUN→DONE/EXIT 상태 전이를 시간에 따라 재현
+```
+
+- 상태는 SQLite(`$MOCKLSF_HOME/state.db`)에 저장되어 각 명령이 독립 프로세스로
+  실행돼도 상태를 공유합니다(앱이 명령을 subprocess로 호출하는 구조와 일치).
+- 큐·타이밍·실패율 등은 환경변수로 조정할 수 있습니다(`MOCKLSF_*`).
+
+### 툴별 제출 wrapper (`primesim_sub` / `finesim_sub` / `spectrefx_sub` / `verilog_sub`)
+
+2.1절의 `submit_wrapper` 구조를 실제로 테스트할 수 있도록, EDA 툴 전용 제출
+스크립트를 흉내낸 bash wrapper 4종이 `bin/`에 함께 들어 있습니다. 각 wrapper는
+받은 인자를 그대로 같은 `bin/`의 `bsub`에 전달하고, bsub의 출력을 손대지 않고
+통과시킬 뿐입니다.
+
+```bash
+primesim_sub -q normal run1.sp   # == bsub -q normal run1.sp → "Job <id> ..."
+```
+
+`submit_wrapper`에 이 커맨드들을 그대로 넘기면 lsfmgr가 실행하고 `Job <id>`를
+파싱해 job_id 기반으로 관리합니다. job 마다 다른 wrapper를 섞어 쓸 수 있습니다.
+
+실제 환경에서 wrapper를 작성·지정하는 방법은 **[`docs/wrapper_guide.md`](docs/wrapper_guide.md)**,
+mocklsf 자체는 [`docs/mocklsf.md`](docs/mocklsf.md)를 참고하세요.

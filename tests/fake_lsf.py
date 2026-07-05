@@ -251,6 +251,21 @@ class FakeLsf:
     def _do_bgdel(self, args: List[str]) -> CommandResult:
         return CommandResult(0, "Job group was deleted\n", "")
 
+    # ------------------------------------------------------------------
+    # primesim_sub — bsub를 호출하는 wrapper 흉내 (전처리 후 bsub로 위임).
+    # 자기 인자(--proj X)를 소비하고 나머지 bsub 옵션은 그대로 넘긴 뒤,
+    # bsub의 출력("Job <id> ...")을 그대로 반환한다.
+    # ------------------------------------------------------------------
+    def _do_primesim_sub(self, args: List[str]) -> CommandResult:
+        i = 0
+        while i < len(args) and args[i] == "--proj":
+            i += 2                         # 전처리용 자기 인자 소비
+        return self._do_bsub(args[i:])
+
+    # verilog_sub — 또 다른 툴 wrapper (job 마다 다른 wrapper 시연/‏테스트용).
+    def _do_verilog_sub(self, args: List[str]) -> CommandResult:
+        return self._do_bsub(args)
+
 
 def _parse_opts(args: List[str], with_value: set, flags: set = frozenset()):
     """단순 옵션 파서 — {opt: value}, 나머지 인자 리스트 반환."""

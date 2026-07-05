@@ -11,7 +11,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
-from .config import LsfConfig
+from .config import LsfConfig, cmd_tokens
 from .errors import ArgMaxExceededError, LsfCommandError, SubmitError
 from .states import LSF_STAT_MAP, JobState
 
@@ -81,6 +81,11 @@ class LsfCommand:
         self.config = config or LsfConfig()
         self.runner = runner or default_runner
 
+    @staticmethod
+    def _prog_len(path) -> int:
+        """chunk_args의 base_len 예약치 — wrapper(다중 토큰)의 총 길이."""
+        return sum(len(t) + 1 for t in cmd_tokens(path))
+
     def _run(self, argv: Sequence[str], timeout: float) -> CommandResult:
         """runner 호출 + NFR-6 DEBUG 로깅 (명령 원문/stdout/stderr)."""
         log.debug("실행: %s", " ".join(argv))
@@ -146,7 +151,7 @@ class LsfCommand:
     def _bsub_argv(self, command: str, *, queue, job_name, group_path,
                    resources, outfile, errfile, extra_args,
                    env=None) -> List[str]:
-        argv = [self.config.bsub_path]
+        argv = cmd_tokens(self.config.bsub_path)   # wrapper면 여러 토큰
         q = queue if queue is not None else self.config.default_queue
         if q:
             argv += ["-q", q]
@@ -173,6 +178,38 @@ class LsfCommand:
         return argv
 
     # ------------------------------------------------------------------
+    # submit_wrapper — wrapper 커맨드를 '그대로' 실행하고 job_id 만 파싱
+    # ------------------------------------------------------------------
+    def run_submit(self, argv: Sequence[str],
+                   timeout_s: Optional[float] = None) -> int:
+        """wrapper 커맨드(argv)를 조립 없이 그대로 실행하고 'Job <id>' 파싱.
+
+        lsfmgr 가 -q/-J/-g 등을 붙이지 않는다 — argv 전체가 사용자가 준 wrapper
+        커맨드(예: ["primesim_sub", "-i", "a.sp"])다. 실패 분류(FR-2.1):
+          - rc != 0            → BSUB_EXIT_<rc>   (재시도 O — 일시적 오류 가정)
+          - timeout            → BSUB_TIMEOUT     (재시도 X — 중복 제출 위험)
+          - 'Job <id>' 없음    → NO_JOBID_PARSED  (재시도 X — 이미 제출됐을 수 있음)
+        """
+        to = timeout_s if timeout_s is not None else self.config.submit_timeout_s
+        try:
+            res = self._run(list(argv), to)
+        except subprocess.TimeoutExpired:
+            raise SubmitError("wrapper timeout", fail_reason="BSUB_TIMEOUT",
+                              retryable=False)
+        if res.returncode != 0:
+            raise SubmitError(
+                f"wrapper exit {res.returncode}: {res.stderr.strip()[:200]}",
+                fail_reason=f"BSUB_EXIT_{res.returncode}",
+                returncode=res.returncode, stderr=res.stderr, retryable=True)
+        m = _JOB_ID_RE.search(res.stdout)
+        if not m:
+            raise SubmitError(
+                f"job id 파싱 실패: {res.stdout.strip()[:200]}",
+                fail_reason="NO_JOBID_PARSED", stderr=res.stderr,
+                retryable=False)
+        return int(m.group(1))
+
+    # ------------------------------------------------------------------
     # bjobs — 조회 (FR-4.1 전략별 변형)
     # ------------------------------------------------------------------
     # 필드 폭 명시 필수 — LSF -o는 폭 미지정 시 기본 폭(JOBID 7자 등)으로
@@ -180,8 +217,8 @@ class LsfCommand:
     _BJOBS_FMT = "jobid:20 stat:12 exit_code:12 jobname:128 delimiter=';'"
 
     def _bjobs(self, selector: List[str]) -> List[JobStatus]:
-        argv = [self.config.bjobs_path, "-a", "-noheader",
-                "-o", self._BJOBS_FMT] + selector
+        argv = cmd_tokens(self.config.bjobs_path) + [
+            "-a", "-noheader", "-o", self._BJOBS_FMT] + selector
         res = self._run_query(argv)
         if res is None:
             return []
@@ -197,25 +234,31 @@ class LsfCommand:
         """job_id 목록 chunked 조회 — 최후 수단 (graceful degradation)."""
         out: List[JobStatus] = []
         ids = [str(i) for i in job_ids]
-        base = len(self.config.bjobs_path) + 40
+        base = self._prog_len(self.config.bjobs_path) + 40
         for chunk in chunk_args(ids, self.config.chunk_size,
                                 self.config.arg_max, base):
             out.extend(self._bjobs(chunk))
         return out
 
-    def _run_query(self, argv: List[str]) -> Optional[CommandResult]:
+    def _run_or_nomatch(self, argv: List[str],
+                        timeout: float) -> Optional[CommandResult]:
+        """실행 후 결과 반환. '매칭 job 없음'은 None (정상 빈 결과)이고,
+        timeout/비정상 종료는 LsfCommandError — 장애와 없음을 구분한다."""
         try:
-            res = self._run(argv, self.config.query_timeout_s)
+            res = self._run(argv, timeout)
         except subprocess.TimeoutExpired:
             raise LsfCommandError(f"{argv[0]} timeout")
         if res.returncode != 0:
             msg = (res.stderr + res.stdout).lower()
             if any(p in msg for p in _NO_JOB_PATTERNS):
-                return None                      # 매칭 없음은 정상 (빈 결과)
+                return None
             raise LsfCommandError(
                 f"{argv[0]} exit {res.returncode}: {res.stderr.strip()[:200]}",
                 returncode=res.returncode, stderr=res.stderr)
         return res
+
+    def _run_query(self, argv: List[str]) -> Optional[CommandResult]:
+        return self._run_or_nomatch(argv, self.config.query_timeout_s)
 
     @staticmethod
     def _parse_bjobs(stdout: str) -> List[JobStatus]:
@@ -265,10 +308,10 @@ class LsfCommand:
         """
         result: Dict[LsfCommand.BhistKey, Tuple[JobState, Optional[int]]] = {}
         ids = [str(i) for i in job_ids]
-        base = len(self.config.bhist_path) + 20
+        base = self._prog_len(self.config.bhist_path) + 20
         for chunk in chunk_args(ids, self.config.chunk_size,
                                 self.config.arg_max, base):
-            argv = [self.config.bhist_path, "-l", "-n", "0"] + chunk
+            argv = cmd_tokens(self.config.bhist_path) + ["-l", "-n", "0"] + chunk
             res = self._run_query(argv)
             if res is None:
                 continue
@@ -306,29 +349,30 @@ class LsfCommand:
                        state_filter: Optional[str] = None) -> bool:
         """반환: 실제 kill 대상이 매칭되었는지. False(no-match)면 호출자는
         이 부착물이 job을 커버하지 못한 것으로 보고 fallback해야 한다."""
-        argv = [self.config.bkill_path, "-g", group_path]
+        argv = cmd_tokens(self.config.bkill_path) + ["-g", group_path]
         if state_filter:
             argv += ["-stat", state_filter.lower()]
         argv.append("0")                          # 0 == group 내 전체
         return self._run_kill(argv)
 
     def bkill_by_name(self, pattern: str) -> bool:
-        return self._run_kill([self.config.bkill_path, "-J", pattern, "0"])
+        return self._run_kill(
+            cmd_tokens(self.config.bkill_path) + ["-J", pattern, "0"])
 
     def bkill_array(self, array_job_id: int,
                     index_range: Optional[Tuple[int, int]] = None) -> bool:
         target = (f"{array_job_id}[{index_range[0]}-{index_range[1]}]"
                   if index_range else str(array_job_id))
-        return self._run_kill([self.config.bkill_path, target])
+        return self._run_kill(cmd_tokens(self.config.bkill_path) + [target])
 
     def bkill_targets(self, targets: Sequence[str]) -> int:
         """chunked bkill — "id" 또는 "id[idx]"(array element) 형태 허용.
         ARG_MAX 안전 (④ 최후 수단). 반환: LSF 호출 횟수."""
         calls = 0
-        base = len(self.config.bkill_path) + 10
+        base = self._prog_len(self.config.bkill_path) + 10
         for chunk in chunk_args(list(targets), self.config.chunk_size,
                                 self.config.arg_max, base):
-            self._run_kill([self.config.bkill_path] + chunk)
+            self._run_kill(cmd_tokens(self.config.bkill_path) + chunk)
             calls += 1
         return calls
 
@@ -336,46 +380,35 @@ class LsfCommand:
         return self.bkill_targets([str(i) for i in job_ids])
 
     def _run_kill(self, argv: List[str]) -> bool:
-        """반환: 매칭된 job이 있었는지 (no-match는 예외가 아니라 False)."""
-        try:
-            res = self._run(argv, self.config.kill_timeout_s)
-        except subprocess.TimeoutExpired:
-            raise LsfCommandError(f"{argv[0]} timeout")
-        if res.returncode != 0:
-            msg = (res.stderr + res.stdout).lower()
-            if any(p in msg for p in _NO_JOB_PATTERNS):
-                return False                      # 대상 없음 — 커버 실패 신호
-            raise LsfCommandError(
-                f"bkill exit {res.returncode}: {res.stderr.strip()[:200]}",
-                returncode=res.returncode, stderr=res.stderr)
-        return True
+        """반환: 매칭된 job이 있었는지 (no-match는 예외가 아니라 False —
+        커버 실패 신호로, 호출자가 fallback을 결정한다)."""
+        return self._run_or_nomatch(argv, self.config.kill_timeout_s) is not None
 
     # ------------------------------------------------------------------
     # bmod / bgdel
     # ------------------------------------------------------------------
-    def bmod_group(self, job_ids: Sequence[int], group_path: str) -> None:
-        """기존 job을 LSF group에 편입 (FR-5.4 sync_lsf). 실패는 경고만
-        — timeout 포함 어떤 실패도 호출자에게 전파하지 않는다."""
-        ids = [str(i) for i in job_ids]
-        base = len(self.config.bmod_path) + len(group_path) + 10
-        for chunk in chunk_args(ids, self.config.chunk_size,
-                                self.config.arg_max, base):
-            argv = [self.config.bmod_path, "-g", group_path] + chunk
-            try:
-                res = self._run(argv, self.config.kill_timeout_s)
-            except subprocess.TimeoutExpired:
-                log.warning("bmod -g timeout (무시)")
-                continue
-            if res.returncode != 0:
-                log.warning("bmod -g 실패 (무시): %s", res.stderr.strip())
-
-    def bgdel(self, group_path: str) -> None:
-        """LSF group 삭제 (FR-5.7 close). 실패는 경고만 — timeout 포함."""
+    def _run_lenient(self, argv: List[str], what: str) -> None:
+        """부가 작업용 실행 — timeout 포함 어떤 실패도 경고 로그만 남기고
+        호출자에게 전파하지 않는다 (bmod/bgdel은 실패해도 본 작업과 무관)."""
         try:
-            res = self._run([self.config.bgdel_path, group_path],
-                            self.config.kill_timeout_s)
+            res = self._run(argv, self.config.kill_timeout_s)
         except subprocess.TimeoutExpired:
-            log.warning("bgdel timeout (무시)")
+            log.warning("%s timeout (무시)", what)
             return
         if res.returncode != 0:
-            log.warning("bgdel 실패 (무시): %s", res.stderr.strip())
+            log.warning("%s 실패 (무시): %s", what, res.stderr.strip())
+
+    def bmod_group(self, job_ids: Sequence[int], group_path: str) -> None:
+        """기존 job을 LSF group에 편입 (FR-5.4 sync_lsf)."""
+        ids = [str(i) for i in job_ids]
+        base = self._prog_len(self.config.bmod_path) + len(group_path) + 10
+        for chunk in chunk_args(ids, self.config.chunk_size,
+                                self.config.arg_max, base):
+            self._run_lenient(
+                cmd_tokens(self.config.bmod_path) + ["-g", group_path] + chunk,
+                "bmod -g")
+
+    def bgdel(self, group_path: str) -> None:
+        """LSF group 삭제 (FR-5.7 close)."""
+        self._run_lenient(
+            cmd_tokens(self.config.bgdel_path) + [group_path], "bgdel")

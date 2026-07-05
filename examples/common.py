@@ -1,18 +1,153 @@
 """예제 공통 유틸 — manager 생성, 로깅, 자동 종료(스모크 테스트용).
 
-모든 예제는 기본으로 SimulatedLsf(시뮬레이터)를 사용한다.
-실제 LSF cluster에서 돌리려면 환경변수 LSFMGR_REAL=1 을 설정하면 된다.
+모든 예제는 기본으로 **mocklsf**(저장소 동봉 가상 LSF)를 테스트 환경으로 쓴다.
+실제 LSF cluster 명령이 아니라 `bin/`의 가상 명령을 subprocess 로 호출하며,
+job 제출은 `primesim_sub` 같은 wrapper 를 거쳐 mocklsf 의 bsub 로 이어진다.
+
+- 기본 제출 wrapper: `primesim_sub` (finesim_sub / spectrefx_sub 로 교체 가능)
+- mocklsf 상태는 프로세스별 임시 `MOCKLSF_HOME`(SQLite)에 격리되고, 종료 시 정리
+- 타이밍/실패율은 MOCKLSF_* 환경변수로 조정 (configure_mocklsf 헬퍼)
+
+실제 LSF cluster 에서 돌리려면 환경변수 LSFMGR_REAL=1 을 설정하면 된다.
 """
 from __future__ import annotations
 
+import atexit
 import logging
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 
 from qtpy.QtCore import QTimer
 
 from lsfmgr import LsfJobManager
-from mock_lsf import SimulatedLsf
+
+# --- 경로: 저장소 루트/bin (예제는 examples/ 하위) --------------------------
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BIN = os.path.join(_REPO_ROOT, "bin")
+
+#: 기본 제출 wrapper — 실제 EDA 환경의 툴 전용 제출 스크립트를 흉내낸다.
+DEFAULT_WRAPPER = "primesim_sub"
+
+#: 데모에서 고를 수 있는 툴별 제출 wrapper (job 마다 다른 wrapper 사용 가능).
+WRAPPERS = ["primesim_sub", "finesim_sub", "spectrefx_sub", "verilog_sub"]
+
+_REAL = os.environ.get("LSFMGR_REAL") == "1"
+
+
+def wrapper(tool: str, *args) -> list:
+    """submit_wrapper 에 넘길 wrapper 커맨드(토큰 리스트)를 만든다.
+
+    mocklsf 모드에서는 `bin/<tool>` 절대경로를, 실제 LSF 모드에서는 PATH 의
+    `<tool>` 이름을 프로그램으로 쓴다.
+    """
+    prog = tool if _REAL else os.path.join(BIN, tool)
+    return [prog, *[str(a) for a in args]]
+
+
+# ---------------------------------------------------------------------------
+# mocklsf 테스트 환경 셋업
+# ---------------------------------------------------------------------------
+
+def _init_mocklsf_home() -> str:
+    """프로세스 전용 MOCKLSF_HOME 을 임시 디렉토리로 격리한다.
+
+    각 예제 실행이 깨끗한 상태에서 시작하고, 이전 실행의 데몬/DB 와 섞이지
+    않도록 한다. 종료 시 데몬 정지 + 디렉토리 정리를 atexit 로 예약한다.
+    """
+    home = tempfile.mkdtemp(prefix="lsfmgr_examples_")
+    os.environ["MOCKLSF_HOME"] = home
+
+    @atexit.register
+    def _cleanup():
+        try:
+            subprocess.run([os.path.join(BIN, "mocklsfd"), "stop"],
+                           timeout=10, capture_output=True)
+        except Exception:
+            pass
+        shutil.rmtree(home, ignore_errors=True)
+
+    return home
+
+
+def configure_mocklsf(*, pend=None, run=None, submit_delay=None,
+                      submit_fail_rate=None, exit_rate=None,
+                      suspend_rate=None, slots_per_host=None) -> None:
+    """mocklsf 타이밍/실패율을 MOCKLSF_* 환경변수로 설정한다.
+
+    데몬은 첫 submit 시 기동하며 그때의 환경을 읽으므로, 이 함수는 반드시
+    submit **이전**(예: 예제 상단)에서 호출해야 반영된다.
+    (min, max) 튜플 또는 단일 값을 받는다. 실제 LSF 모드에선 무시된다.
+    """
+    if _REAL:
+        return
+
+    def _pair(name, value):
+        if value is None:
+            return
+        lo, hi = value if isinstance(value, (tuple, list)) else (value, value)
+        os.environ[f"MOCKLSF_{name}_MIN"] = str(lo)
+        os.environ[f"MOCKLSF_{name}_MAX"] = str(hi)
+
+    _pair("SUBMIT_DELAY", submit_delay)
+    _pair("PEND", pend)
+    _pair("RUN", run)
+    if submit_fail_rate is not None:
+        os.environ["MOCKLSF_SUBMIT_FAIL_RATE"] = str(submit_fail_rate)
+    if exit_rate is not None:
+        os.environ["MOCKLSF_EXIT_RATE"] = str(exit_rate)
+    if suspend_rate is not None:
+        os.environ["MOCKLSF_SUSPEND_RATE"] = str(suspend_rate)
+    if slots_per_host is not None:
+        os.environ["MOCKLSF_SLOTS_PER_HOST"] = str(slots_per_host)
+
+
+# 프로세스 시작 시 1회: 격리 홈 + 데모용 빠른 기본 타이밍.
+if not _REAL:
+    _init_mocklsf_home()
+    configure_mocklsf(
+        submit_delay=0,          # bsub 제출 지연 제거 (대량 submit 이 빠르게)
+        pend=(1, 3),
+        run=(3, 8),
+        submit_fail_rate=0,      # 기본은 실패 주입 없음 (06 에서 켠다)
+        exit_rate=0.05,          # 소수는 EXIT 로 (상태 색상 데모용)
+        suspend_rate=0,
+        slots_per_host=32,       # 총 128 슬롯 — 데모 동시 실행량 확보
+    )
+
+
+# ---------------------------------------------------------------------------
+# manager 생성
+# ---------------------------------------------------------------------------
+
+def mocklsf_paths(wrapper: str = DEFAULT_WRAPPER) -> dict:
+    """LsfJobManager 에 넘길 mocklsf 명령 경로 kwargs.
+
+    실제 LSF 모드(LSFMGR_REAL=1)면 빈 dict — PATH 의 실제 LSF 명령을 쓴다.
+    그 외엔 bsub 를 wrapper 로, 나머지 명령을 mocklsf 가상 명령으로 지정한다.
+    """
+    if _REAL:
+        return {}
+    return {
+        "bsub_path": os.path.join(BIN, wrapper),      # 제출은 wrapper 경유
+        "bjobs_path": os.path.join(BIN, "bjobs"),
+        "bkill_path": os.path.join(BIN, "bkill"),
+        "bhist_path": os.path.join(BIN, "bhist"),
+        "bmod_path": os.path.join(BIN, "bmod"),
+        "bgdel_path": os.path.join(BIN, "bgdel"),
+    }
+
+
+def make_manager(wrapper: str = DEFAULT_WRAPPER,
+                 **mgr_kwargs) -> tuple[LsfJobManager, None]:
+    """예제용 manager 생성 — mocklsf 명령 경로를 주입한다.
+
+    반환은 (manager, None) 2-튜플 (과거 시그니처 호환용 자리).
+    """
+    mgr = LsfJobManager(**mocklsf_paths(wrapper), **mgr_kwargs)
+    return mgr, None
 
 
 def install_logging(level: int = logging.INFO) -> None:
@@ -24,15 +159,6 @@ def install_logging(level: int = logging.INFO) -> None:
     logger = logging.getLogger("lsfmgr")
     logger.setLevel(level)
     logger.addHandler(handler)
-
-
-def make_manager(sim: SimulatedLsf | None = None,
-                 **mgr_kwargs) -> tuple[LsfJobManager, SimulatedLsf | None]:
-    """예제용 manager 생성. (manager, simulator|None) 반환."""
-    if os.environ.get("LSFMGR_REAL") == "1":
-        return LsfJobManager(**mgr_kwargs), None       # 실제 LSF 사용
-    sim = sim or SimulatedLsf()
-    return LsfJobManager(runner=sim, **mgr_kwargs), sim
 
 
 def maybe_autoquit(app) -> None:

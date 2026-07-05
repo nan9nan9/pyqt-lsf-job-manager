@@ -1,0 +1,444 @@
+#!/usr/bin/env python3
+"""lsfmgr 통합 데모 — 단일 GUI 대시보드.
+
+하나의 화면에서 lsfmgr 의 주요 기능을 모두 다룬다:
+  - submit_wrapper 로 제출 + 진행률 바 / 취소   (QT-5/QT-6, rate limit)
+  - job 마다 다른 wrapper (primesim_sub/verilog_sub …) 또는 '혼합'
+  - 다중 JobSet 관리 + 요약 실시간 갱신        (Facade Signal, README §9)
+  - 선택 JobSet 의 job 단위 모니터링 테이블     (상태별 색, jobs_updated 배치)
+  - kill 전략: 전체 / PEND만 / verify           (FR-3, KillReport — job_id 기반)
+  - 실패 처리: retry(비정상 종료) / SUBMIT_FAILED / EXIT / detect_lost
+  - SQLite 영속 + 세션 복원                     (orphan → recover → reconcile, FR-6)
+
+제출은 wrapper 커맨드(예: `primesim_sub -q normal run_3.sp`)를 그대로 실행하고
+그 결과의 `Job <id>` 로 job 을 관리한다. 테스트 환경은 저장소 동봉 mocklsf 이며,
+실제 LSF 에서 돌리려면 LSFMGR_REAL=1 을 준다.
+
+실행:  python examples/dashboard.py
+"""
+import os
+import re
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from qtpy.QtCore import QObject, Qt, QTimer, Signal
+from qtpy.QtGui import QBrush, QColor
+from qtpy.QtWidgets import (
+    QApplication, QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout,
+    QLabel, QLineEdit, QPlainTextEdit, QProgressBar, QPushButton, QSpinBox,
+    QSplitter, QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget,
+)
+
+from lsfmgr import JobState, LsfJobManager
+from lsfmgr.command import default_runner
+from common import (
+    WRAPPERS, configure_mocklsf, install_logging, maybe_autoquit,
+    mocklsf_paths, wrapper,
+)
+
+
+class _LogBus(QObject):
+    """worker 스레드 → GUI 로 로그를 안전하게 전달하는 Signal 버스.
+
+    runner 는 QThreadPool worker(비-GUI 스레드)에서 돌기 때문에, 위젯을 직접
+    건드리지 않고 Signal 로 보낸다(크로스 스레드 → 자동 queued 연결).
+    """
+    line = Signal(str)
+
+
+_JOB_ID_RE = re.compile(r"Job <([^>]+)>")
+
+
+def make_logging_runner(bus: _LogBus):
+    """default_runner 를 감싸, 실제 실행된 '제출 명령'과 할당된 job_id 를 로깅.
+
+    lsfmgr 는 submit 마다 이 runner 로 argv(맨 앞이 primesim_sub wrapper)를
+    subprocess 실행한다. 여기서 그 argv 원문과 stdout 의 'Job <id>' 를 남긴다.
+    조회/종료(bjobs/bkill 등)는 제외하고 제출 명령만 로깅한다.
+    """
+    def runner(argv, timeout):
+        res = default_runner(argv, timeout)
+        prog = os.path.basename(str(argv[0]))
+        if prog.endswith("_sub") or prog == "bsub":       # 제출 명령만
+            shown = " ".join([prog] + [str(a) for a in argv[1:]])
+            m = _JOB_ID_RE.search(res.stdout)
+            if m:
+                bus.line.emit(f"  $ {shown}")
+                bus.line.emit(f"      → 할당 job_id = {m.group(1)} (rc=0)")
+            else:
+                bus.line.emit(f"  $ {shown}")
+                bus.line.emit(f"      → 제출 실패 (rc={res.returncode}): "
+                              f"{res.stderr.strip()[:80]}")
+        return res
+    return runner
+
+# 데모용 타이밍/실패 주입 — retry(SUBMIT_FAILED)·EXIT 상태를 관찰 가능하게 한다.
+configure_mocklsf(pend=(1, 4), run=(4, 10), submit_fail_rate=0.12,
+                  exit_rate=0.12)
+
+# 세션 복원 데모용 영속 DB (lsfmgr JobSet 메타 저장소; mocklsf 상태와는 별개).
+DB = os.path.join(tempfile.gettempdir(), "lsfmgr_demo_dashboard.db")
+
+# job 상태별 색 (모니터링 테이블).
+_STATE_COLOR = {
+    JobState.PEND: "#808080",
+    JobState.RUN: "#1565c0",
+    JobState.DONE: "#2e7d32",
+    JobState.EXIT: "#c62828",
+    JobState.SUBMIT_FAILED: "#c62828",
+    JobState.LOST: "#8e24aa",
+    JobState.RETRY_WAIT: "#ef6c00",
+}
+
+
+class SubmitForm(QGroupBox):
+    """submit_wrapper 옵션 폼. job 마다 wrapper(primesim_sub 등)로 제출한다."""
+
+    def __init__(self, on_submit):
+        super().__init__("Submit 옵션 (submit_wrapper)")
+        self.count = QSpinBox(minimum=1, maximum=10000, value=30)
+        self.workers = QSpinBox(minimum=1, maximum=32, value=8)
+        self.max_retry = QSpinBox(minimum=0, maximum=10, value=3)
+        self.rate = QSpinBox(minimum=0, maximum=1000, value=0)   # 0=제한 없음
+        self.wrapper = QComboBox()
+        # 개별 wrapper + '혼합' — job 마다 다른 wrapper 를 쓰는 실제 환경 시연.
+        self.wrapper.addItems(WRAPPERS + ["혼합(mix)"])
+        self.queue = QLineEdit("normal")         # wrapper 에 -q 로 전달됨
+        self.label = QLineEdit("sweep")
+        self.auto_poll = QCheckBox("auto_poll (AUTO-1)")
+        self.auto_poll.setChecked(True)
+        btn = QPushButton("Submit")
+        btn.clicked.connect(on_submit)
+
+        form = QFormLayout(self)
+        form.addRow("job 수", self.count)
+        form.addRow("workers", self.workers)
+        form.addRow("max_retry", self.max_retry)
+        form.addRow("rate_limit/s", self.rate)
+        form.addRow("wrapper", self.wrapper)
+        form.addRow("queue", self.queue)
+        form.addRow("label", self.label)
+        form.addRow(self.auto_poll)
+        form.addRow(btn)
+
+    def commands(self):
+        """job 마다 wrapper 커맨드(토큰 리스트)를 만든다.
+
+        '혼합' 선택 시 job 마다 다른 wrapper 를 순환 사용한다 — 실제 환경에서
+        job 별로 primesim_sub/verilog_sub 등이 섞이는 상황을 재현한다.
+        """
+        n = self.count.value()
+        q = self.queue.text().strip()
+        sel = self.wrapper.currentText()
+
+        def one(i):
+            tool = WRAPPERS[i % len(WRAPPERS)] if sel == "혼합(mix)" else sel
+            args = (["-q", q] if q else []) + [f"run_{i}.sp"]
+            return wrapper(tool, *args)          # bin/<tool> 절대경로 + 인자
+
+        return [one(i) for i in range(n)]
+
+    def call_kwargs(self) -> dict:
+        kw = dict(workers=self.workers.value(),
+                  max_retry=self.max_retry.value(),
+                  label=self.label.text(),
+                  auto_poll=self.auto_poll.isChecked())
+        if self.rate.value() > 0:
+            kw["rate_limit_per_s"] = self.rate.value()
+        return kw
+
+
+class Dashboard(QWidget):
+    COLS = ["jobset", "label", "total", "PEND", "RUN", "DONE",
+            "EXIT", "FAILED", "LOST"]
+    JOBCOLS = ["job name", "job id", "state", "exit", "retry", "fail reason"]
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("lsfmgr — 통합 대시보드 (mocklsf / primesim_sub)")
+        self.mgr = None
+        self._items = {}                 # jobset_id → QTreeWidgetItem
+        self._active_submit = None       # 진행률 바가 추적 중인 jobset_id
+        self._laststate = {}             # lsf_job_name → 마지막 관측 상태(전이 로깅)
+
+        # 제출 명령/‏job_id 를 worker 스레드에서 로그로 전달하는 버스.
+        self.bus = _LogBus()
+        self.bus.line.connect(self._append)
+
+        # --- 좌: 옵션 폼 ---
+        self.form = SubmitForm(self.submit)
+
+        # --- 우상: JobSet 목록 + 제어 ---
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(self.COLS)
+        self.tree.setRootIsDecorated(False)
+        for i in range(2, len(self.COLS)):
+            self.tree.setColumnWidth(i, 52)
+        self.tree.currentItemChanged.connect(lambda *_: self._reload_jobs())
+
+        ctrl = QHBoxLayout()
+        for text, fn in [("Kill+verify", self.kill),
+                         ("PEND만 Kill", self.kill_pend),
+                         ("Cancel", self.cancel), ("Refresh", self.refresh),
+                         ("detect_lost", self.detect_lost),
+                         ("Close", self.close_jobset)]:
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            ctrl.addWidget(b)
+
+        # --- 우하: 선택 JobSet 의 job 모니터링 테이블 ---
+        self.jobtable = QTableWidget(0, len(self.JOBCOLS))
+        self.jobtable.setHorizontalHeaderLabels(self.JOBCOLS)
+        self.jobtable.verticalHeader().setVisible(False)
+        self.jobtable.setEditTriggers(QTableWidget.NoEditTriggers)
+
+        right = QWidget()
+        rlay = QVBoxLayout(right)
+        rlay.addWidget(QLabel("JobSet 목록 (선택 후 아래 제어):"))
+        rlay.addWidget(self.tree, stretch=1)
+        rlay.addLayout(ctrl)
+        rlay.addWidget(QLabel("선택 JobSet 의 job 상태:"))
+        rlay.addWidget(self.jobtable, stretch=2)
+
+        top = QSplitter(Qt.Horizontal)
+        top.addWidget(self.form)
+        top.addWidget(right)
+        top.setStretchFactor(1, 1)
+
+        # --- 진행률 바 + 세션 복원 버튼 ---
+        self.bar = QProgressBar()
+        self.bar.setFormat("submit %v/%m")
+        self.btn_restart = QPushButton("앱 재시작 시뮬 (orphan 복원)")
+        self.btn_restart.clicked.connect(self.restart_app)
+        midbar = QHBoxLayout()
+        midbar.addWidget(self.bar, stretch=1)
+        midbar.addWidget(self.btn_restart)
+
+        # --- 하단: Facade 이벤트 로그 ---
+        self.log = QPlainTextEdit(readOnly=True)
+        self.log.setMaximumBlockCount(500)
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(top, stretch=3)
+        lay.addLayout(midbar)
+        lay.addWidget(QLabel("Facade Signal 이벤트 스트림 (전 JobSet 공통):"))
+        lay.addWidget(self.log, stretch=1)
+
+    # ------------------------------------------------------------------
+    # manager 바인딩 (최초 + 세션 복원 시 재바인딩)
+    # ------------------------------------------------------------------
+    def _new_manager(self):
+        """로깅 runner 를 주입한 manager 생성 (제출 명령/‏job_id 로그용)."""
+        return new_manager(runner=make_logging_runner(self.bus))
+
+    def bind_manager(self, mgr):
+        self.mgr = mgr
+        mgr.submit_started.connect(lambda j: self._log(j, "submit_started"))
+        mgr.submit_progress.connect(self._on_progress)
+        mgr.submit_finished.connect(self._on_finished)
+        mgr.jobset_updated.connect(self._on_updated)
+        mgr.jobs_updated.connect(self._on_jobs)
+        mgr.job_lost.connect(
+            lambda j, rec: self._log(j, f"job_lost {rec.lsf_job_name}"))
+        mgr.kill_finished.connect(
+            lambda j, r: self._log(j, f"kill_finished 대상={r.requested} "
+                                      f"호출={r.command_calls}회 "
+                                      f"전략={r.strategies} 잔존={r.still_alive}"))
+        mgr.error_occurred.connect(lambda j, msg: self._log(j, f"ERROR {msg}"))
+
+    def _add_row(self, jsid, label):
+        item = QTreeWidgetItem([jsid, label] + [""] * (len(self.COLS) - 2))
+        self.tree.addTopLevelItem(item)
+        self._items[jsid] = item
+        return item
+
+    # ------------------------------------------------------------------
+    # submit
+    # ------------------------------------------------------------------
+    def submit(self):
+        if self.mgr is None:
+            return
+        kw = self.form.call_kwargs()
+        # 각 job 을 wrapper 커맨드로 제출 — lsfmgr 는 커맨드를 그대로 실행하고
+        # 'Job <id>' 를 파싱해 job_id 로 관리한다(인자 조립·주입 없음).
+        js = self.mgr.submit_wrapper(self.form.commands(), **kw)
+        self._add_row(js.id, kw.get("label", ""))
+        self._active_submit = js.id
+        self.bar.setMaximum(self.form.count.value())
+        self.bar.setValue(0)
+        js.start_polling(interval_s=1)           # 데모: 상태 전이를 촘촘히 관찰
+
+    def _on_progress(self, jsid, done, total):
+        if jsid == self._active_submit:
+            self.bar.setMaximum(total)
+            self.bar.setValue(done)
+
+    def _on_finished(self, jsid, rpt):
+        # submit_wrapper 는 커맨드 1개 = job 1개(job_id 1개).
+        recs = self.mgr.jobset(jsid).jobs()
+        n_ids = len({r.job_id for r in recs if r.job_id is not None})
+        self._log(jsid, f"submit_finished ok={rpt.ok} failed={rpt.failed} "
+                        f"retried={rpt.retried} job_id확보={n_ids} "
+                        f"({rpt.duration_s:.1f}s)")
+
+    # ------------------------------------------------------------------
+    # 선택 JobSet 제어
+    # ------------------------------------------------------------------
+    def _selected_id(self):
+        item = self.tree.currentItem()
+        return item.text(0) if item else None
+
+    def _handle(self):
+        jsid = self._selected_id()
+        return self.mgr.jobset(jsid) if (jsid and self.mgr) else None
+
+    def kill(self):
+        js = self._handle()
+        if js:
+            js.kill(verify=True)
+
+    def kill_pend(self):
+        js = self._handle()
+        if js:
+            js.kill(only_state=JobState.PEND)
+
+    def cancel(self):
+        js = self._handle()
+        if js:
+            js.cancel()
+
+    def refresh(self):
+        js = self._handle()
+        if js:
+            js.refresh()
+
+    def detect_lost(self):
+        js = self._handle()
+        if js:
+            lost = js.detect_lost()
+            self._log(js.id, f"detect_lost: LOST 확정 {len(lost)}건")
+
+    def close_jobset(self):
+        js = self._handle()
+        if not js:
+            return
+        try:
+            js.close()
+            self._log(js.id, "closed")
+        except Exception as e:               # 전원 terminal 아니면 거부
+            self._log(js.id, f"close 거부: {e}")
+
+    # ------------------------------------------------------------------
+    # 요약/모니터링 갱신
+    # ------------------------------------------------------------------
+    def _on_updated(self, jsid, s):
+        item = self._items.get(jsid)
+        if item is None:
+            return
+        vals = [s.get("total", 0), s.get("PEND", 0), s.get("RUN", 0),
+                s.get("DONE", 0), s.get("EXIT", 0),
+                s.get("SUBMIT_FAILED", 0) + s.get("RETRY_WAIT", 0),
+                s.get("LOST", 0)]
+        for col, v in enumerate(vals, start=2):
+            item.setText(col, str(v))
+
+    def _on_jobs(self, jsid, records):
+        # 변경분 배치 도착 — job 별 상태 전이를 로그로 남긴다.
+        for r in records:
+            key = r.lsf_job_name
+            cur = r.state.value
+            prev = self._laststate.get(key)
+            if prev != cur:
+                self._laststate[key] = cur
+                arrow = f"{prev} → {cur}" if prev else f"(신규) → {cur}"
+                extra = f" (exit={r.exit_code})" if r.state == JobState.EXIT \
+                    else ""
+                self._log(jsid, f"상태 {key}: {arrow}{extra}")
+        # 선택된 JobSet 이면 테이블도 다시 그린다.
+        if jsid == self._selected_id():
+            self._reload_jobs()
+
+    def _reload_jobs(self):
+        js = self._handle()
+        self.jobtable.setRowCount(0)
+        if js is None:
+            return
+        recs = js.jobs()
+        self.jobtable.setRowCount(len(recs))
+        for row, r in enumerate(recs):
+            color = _STATE_COLOR.get(r.state)
+            cells = [r.lsf_job_name, str(r.job_id or "-"), r.state.value,
+                     "" if r.exit_code is None else str(r.exit_code),
+                     str(r.retry_count), r.fail_reason or ""]
+            for col, text in enumerate(cells):
+                it = QTableWidgetItem(text)
+                if color and col == 2:
+                    it.setForeground(QBrush(QColor(color)))
+                self.jobtable.setItem(row, col, it)
+
+    # ------------------------------------------------------------------
+    # 세션 복원 (07): 앱 비정상 종료 → 재시작 → orphan 복원 → reconcile
+    # ------------------------------------------------------------------
+    def restart_app(self):
+        if self.mgr is None:
+            return
+        self._log("*", "앱 비정상 종료 — JobSet 은 DB 에, job 은 (mock)LSF 에 잔존")
+        self.mgr.shutdown()                  # close_jobset 없이 폐기 → orphan
+        self.mgr = None
+        self.tree.clear()
+        self._items.clear()
+        self.jobtable.setRowCount(0)
+        # 잠시 후 '재시작' — 그동안 mocklsf 데몬은 계속 job 을 전이시킨다.
+        QTimer.singleShot(1500, self._recover)
+
+    def _recover(self):
+        self.bind_manager(self._new_manager())
+        orphans = self.mgr.list_orphan_jobsets()   # FR-6.1 (자동 복원 없음)
+        self._log("*", f"재시작 — orphan {len(orphans)}건 발견")
+        for rec in orphans:
+            js = self.mgr.recover_jobset(rec.jobset_id)   # 핸들 복원
+            self._add_row(js.id, rec.label)
+            js.reconcile()      # 죽어있던 동안의 DONE/EXIT/LOST 반영(비동기)
+            self._log(js.id, "recover + reconcile")
+
+    def _append(self, line):
+        """로그 한 줄 그대로 출력 (버스 Signal 슬롯)."""
+        self.log.appendPlainText(line)
+
+    def _log(self, jsid, msg):
+        tag = jsid if jsid == "*" else jsid[-8:]
+        self.log.appendPlainText(f"[{tag}] {msg}")
+
+
+def new_manager(runner=None):
+    """② manager 계층 기본값 + mocklsf 경로 + 영속(세션 복원용) 로 생성.
+
+    runner 를 주면 subprocess 실행을 가로채 로깅한다(제출 명령/‏job_id).
+    """
+    return LsfJobManager(persistent=True, db_path=DB, workers=8,
+                         default_queue="normal", max_retry=3,
+                         runner=runner, **mocklsf_paths())
+
+
+def main():
+    app = QApplication(sys.argv)
+    install_logging()
+    win = Dashboard()
+    win.bind_manager(win._new_manager())
+    win.resize(1040, 760)
+    win.show()
+    maybe_autoquit(app)
+    app.exec()
+    if os.path.exists(DB) and not os.environ.get("LSFMGR_KEEP_DB"):
+        for p in (DB, DB + "-wal", DB + "-shm"):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
+if __name__ == "__main__":
+    main()

@@ -2,19 +2,25 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from dataclasses import dataclass
+from typing import List, Optional, Sequence, Tuple, Union
+
+#: LSF 명령 경로. 단일 프로그램은 str, bsub를 호출하는 wrapper처럼 고정 인자가
+#: 붙는 명령은 토큰 목록으로 지정한다 (예: ["primesim_sub", "--proj", "X"]).
+#: wrapper는 표준 bsub 옵션(-q/-J/-g/...)을 받아 bsub로 넘기고, bsub의 출력
+#: ("Job <id> ...")을 그대로 뱉으면 된다 — 파싱/추적은 bsub와 동일하다.
+CmdPath = Union[str, Sequence[str]]
 
 
 @dataclass
 class LsfConfig:
     """LSF 명령 경로/타임아웃/chunk 등 환경 설정 (NFR-7)."""
-    bsub_path: str = "bsub"
-    bjobs_path: str = "bjobs"
-    bkill_path: str = "bkill"
-    bhist_path: str = "bhist"
-    bmod_path: str = "bmod"
-    bgdel_path: str = "bgdel"
+    bsub_path: CmdPath = "bsub"       # wrapper 지원: 토큰 목록도 허용
+    bjobs_path: CmdPath = "bjobs"
+    bkill_path: CmdPath = "bkill"
+    bhist_path: CmdPath = "bhist"
+    bmod_path: CmdPath = "bmod"
+    bgdel_path: CmdPath = "bgdel"
 
     default_queue: str = ""              # 빈 문자열이면 -q 미지정
     submit_timeout_s: float = 30.0       # FR-2.1
@@ -46,6 +52,11 @@ class LsfConfig:
             os.path.expanduser("~"), ".lsfmgr", "scripts")
         os.makedirs(path, exist_ok=True)
         return path
+
+
+def cmd_tokens(path: CmdPath) -> List[str]:
+    """CmdPath를 argv 앞부분 토큰 목록으로 정규화. str이면 프로그램 1개."""
+    return [path] if isinstance(path, str) else list(path)
 
 
 @dataclass(frozen=True)

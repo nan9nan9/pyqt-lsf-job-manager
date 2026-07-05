@@ -8,9 +8,7 @@
 from __future__ import annotations
 
 import logging
-import threading
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from .command import JobStatus, LsfCommand
@@ -52,25 +50,21 @@ class JobsetQuerier:
         def collect(items: List[JobStatus]):
             for st in items:
                 statuses[(st.job_id, st.array_index)] = st
-                if st.array_index is None:
-                    statuses.setdefault((st.job_id, None), st)
                 by_name[st.job_name] = st
 
         # 조회 수단 실패("장애")와 "job이 LSF에 없음"은 반드시 구분한다 —
-        # 장애를 없음으로 오판하면 LSF 순단 1회에 전원 LOST(terminal) 확정됨
+        # 장애를 없음으로 오판하면 LSF 순단 1회에 전원 LOST(terminal) 확정됨.
+        # 하나가 실패해도 나머지 probe는 계속 수행해 최대한 수집한다.
+        probes = (
+            [(f"group {p}", lambda p=p: self.command.bjobs_by_group(p))
+             for p in js.lsf_group_paths]
+            + [(f"array {a}", lambda a=a: self.command.bjobs_by_ids([a]))
+               for a in js.array_job_ids]
+            + [(f"name {pt}", lambda pt=pt: self.command.bjobs_by_name(pt))
+               for pt in js.name_patterns])
         probe_failed = False
-        probe_failed |= not all(
-            self._try(lambda p=path: collect(
-                self.command.bjobs_by_group(p)), f"group {path}")
-            for path in js.lsf_group_paths)
-        probe_failed |= not all(
-            self._try(lambda a=aid: collect(
-                self.command.bjobs_by_ids([a])), f"array {aid}")
-            for aid in js.array_job_ids)
-        probe_failed |= not all(
-            self._try(lambda pt=pattern: collect(
-                self.command.bjobs_by_name(pt)), f"name {pattern}")
-            for pattern in js.name_patterns)
+        for what, fn in probes:
+            probe_failed |= not self._try(lambda fn=fn: collect(fn()), what)
 
         # --- 2) 부착물로 커버 안 된 job은 chunked bjobs (graceful degradation) ---
         def lookup(rec: JobRecord) -> Optional[JobStatus]:

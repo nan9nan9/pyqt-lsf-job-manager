@@ -4,6 +4,11 @@
 - 실패 시 QTimer 스케줄 retry (RETRY_WAIT → SUBMITTING, sleep 점유 없음)
 - cancel: job 단위 경계에서 안전 중단, 이미 submit된 job은 정상 기록 (QT-6)
 - worker 예외 격리 → error Signal (CS-5)
+
+retry 원장(ctx.pending_retries): QTimer 대기 중인 재시도는 pool 밖에 있어
+waitForDone이 기다려주지 않는다. 대기 중 재시도를 전부 원장에 등록해 두고,
+발화(fire)·포기(cancel/shutdown)가 원장에서의 원자적 pop으로만 결정되게
+하면 어느 쪽이 먼저 오든 정확히 한 번만 처리된다.
 """
 from __future__ import annotations
 
@@ -14,11 +19,11 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
 from .command import LsfCommand
 from .config import ArrayJobSpec, JobSpec, LsfConfig
-from .errors import SubmitError
+from .errors import LsfmgrError, SubmitError
 from .jobset_core import JobSetManager
 from .options import Options
 from .qt import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
@@ -28,6 +33,14 @@ from .store.base import JobSetStore
 from .util import EmitThrottler, TokenBucketLimiter
 
 log = logging.getLogger("lsfmgr.submit")
+
+
+@dataclass
+class _PendingRetry:
+    """QTimer 대기 중인 재시도 1건 (bulk job 1개 또는 array 1회분)."""
+    keys: List[str]                     # 포기 시 SUBMIT_FAILED 확정할 job_key들
+    delay_s: float
+    make_task: Callable[[], QRunnable]  # 발화 시 pool에 넣을 task 생성
 
 
 @dataclass
@@ -49,20 +62,25 @@ class _SubmitContext:
     cancelled: int = 0
     retried_keys: set = field(default_factory=set)
     fail_reasons: Dict[str, int] = field(default_factory=dict)
+    pending_retries: Dict[str, _PendingRetry] = field(default_factory=dict)
     finished: bool = False
 
 
-class _SubmitTask(QRunnable):
-    """bsub 1회 수행 worker. 예외는 submitter로 격리 전달 (CS-5)."""
+class _BaseSubmitTask(QRunnable):
+    """단건 submit worker 공통 골격 (CS-5: 예외는 submitter로 격리 전달).
+
+    공통 흐름(취소 확인 → SUBMITTING 전이 → rate limit → submit → 성공/‏실패
+    처리)만 여기 두고, 실제 submit 호출(`_do_submit`)과 재시도 task 생성
+    (`_retry_factory`)만 서브클래스가 구현한다.
+    """
 
     def __init__(self, submitter: "BulkSubmitter", ctx: _SubmitContext,
-                 job_key: str, spec: JobSpec, attempt: int):
+                 job_key: str, attempt: int):
         super().__init__()
         self.setAutoDelete(True)
         self.submitter = submitter
         self.ctx = ctx
         self.job_key = job_key
-        self.spec = spec
         self.attempt = attempt          # 0 == 최초 시도
 
     def run(self):
@@ -77,12 +95,39 @@ class _SubmitTask(QRunnable):
         if ctx.cancel_event.is_set():
             sub._task_cancelled(ctx, self.job_key)
             return
-        sub.store.transition(ctx.jobset_id, self.job_key,
-                             JobState.SUBMITTING)
+        sub.store.transition(ctx.jobset_id, self.job_key, JobState.SUBMITTING)
         if not ctx.limiter.acquire(ctx.cancel_event):   # rate limit (NFR-4)
             sub._task_cancelled(ctx, self.job_key)
             return
+        try:
+            job_id = self._do_submit()
+        except SubmitError as e:
+            sub._task_failed(ctx, self.job_key, self.attempt, e,
+                             self._retry_factory())
+            return
+        sub._task_succeeded(ctx, self.job_key, job_id)
 
+    # --- 서브클래스 구현 지점 ---
+    def _do_submit(self) -> int:
+        """실제 제출 수행 후 job_id 반환. 실패 시 SubmitError."""
+        raise NotImplementedError
+
+    def _retry_factory(self):
+        """attempt→새 task 를 만드는 콜백을 반환한다. 지연 실행되므로 값(로컬)만
+        캡처하고 self(autoDelete QRunnable)는 참조하지 않는다."""
+        raise NotImplementedError
+
+
+class _SubmitTask(_BaseSubmitTask):
+    """bsub 1회 수행 worker (lsfmgr 가 -q/-J/-g 등 인자를 조립)."""
+
+    def __init__(self, submitter: "BulkSubmitter", ctx: _SubmitContext,
+                 job_key: str, spec: JobSpec, attempt: int):
+        super().__init__(submitter, ctx, job_key, attempt)
+        self.spec = spec
+
+    def _do_submit(self) -> int:
+        sub, ctx = self.submitter, self.ctx
         js = sub.store.get_jobset(ctx.jobset_id)
         group = js.lsf_group_paths[0] if js.lsf_group_paths else None
         opts = ctx.options
@@ -92,23 +137,44 @@ class _SubmitTask(QRunnable):
             outfile = os.path.join(opts.output_dir, f"{self.job_key}.out")
         if opts.output_dir and not errfile:
             errfile = os.path.join(opts.output_dir, f"{self.job_key}.err")
-        try:
-            job_id = sub.command.bsub(
-                self.spec.command,
-                queue=(self.spec.queue if self.spec.queue is not None
-                       else (opts.queue or None)),
-                job_name=self.job_key,           # -J <jobset_id>_<idx> (FR-1.4)
-                group_path=group,                # -g /lsfmgr/<user>/<jsid>
-                resources=self.spec.resources or opts.resource_req,
-                outfile=outfile,
-                errfile=errfile,
-                extra_args=self.spec.extra_args,
-                env=self.spec.env,
-                timeout_s=opts.submit_timeout_s)
-        except SubmitError as e:
-            sub._task_failed(ctx, self.job_key, self.spec, self.attempt, e)
-            return
-        sub._task_succeeded(ctx, self.job_key, job_id)
+        return sub.command.bsub(
+            self.spec.command,
+            queue=(self.spec.queue if self.spec.queue is not None
+                   else (opts.queue or None)),
+            job_name=self.job_key,           # -J <jobset_id>_<idx> (FR-1.4)
+            group_path=group,                # -g /lsfmgr/<user>/<jsid>
+            resources=self.spec.resources or opts.resource_req,
+            outfile=outfile, errfile=errfile,
+            extra_args=self.spec.extra_args, env=self.spec.env,
+            timeout_s=opts.submit_timeout_s)
+
+    def _retry_factory(self):
+        sub, ctx, job_key, spec = (self.submitter, self.ctx,
+                                   self.job_key, self.spec)
+        return lambda att: _SubmitTask(sub, ctx, job_key, spec, att)
+
+
+class _WrapperSubmitTask(_BaseSubmitTask):
+    """wrapper 커맨드 1개를 '그대로' 실행하는 worker (submit_wrapper 용).
+
+    lsfmgr 는 인자를 조립하지 않는다 — argv(예: ["primesim_sub","-i","a.sp"])를
+    subprocess 로 실행하고 stdout 의 'Job <id>' 만 파싱한다. 관리는 그렇게 얻은
+    job_id 로만 이뤄진다(그룹/이름 부착물 없음).
+    """
+
+    def __init__(self, submitter: "BulkSubmitter", ctx: _SubmitContext,
+                 job_key: str, argv: Sequence[str], attempt: int):
+        super().__init__(submitter, ctx, job_key, attempt)
+        self.argv = list(argv)
+
+    def _do_submit(self) -> int:
+        return self.submitter.command.run_submit(
+            self.argv, timeout_s=self.ctx.options.submit_timeout_s)
+
+    def _retry_factory(self):
+        sub, ctx, job_key, argv = (self.submitter, self.ctx,
+                                   self.job_key, self.argv)
+        return lambda att: _WrapperSubmitTask(sub, ctx, job_key, argv, att)
 
 
 class BulkSubmitter(QObject):
@@ -118,7 +184,7 @@ class BulkSubmitter(QObject):
     finished = Signal(str, object)            # jobset_id, SubmitReport
     error = Signal(str, str)                  # jobset_id, message
     # 내부용 — worker 스레드에서 emit → submitter 소속 스레드에서 QTimer 스케줄
-    _retry_requested = Signal(str, str, object, int, float)
+    _retry_requested = Signal(str, str)       # jobset_id, 원장 키
 
     def __init__(self, store: JobSetStore, command: LsfCommand,
                  jobset_manager: JobSetManager,
@@ -140,11 +206,41 @@ class BulkSubmitter(QObject):
     def submit_bulk(self, jobset_id: str, specs: Sequence[JobSpec],
                     options: Options) -> None:
         """[async→Signal] 대량 submit. CREATED 레코드 생성 후 즉시 반환,
-        실제 bsub는 QThreadPool worker에서 수행 (QT-1). 결과는 finished."""
+        실제 bsub는 QThreadPool worker에서 수행 (QT-1). 결과는 finished.
+
+        lsfmgr 가 bsub 인자(-q/-J/-g …)를 조립하는 경로.
+        """
+        self._launch(
+            jobset_id, specs, options,
+            record_command=lambda spec: spec.command,
+            make_task=lambda ctx, key, spec: _SubmitTask(self, ctx, key,
+                                                         spec, 0))
+
+    def submit_wrappers(self, jobset_id: str, argvs: Sequence[Sequence[str]],
+                        options: Options) -> None:
+        """[async→Signal] wrapper 커맨드 대량 실행 (submit_wrapper 용).
+
+        각 argv 를 그대로 subprocess 실행하고 'Job <id>' 를 파싱한다. lsfmgr 가
+        인자를 조립하지 않고 argv 를 다루는 점만 submit_bulk 와 다르다.
+        """
+        self._launch(
+            jobset_id, argvs, options,
+            record_command=lambda argv: " ".join(argv),
+            make_task=lambda ctx, key, argv: _WrapperSubmitTask(self, ctx, key,
+                                                               argv, 0))
+
+    def _launch(self, jobset_id: str, items: Sequence, options: Options,
+                record_command: Callable[[object], str],
+                make_task: Callable[..., QRunnable]) -> None:
+        """단건 submit 공통 골격 — pool/‏ctx 구성 + CREATED 레코드 선생성 + 발화.
+
+        item(JobSpec 또는 argv)마다 make_task(ctx, job_key, item) 로 worker 를
+        만들어 병렬 실행한다. 재시도·rate limit·취소는 ctx 를 통해 공유된다.
+        """
         pool = QThreadPool()
         pool.setMaxThreadCount(options.workers)
         ctx = _SubmitContext(
-            jobset_id=jobset_id, total=len(specs),
+            jobset_id=jobset_id, total=len(items),
             max_retry=options.max_retry,
             pool=pool,
             limiter=TokenBucketLimiter(options.rate_limit_per_s),
@@ -157,11 +253,11 @@ class BulkSubmitter(QObject):
         self.store.add_jobs([
             JobRecord(job_id=None, array_index=None, jobset_id=jobset_id,
                       lsf_job_name=f"{jobset_id}_{idx}",
-                      state=JobState.CREATED, command=spec.command)
-            for idx, spec in enumerate(specs)])
-        for idx, spec in enumerate(specs):
-            pool.start(_SubmitTask(self, ctx, f"{jobset_id}_{idx}", spec, 0))
-        if not specs:
+                      state=JobState.CREATED, command=record_command(item))
+            for idx, item in enumerate(items)])
+        for idx, item in enumerate(items):
+            pool.start(make_task(ctx, f"{jobset_id}_{idx}", item))
+        if not items:
             # 동기 emit 금지 — caller(manager.submit)가 아직 핸들을 만들기
             # 전이라 finished가 유실된다. 이벤트 루프 한 바퀴 뒤로 지연.
             QTimer.singleShot(0, lambda: self._finish_if_done(ctx, force=True))
@@ -204,30 +300,16 @@ class BulkSubmitter(QObject):
             ctx.cancel_event.set()
         for ctx in contexts:
             ctx.pool.waitForDone(-1)
-        # pending retry(QTimer/큐잉된 Signal)는 pool 밖에 있어 waitForDone이
-        # 기다려주지 않고, 이벤트 루프가 곧 끝나면 영영 실행되지 않는다 —
-        # RETRY_WAIT 잔류분을 여기서 SUBMIT_FAILED로 확정하지 않으면
-        # 비terminal로 영구 잔존(persistent 모드에서는 DB 오염)하고
-        # finished Signal도 발행되지 않는다. waitForDone 이후에는 새
-        # RETRY_WAIT 전이가 없으므로 안전.
+        # QTimer 대기 중인 재시도는 이벤트 루프가 곧 끝나면 영영 발화하지
+        # 않는다 — 원장 잔류분을 여기서 확정해야 RETRY_WAIT가 비terminal로
+        # 잔존(persistent 모드에서는 DB 오염)하지 않고 finished도 발행된다.
+        # waitForDone 이후에는 원장에 새 항목이 추가되지 않는다.
         for ctx in contexts:
             with ctx.lock:
-                if ctx.finished:
-                    continue
-            try:
-                pending = self.store.get_jobs(ctx.jobset_id,
-                                              states={JobState.RETRY_WAIT})
-            except Exception:                   # noqa: BLE001 — 종료 경로 보호
-                continue
-            for rec in pending:
-                self.store.transition(ctx.jobset_id, rec.job_key,
-                                      JobState.SUBMIT_FAILED,
-                                      fail_reason=rec.fail_reason
-                                      or "SHUTDOWN")
-                with ctx.lock:
-                    ctx.done += 1
-                    ctx.failed += 1
-            self._finish_if_done(ctx)
+                entries = list(ctx.pending_retries.values())
+                ctx.pending_retries.clear()
+            for entry in entries:
+                self._finalize_retry(ctx, entry, "SHUTDOWN")
 
     # ------------------------------------------------------------------
     # worker 콜백 (worker 스레드에서 호출됨 — Store는 thread-safe)
@@ -237,49 +319,40 @@ class BulkSubmitter(QObject):
         self.store.transition(ctx.jobset_id, job_key, JobState.PEND,
                               job_id=job_id, submit_time=datetime.now(),
                               fail_reason=None)
-        with ctx.lock:
-            ctx.done += 1
-            ctx.succeeded += 1
-        self._emit_progress(ctx)
-        self._finish_if_done(ctx)
+        self._count(ctx, succeeded=True)
 
-    def _task_failed(self, ctx: _SubmitContext, job_key: str, spec: JobSpec,
-                     attempt: int, err: SubmitError) -> None:
+    def _task_failed(self, ctx: _SubmitContext, job_key: str, attempt: int,
+                     err: SubmitError,
+                     retry_factory: Callable[[int], QRunnable]) -> None:
+        """실패 처리. err.retryable=False(예: NO_JOBID_PARSED)면 재시도 없이
+        바로 SUBMIT_FAILED 확정한다. 재시도 task는 retry_factory(attempt+1)로
+        생성한다(bsub 경로/‏wrapper 경로가 각자 자기 task 를 만든다)."""
         log.warning("submit 실패 [%s] %s: %s", err.fail_reason, job_key, err)
-        if (attempt < ctx.max_retry and not ctx.cancel_event.is_set()
-                and not self._shutdown):
+        if (getattr(err, "retryable", True) and attempt < ctx.max_retry
+                and not ctx.cancel_event.is_set() and not self._shutdown):
             # RETRY_WAIT → QTimer 스케줄 (스레드 sleep 점유 금지, §3.2)
             self.store.transition(ctx.jobset_id, job_key, JobState.RETRY_WAIT,
                                   retry_count=attempt + 1,
                                   fail_reason=err.fail_reason)
             with ctx.lock:
                 ctx.retried_keys.add(job_key)
-            delay = ctx.options.retry_delay_s(attempt)
-            self._retry_requested.emit(ctx.jobset_id, job_key, spec,
-                                       attempt + 1, delay)
+            self._schedule_retry(
+                ctx, [job_key], ctx.options.retry_delay_s(attempt),
+                lambda: retry_factory(attempt + 1))
             return
         log.error("SUBMIT_FAILED 확정 [%s] %s (%d회 시도)",
                   err.fail_reason, job_key, attempt + 1)      # NFR-6 ERROR
         self.store.transition(ctx.jobset_id, job_key, JobState.SUBMIT_FAILED,
                               retry_count=attempt,
                               fail_reason=err.fail_reason)
-        with ctx.lock:
-            ctx.done += 1
-            ctx.failed += 1
-            ctx.fail_reasons[err.fail_reason] = (
-                ctx.fail_reasons.get(err.fail_reason, 0) + 1)
-        self._emit_progress(ctx)
-        self._finish_if_done(ctx)
+        self._count(ctx, failed=True, reason=err.fail_reason)
 
     def _task_cancelled(self, ctx: _SubmitContext, job_key: str) -> None:
         # 아직 submit 전이므로 CREATED로 되돌림 (안전 지점 중단, QT-6)
         rec = self.store.get_job(ctx.jobset_id, job_key)
         if rec.state in (JobState.SUBMITTING, JobState.RETRY_WAIT):
             self.store.transition(ctx.jobset_id, job_key, JobState.CREATED)
-        with ctx.lock:
-            ctx.done += 1
-            ctx.cancelled += 1
-        self._finish_if_done(ctx)
+        self._count(ctx, cancelled=True)
 
     def _task_crashed(self, ctx: _SubmitContext, job_key: str,
                       err: Exception) -> None:
@@ -290,64 +363,83 @@ class BulkSubmitter(QObject):
                                   fail_reason="INTERNAL_ERROR")
         except Exception:                       # noqa: BLE001
             log.exception("crash 후 전이 실패: %s", job_key)
-        with ctx.lock:
-            ctx.done += 1
-            ctx.failed += 1
-            ctx.fail_reasons["INTERNAL_ERROR"] = (
-                ctx.fail_reasons.get("INTERNAL_ERROR", 0) + 1)
         self.error.emit(ctx.jobset_id, f"{job_key}: {err!r}")
-        self._finish_if_done(ctx)
+        self._count(ctx, failed=True, reason="INTERNAL_ERROR")
 
     # ------------------------------------------------------------------
-    # retry 스케줄 (submitter 소속 스레드에서 실행 — queued connection)
+    # retry 스케줄 — 원장 등록(worker 스레드) → QTimer 발화(submitter 스레드)
     # ------------------------------------------------------------------
-    @Slot(str, str, object, int, float)
-    def _on_retry_requested(self, jobset_id: str, job_key: str, spec,
-                            attempt: int, delay_s: float) -> None:
+    def _schedule_retry(self, ctx: _SubmitContext, keys: List[str],
+                        delay_s: float,
+                        make_task: Callable[[], QRunnable]) -> None:
+        """RETRY_WAIT 전이 직후 worker 스레드에서 호출 — 원장에 등록한다."""
+        with ctx.lock:
+            ctx.pending_retries[keys[0]] = _PendingRetry(keys, delay_s,
+                                                         make_task)
+        self._retry_requested.emit(ctx.jobset_id, keys[0])
+
+    @Slot(str, str)
+    def _on_retry_requested(self, jobset_id: str, entry_key: str) -> None:
         with self._ctx_lock:
             ctx = self._contexts.get(jobset_id)
         if ctx is None:
             return
-        if self._shutdown:
-            return          # shutdown()이 RETRY_WAIT 잔류를 일괄 확정함
-        if ctx.cancel_event.is_set():
-            self._abandon_retry(ctx, job_key)
-            return
 
         def fire():
-            if self._shutdown:
-                return      # 닫힌 store 접근 금지 — shutdown()이 확정함
-            if ctx.cancel_event.is_set():
-                self._abandon_retry(ctx, job_key)
+            with ctx.lock:
+                entry = ctx.pending_retries.pop(entry_key, None)
+            if entry is None:
+                return                  # shutdown이 이미 확정 — 정확히 한 번
+            if self._shutdown or ctx.cancel_event.is_set():
+                self._finalize_retry(ctx, entry, "CANCELLED")
                 return
-            if isinstance(spec, _ArrayRetrySpec):
-                ctx.pool.start(_ArraySubmitTask(self, ctx, spec.spec, attempt))
-            else:
-                ctx.pool.start(_SubmitTask(self, ctx, job_key, spec, attempt))
+            ctx.pool.start(entry.make_task())
 
-        QTimer.singleShot(int(delay_s * 1000), fire)
+        if self._shutdown or ctx.cancel_event.is_set():
+            fire()                      # 대기 없이 즉시 포기 확정
+            return
+        with ctx.lock:
+            entry = ctx.pending_retries.get(entry_key)
+        if entry is not None:
+            QTimer.singleShot(int(entry.delay_s * 1000), fire)
 
-    def _abandon_retry(self, ctx: _SubmitContext, job_key: str) -> None:
-        """cancel/shutdown으로 재시도 포기 — 최종 SUBMIT_FAILED 확정."""
-        if job_key == "__array__":
-            keys = [r.job_key for r in self.store.get_jobs(ctx.jobset_id)
-                    if r.state is JobState.RETRY_WAIT]
-        else:
-            keys = [job_key]
-        for key in keys:
-            rec = self.store.get_job(ctx.jobset_id, key)
-            if rec.state is JobState.RETRY_WAIT:
-                self.store.transition(ctx.jobset_id, key,
-                                      JobState.SUBMIT_FAILED,
-                                      fail_reason=rec.fail_reason or "CANCELLED")
+    def _finalize_retry(self, ctx: _SubmitContext, entry: _PendingRetry,
+                        default_reason: str) -> None:
+        """재시도 포기 — RETRY_WAIT 잔류분을 SUBMIT_FAILED로 최종 확정.
+        jobset이 이미 삭제됐어도(merge 등) 카운터 확정은 계속한다."""
+        for key in entry.keys:
+            try:
+                rec = self.store.get_job(ctx.jobset_id, key)
+                if rec.state is JobState.RETRY_WAIT:
+                    self.store.transition(ctx.jobset_id, key,
+                                          JobState.SUBMIT_FAILED,
+                                          fail_reason=rec.fail_reason
+                                          or default_reason)
+            except LsfmgrError:
+                log.warning("retry 포기 확정 실패(무시): %s/%s",
+                            ctx.jobset_id, key)
+        self._count(ctx, failed=True)
+
+    # ------------------------------------------------------------------
+    # 진행/완료 통지 — 모든 종료 경로의 단일 출구
+    # ------------------------------------------------------------------
+    def _count(self, ctx: _SubmitContext, *, succeeded: bool = False,
+               failed: bool = False, cancelled: bool = False,
+               reason: Optional[str] = None) -> None:
+        """작업 1단위(bulk job 1개 / array 1회) 완료 계상 + 진행/완료 통지."""
         with ctx.lock:
             ctx.done += 1
-            ctx.failed += 1
+            if succeeded:
+                ctx.succeeded += 1
+            if failed:
+                ctx.failed += 1
+            if cancelled:
+                ctx.cancelled += 1
+            if reason is not None:
+                ctx.fail_reasons[reason] = ctx.fail_reasons.get(reason, 0) + 1
+        self._emit_progress(ctx)
         self._finish_if_done(ctx)
 
-    # ------------------------------------------------------------------
-    # 진행/완료 통지
-    # ------------------------------------------------------------------
     def _emit_progress(self, ctx: _SubmitContext) -> None:
         with ctx.lock:
             done, total = ctx.done, ctx.total
@@ -390,14 +482,16 @@ class _ArraySubmitTask(QRunnable):
             log.exception("array submit 예외: %s", self.ctx.jobset_id)
             self._fail_all("INTERNAL_ERROR")
             self.submitter.error.emit(self.ctx.jobset_id, repr(e))
-            self._count_done(failed=True)
+            self.submitter._count(self.ctx, failed=True,
+                                  reason="ARRAY_SUBMIT_FAILED")
 
     def _run(self):
         sub, ctx, spec = self.submitter, self.ctx, self.spec
         jsid = ctx.jobset_id
         n = spec.size
-        for i in range(1, n + 1):
-            sub.store.transition(jsid, f"{jsid}[{i}]", JobState.SUBMITTING)
+        keys = [f"{jsid}[{i}]" for i in range(1, n + 1)]
+        for key in keys:
+            sub.store.transition(jsid, key, JobState.SUBMITTING)
 
         command = spec.command
         if spec.commands is not None:
@@ -419,28 +513,28 @@ class _ArraySubmitTask(QRunnable):
                 env=spec.env,
                 timeout_s=opts.submit_timeout_s)
         except SubmitError as e:
-            if self.attempt < ctx.max_retry and not ctx.cancel_event.is_set():
-                for i in range(1, n + 1):
-                    sub.store.transition(jsid, f"{jsid}[{i}]",
-                                         JobState.RETRY_WAIT,
+            if (self.attempt < ctx.max_retry and not ctx.cancel_event.is_set()
+                    and not sub._shutdown):
+                for key in keys:
+                    sub.store.transition(jsid, key, JobState.RETRY_WAIT,
                                          retry_count=self.attempt + 1,
                                          fail_reason=e.fail_reason)
-                delay = ctx.options.retry_delay_s(self.attempt)
-                sub._retry_requested.emit(
-                    jsid, "__array__", _ArrayRetrySpec(spec),
-                    self.attempt + 1, delay)
+                nxt = self.attempt + 1      # 값 즉시 캡처 (task는 autoDelete)
+                sub._schedule_retry(
+                    ctx, keys, ctx.options.retry_delay_s(self.attempt),
+                    lambda: _ArraySubmitTask(sub, ctx, spec, nxt))
                 return
             self._fail_all(e.fail_reason)
-            self._count_done(failed=True)
+            sub._count(ctx, failed=True, reason="ARRAY_SUBMIT_FAILED")
             return
 
         sub.jobsets.add_array_attachment(jsid, array_id)
         now = datetime.now()
-        for i in range(1, n + 1):
-            sub.store.transition(jsid, f"{jsid}[{i}]", JobState.PEND,
+        for key in keys:
+            sub.store.transition(jsid, key, JobState.PEND,
                                  job_id=array_id, submit_time=now,
                                  fail_reason=None)
-        self._count_done(failed=False)
+        sub._count(ctx, succeeded=True)
 
     def _write_dispatch_script(self, jsid: str, commands) -> str:
         """element별 command가 다른 경우 $LSB_JOBINDEX dispatch 스크립트 생성."""
@@ -467,22 +561,3 @@ class _ArraySubmitTask(QRunnable):
                     retry_count=self.attempt, fail_reason=reason)
             except Exception:                   # noqa: BLE001
                 pass
-
-    def _count_done(self, failed: bool) -> None:
-        with self.ctx.lock:
-            self.ctx.done += 1
-            if failed:
-                self.ctx.failed += 1
-                self.ctx.fail_reasons["ARRAY_SUBMIT_FAILED"] = (
-                    self.ctx.fail_reasons.get("ARRAY_SUBMIT_FAILED", 0) + 1)
-            else:
-                self.ctx.succeeded += 1
-        self.submitter._emit_progress(self.ctx)
-        self.submitter._finish_if_done(self.ctx)
-
-
-class _ArrayRetrySpec:
-    """retry Signal 페이로드로 ArrayJobSpec을 감싸는 마커."""
-
-    def __init__(self, spec: ArrayJobSpec):
-        self.spec = spec

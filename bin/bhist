@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""MockLSF bhist 래퍼. 실제 LSF의 bhist 명령을 흉내낸다."""
+import os
+import sys
+
+# 저장소 루트를 import 경로에 추가.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from mocklsf.cli import cmd_bhist
+
+if __name__ == "__main__":
+    sys.exit(cmd_bhist(sys.argv[1:]))

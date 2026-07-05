@@ -38,11 +38,15 @@ class SubmitError(LsfmgrError):
     """bsub 실패. fail_reason은 JobRecord.fail_reason으로 그대로 기록된다."""
 
     def __init__(self, message: str, fail_reason: str,
-                 returncode: Optional[int] = None, stderr: str = ""):
+                 returncode: Optional[int] = None, stderr: str = "",
+                 retryable: bool = True):
         super().__init__(message)
         self.fail_reason = fail_reason
         self.returncode = returncode
         self.stderr = stderr
+        # 재시도 대상 여부. submit_wrapper 경로는 '비정상 종료(non-zero)'만
+        # 재시도하고, 파싱 실패/timeout 은 중복 제출 위험 때문에 재시도하지 않는다.
+        self.retryable = retryable
 
 
 class ArgMaxExceededError(LsfmgrError):

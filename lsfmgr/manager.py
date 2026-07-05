@@ -12,13 +12,13 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 from dataclasses import replace as dc_replace
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from .command import LsfCommand, Runner
 from .config import ArrayJobSpec, JobSpec, LsfConfig
-from .errors import JobSetClosedError
 from .handle import JobSet
 from .jobset_core import JobSetManager, detect_array_template
 from .killer import Killer
@@ -142,12 +142,12 @@ class LsfJobManager(QObject):
 
         # --- JobSet 핸들 계층 (v7) — Facade Signal 위에 이중 발행 ---
         self._handles: Dict[str, JobSet] = {}
-        self.submit_progress.connect(self._h_progress)
+        self.submit_progress.connect(self._handle_relay("progress"))
+        self.jobset_updated.connect(self._handle_relay("updated"))
+        self.kill_finished.connect(self._handle_relay("killed"))
+        self.error_occurred.connect(self._handle_relay("error"))
         self.submit_finished.connect(self._h_finished)
-        self.jobset_updated.connect(self._h_updated)
         self.jobs_updated.connect(self._h_jobs_updated)
-        self.kill_finished.connect(self._h_kill_finished)
-        self.error_occurred.connect(self._h_error)
 
         # AUTO-3: 앱 종료 시 shutdown 자동 연결 (명시 호출과 중복 안전)
         app = QCoreApplication.instance()
@@ -216,6 +216,41 @@ class LsfJobManager(QObject):
             jsid = self._submit_bulk_impl(specs, opts)
 
         return self._post_submit(jsid, opts)
+
+    # ------------------------------------------------------------------
+    # submit_wrapper (v8) — wrapper 커맨드로 제출, job_id 기반 관리
+    # ------------------------------------------------------------------
+    def submit_wrapper(self,
+                       commands: Union[str, Sequence[Union[str, Sequence[str]]]],
+                       **kwargs: Any) -> JobSet:
+        """[async→Signal] wrapper 커맨드로 job 제출 — JobSet 핸들 반환.
+
+        실제 환경에서 job 마다 `primesim_sub`/`verilog_sub` 등 서로 다른 제출
+        wrapper 를 쓰는 구조를 그대로 지원한다. lsfmgr 는 각 커맨드를 **그대로**
+        subprocess 실행하고 stdout 의 `Job <id>` 만 파싱해, 그 job_id 로 모니터링·
+        kill 을 수행한다(‑q/‑J/‑g 등 인자 조립·주입 없음, 그룹/이름 부착물 없음).
+
+        commands:
+          - 단일 문자열 `"primesim_sub -i a.sp"` → job 1개 (공백 분해)
+          - 리스트의 각 항목이 job 1개. 항목은 문자열(공백 분해) 또는 토큰 리스트
+            `["primesim_sub", "-i", "a.sp"]` (셸 파싱 없이 그대로).
+
+        옵션(kwargs): workers / max_retry / rate_limit_per_s / label / tags /
+        description / auto_poll / poll_interval_s. 재시도는 **비정상 종료(non-zero)
+        만** 대상이며, 파싱 실패(NO_JOBID_PARSED)·timeout 은 재시도하지 않는다.
+        """
+        opts = self.resolve_options(kwargs, context="submit")
+        argvs = _normalize_wrapper_commands(commands)
+        if not argvs:
+            raise ValueError("submit_wrapper: commands가 비어 있습니다")
+
+        # job_id 만으로 관리 → 그룹/이름 부착물 없는 jobset 생성.
+        js = self.jobsets.create_jobset(
+            len(argvs), label=opts.label, tags=opts.tags,
+            description=opts.description, with_attachments=False)
+        self.submit_started.emit(js.jobset_id)
+        self.submitter.submit_wrappers(js.jobset_id, argvs, opts)
+        return self._post_submit(js.jobset_id, opts)
 
     def _post_submit(self, jsid: str, opts: Options) -> JobSet:
         """핸들 발급 + AUTO-1 (submit 반환 직전 polling 자동 시작)."""
@@ -486,10 +521,13 @@ class LsfJobManager(QObject):
         if h is not None:
             h._mark_closed()
 
-    def _h_progress(self, jsid: str, done: int, total: int) -> None:
-        h = self._handle_of(jsid)
-        if h:
-            h.progress.emit(done, total)
+    def _handle_relay(self, signal_name: str):
+        """Facade Signal(jsid, ...)을 해당 핸들의 Signal(...)로 중계하는 slot."""
+        def slot(jsid: str, *args) -> None:
+            h = self._handle_of(jsid)
+            if h is not None:
+                getattr(h, signal_name).emit(*args)
+        return slot
 
     def _h_finished(self, jsid: str, report) -> None:
         h = self._handle_of(jsid)
@@ -502,11 +540,6 @@ class LsfJobManager(QObject):
             if failed:
                 h.failed.emit(failed)
 
-    def _h_updated(self, jsid: str, summary: dict) -> None:
-        h = self._handle_of(jsid)
-        if h:
-            h.updated.emit(summary)
-
     def _h_jobs_updated(self, jsid: str, changed: list) -> None:
         h = self._handle_of(jsid)
         if h is None:
@@ -514,16 +547,6 @@ class LsfJobManager(QObject):
         failed = [r for r in changed if r.state.is_failed]
         if failed:
             h.failed.emit(failed)
-
-    def _h_kill_finished(self, jsid: str, report) -> None:
-        h = self._handle_of(jsid)
-        if h:
-            h.killed.emit(report)
-
-    def _h_error(self, jsid: str, message: str) -> None:
-        h = self._handle_of(jsid)
-        if h:
-            h.error.emit(message)
 
 
 class _CallTask(QRunnable):
@@ -611,6 +634,32 @@ def _normalize_jobs(jobs: Sequence[Union[str, JobSpec]]
             raise TypeError(
                 f"submit()은 str 또는 JobSpec 목록만 허용 (got {type(j)!r})")
     return specs, plain
+
+
+def _normalize_wrapper_commands(
+        commands: Union[str, Sequence[Union[str, Sequence[str]]]]
+        ) -> List[List[str]]:
+    """submit_wrapper 입력을 argv(토큰 리스트) 목록으로 정규화.
+
+    - 최상위 문자열 → job 1개 (shlex 분해)
+    - 리스트의 각 항목이 job 1개: 문자열이면 shlex 분해, 토큰 리스트면 그대로
+    """
+    if isinstance(commands, str):
+        commands = [commands]
+    argvs: List[List[str]] = []
+    for c in commands:
+        if isinstance(c, str):
+            argv = shlex.split(c)
+        elif isinstance(c, (list, tuple)):
+            argv = [str(t) for t in c]
+        else:
+            raise TypeError(
+                "submit_wrapper: 각 커맨드는 str 또는 토큰 리스트여야 함 "
+                f"(got {type(c)!r})")
+        if not argv:
+            raise ValueError("submit_wrapper: 빈 커맨드는 허용되지 않습니다")
+        argvs.append(argv)
+    return argvs
 
 
 def _with_pattern(js: JobSetRecord, pattern: str) -> JobSetRecord:
