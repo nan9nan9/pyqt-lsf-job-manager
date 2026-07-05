@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     queue           TEXT NOT NULL,
     from_host       TEXT NOT NULL,
     job_name        TEXT NOT NULL,
+    cwd             TEXT NOT NULL DEFAULT '',
     stat            TEXT NOT NULL,
     exec_host       TEXT,
     submit_time     REAL NOT NULL,
@@ -72,7 +73,7 @@ _COLUMNS = [
     "queue", "from_host", "job_name", "stat", "exec_host", "submit_time",
     "start_time", "finish_time", "pend_secs", "run_secs", "planned_outcome",
     "exit_code", "suspend_at", "suspend_secs", "susp_since", "num_cpus",
-    "requested_hosts", "proj", "job_group",
+    "requested_hosts", "proj", "job_group", "cwd",
 ]
 
 
@@ -92,12 +93,19 @@ class Database:
 
     def _init_schema(self):
         self.conn.executescript(_SCHEMA)
-        # 이전 버전 DB 마이그레이션: job_group 컬럼이 없으면 추가한다.
+        # 이전 버전 DB 마이그레이션: 누락 컬럼이 있으면 추가한다.
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(jobs)")}
-        if "job_group" not in cols:
-            self.conn.execute(
-                "ALTER TABLE jobs ADD COLUMN job_group TEXT NOT NULL DEFAULT ''"
-            )
+        for name in ("job_group", "cwd"):
+            if name not in cols:
+                try:
+                    self.conn.execute(
+                        f"ALTER TABLE jobs ADD COLUMN {name} "
+                        f"TEXT NOT NULL DEFAULT ''"
+                    )
+                except sqlite3.OperationalError as e:
+                    # CLI 다중 프로세스의 동시 첫 오픈 — 이미 추가됐으면 무해
+                    if "duplicate column" not in str(e).lower():
+                        raise
         self.conn.execute(
             "INSERT OR IGNORE INTO counters(name, value) VALUES('job_id', ?)",
             (config.FIRST_JOB_ID,),
@@ -219,6 +227,7 @@ class Database:
         j.requested_hosts = row["requested_hosts"]
         j.proj = row["proj"]
         j.job_group = row["job_group"]
+        j.cwd = row["cwd"]
         j.row_id = row["row_id"]
         return j
 

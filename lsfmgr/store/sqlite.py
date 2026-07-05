@@ -54,6 +54,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     submit_time  TEXT,
     command      TEXT NOT NULL DEFAULT '',
     updated_at   TEXT,
+    run_time_s   INTEGER,
+    start_time   TEXT,
+    finish_time  TEXT,
+    working_dir  TEXT,
+    via_wrapper  INTEGER NOT NULL DEFAULT 0,
+    spec_json    TEXT,
     PRIMARY KEY (jobset_id, lsf_job_name)
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs (jobset_id, state);
@@ -112,6 +118,34 @@ class SqliteStore(JobSetStore):
         self.session_id = uuid.uuid4().hex[:12]  # 이번 세션 식별자
         with self._write() as con:
             con.executescript(_SCHEMA)
+            self._migrate(con)
+
+    @staticmethod
+    def _migrate(con: sqlite3.Connection) -> None:
+        """구버전 DB 호환 — CREATE TABLE IF NOT EXISTS는 컬럼 추가를 안 하므로
+        누락된 컬럼을 ALTER로 채운다(멱등). 새 DB엔 이미 있어 no-op."""
+        cols = {r[1] for r in con.execute("PRAGMA table_info(jobs)")}
+        for name, decl in (("run_time_s", "INTEGER"),
+                           ("start_time", "TEXT"), ("finish_time", "TEXT"),
+                           ("working_dir", "TEXT"),
+                           ("via_wrapper", "INTEGER NOT NULL DEFAULT 0"),
+                           ("spec_json", "TEXT")):
+            if name not in cols:
+                try:
+                    con.execute(f"ALTER TABLE jobs ADD COLUMN {name} {decl}")
+                except sqlite3.OperationalError as e:
+                    # 다중 프로세스가 동시에 첫 오픈하면 check-then-ALTER가
+                    # 겹칠 수 있다 — 이미 추가됐으면(duplicate column) 무해
+                    if "duplicate column" not in str(e).lower():
+                        raise
+                if name == "via_wrapper":
+                    # 구버전 DB 보정: 부착물 없는 jobset == submit_wrapper 로
+                    # 만든 것 — 그 소속 job은 wrapper 경로로 복원해야 한다
+                    # (기본값 0이면 resubmit이 bsub 경로로 오판해 이중 제출)
+                    con.execute(
+                        "UPDATE jobs SET via_wrapper=1 WHERE jobset_id IN "
+                        "(SELECT jobset_id FROM jobsets "
+                        " WHERE lsf_group_paths='[]' AND name_patterns='[]')")
 
     # ------------------------------------------------------------------
     # connection 관리
@@ -194,12 +228,28 @@ class SqliteStore(JobSetStore):
             state=JobState(r["state"]), fail_reason=r["fail_reason"],
             retry_count=r["retry_count"], exit_code=r["exit_code"],
             submit_time=_dt(r["submit_time"]), command=r["command"],
-            updated_at=_dt(r["updated_at"]))
+            updated_at=_dt(r["updated_at"]),
+            run_time_s=r["run_time_s"], start_time=_dt(r["start_time"]),
+            finish_time=_dt(r["finish_time"]), working_dir=r["working_dir"],
+            via_wrapper=bool(r["via_wrapper"]), spec_json=r["spec_json"])
+
+    # INSERT는 반드시 컬럼명을 명시한다 — 위치 바인딩은 마이그레이션(ALTER는
+    # 항상 끝에 추가)으로 구/신 DB의 물리 컬럼 순서가 갈라지는 순간, 에러
+    # 없이 엉뚱한 컬럼에 값을 쓴다 (SQLite는 타입 불일치도 조용히 허용)
+    _JOBSET_COLS = ("jobset_id", "intended_count", "lsf_group_paths",
+                    "name_patterns", "array_job_ids", "label", "tags",
+                    "description", "parent_jobset_id", "created_by",
+                    "created_at", "merged_from", "session_id", "closed")
+    _JOB_COLS = ("jobset_id", "lsf_job_name", "job_id", "array_index",
+                 "state", "fail_reason", "retry_count", "exit_code",
+                 "submit_time", "command", "updated_at", "run_time_s",
+                 "start_time", "finish_time", "working_dir", "via_wrapper",
+                 "spec_json")
 
     def _put_jobset(self, con: sqlite3.Connection, js: JobSetRecord) -> None:
         con.execute(
-            "INSERT OR REPLACE INTO jobsets VALUES "
-            "(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            f"INSERT OR REPLACE INTO jobsets ({','.join(self._JOBSET_COLS)}) "
+            f"VALUES ({','.join('?' * len(self._JOBSET_COLS))})",
             (js.jobset_id, js.intended_count,
              json.dumps(js.lsf_group_paths), json.dumps(js.name_patterns),
              json.dumps(js.array_job_ids), js.label, json.dumps(js.tags),
@@ -209,10 +259,13 @@ class SqliteStore(JobSetStore):
 
     def _put_job(self, con: sqlite3.Connection, j: JobRecord) -> None:
         con.execute(
-            "INSERT OR REPLACE INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            f"INSERT OR REPLACE INTO jobs ({','.join(self._JOB_COLS)}) "
+            f"VALUES ({','.join('?' * len(self._JOB_COLS))})",
             (j.jobset_id, j.lsf_job_name, j.job_id, j.array_index,
              j.state.value, j.fail_reason, j.retry_count, j.exit_code,
-             _iso(j.submit_time), j.command, _iso(j.updated_at)))
+             _iso(j.submit_time), j.command, _iso(j.updated_at),
+             j.run_time_s, _iso(j.start_time), _iso(j.finish_time),
+             j.working_dir, int(j.via_wrapper), j.spec_json))
 
     # ------------------------------------------------------------------
     # JobSet CRUD
@@ -293,6 +346,23 @@ class SqliteStore(JobSetStore):
                 out.append(r)
         return out
 
+    def remove_job(self, jobset_id: str, job_key: str) -> JobRecord:
+        with self._write() as con:
+            cur = con.execute(
+                "SELECT * FROM jobs WHERE jobset_id=? AND lsf_job_name=?",
+                (jobset_id, job_key))
+            row = cur.fetchone()
+            if row is None:
+                raise JobNotFoundError(f"{jobset_id}/{job_key}")
+            rec = self._row_to_job(row)
+            con.execute(
+                "DELETE FROM jobs WHERE jobset_id=? AND lsf_job_name=?",
+                (jobset_id, job_key))
+            # 고아 이력 방지 — 삭제 job의 전이 event도 함께 제거 (delete_jobset과 일관)
+            con.execute("DELETE FROM events WHERE jobset_id=? AND job_key=?",
+                        (jobset_id, job_key))
+        return rec
+
     def update_job(self, record: JobRecord) -> JobRecord:
         record = replace(record, updated_at=datetime.now())
         with self._write() as con:
@@ -334,10 +404,12 @@ class SqliteStore(JobSetStore):
         return [self._row_to_job(r) for r in cur.fetchall()]
 
     def transition(self, jobset_id: str, job_key: str, new_state: JobState,
-                   **fields: Any) -> JobRecord:
+                   guard=None, **fields: Any) -> Optional[JobRecord]:
         self._reject_key_fields(fields)
         with self._write() as con:              # 원자적 read-modify-write
             old = self.get_job(jobset_id, job_key)
+            if guard is not None and not guard(old):
+                return None                     # CAS 불일치 — 전이 건너뜀
             new = replace(old, state=new_state, updated_at=datetime.now(),
                           **fields)
             self._put_job(con, new)
@@ -501,6 +573,10 @@ class SqliteStore(JobSetStore):
                 "fail_reason": j.fail_reason, "retry_count": j.retry_count,
                 "exit_code": j.exit_code, "submit_time": _iso(j.submit_time),
                 "command": j.command, "updated_at": _iso(j.updated_at),
+                "run_time_s": j.run_time_s,
+                "start_time": _iso(j.start_time),
+                "finish_time": _iso(j.finish_time),
+                "working_dir": j.working_dir,
             } for j in jobs],
             "history": self.get_history(jobset_id),
         }

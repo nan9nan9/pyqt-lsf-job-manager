@@ -1,8 +1,9 @@
 """설정 (LsfConfig) 및 job 명세 (JobSpec / ArrayJobSpec) — Qt 비의존."""
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import List, Optional, Sequence, Tuple, Union
 
 #: LSF 명령 경로. 단일 프로그램은 str, bsub를 호출하는 wrapper처럼 고정 인자가
@@ -69,6 +70,20 @@ class JobSpec:
     errfile: Optional[str] = None            # bsub -e
     env: Optional[Tuple[Tuple[str, str], ...]] = None   # 추가 환경변수 (불변 tuple)
     extra_args: Tuple[str, ...] = ()         # 기타 bsub 인자
+
+
+def spec_to_json(spec: JobSpec) -> str:
+    """JobSpec → JSON — JobRecord.spec_json 저장용 (resubmit 옵션 보존)."""
+    return json.dumps(asdict(spec), ensure_ascii=False)
+
+
+def spec_from_json(s: str) -> JobSpec:
+    """JobRecord.spec_json → JobSpec 복원 (JSON list → 불변 tuple 정규화)."""
+    d = json.loads(s)
+    if d.get("env") is not None:
+        d["env"] = tuple((str(k), str(v)) for k, v in d["env"])
+    d["extra_args"] = tuple(d.get("extra_args") or ())
+    return JobSpec(**d)
 
 
 @dataclass(frozen=True)

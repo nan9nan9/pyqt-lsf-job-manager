@@ -2,26 +2,31 @@
 
 실제 LSF 서버 없이 `bsub`/`bjobs`/`bkill` 등의 명령을 흉내내는 파이썬 구현.
 job 을 수백~수천 개 제출하고 상태(PEND→RUN→DONE/EXIT/SUSPEND)를 모니터링하는
-PyQt 앱을 실제 LSF 없이 테스트하기 위한 용도.
+PyQt 앱을 실제 LSF 없이 테스트하기 위한 용도. **이 저장소에 `mocklsf` 패키지 +
+`bin/` 실행 래퍼로 통합**되어 있어, lsfmgr 를 실제 LSF 없이 개발·검증할 수 있다.
 
 ## 구조
 
 ```
-mock-lsf/
+<repo>/
 ├── mocklsf/            # 파이썬 패키지
-│   ├── config.py       # 큐·호스트·타이밍·실패율 등 설정 (환경변수로 조정 가능)
-│   ├── models.py       # Job 데이터 모델, 상태 상수
-│   ├── db.py           # SQLite 공유 상태 저장소
+│   ├── config.py       # 큐·호스트·타이밍·실패율·clean period 등 설정 (환경변수)
+│   ├── models.py       # Job 데이터 모델(job_group 포함), 상태 상수
+│   ├── db.py           # SQLite 공유 상태 저장소 (스키마 마이그레이션 포함)
 │   ├── submit.py       # bsub 인자 파싱, array 파싱, job 계획값 생성
 │   ├── scheduler.py    # 가상 스케줄러 (상태 전이의 핵심)
 │   ├── daemon.py       # mocklsfd 데몬 관리
 │   ├── formats.py      # bjobs 출력 포맷 (기본/-w/-l/-o/-json)
 │   └── cli.py          # 각 명령 구현
 ├── bin/                # 실제 LSF 명령과 같은 이름의 실행 래퍼
-│   ├── bsub  bjobs  bkill  bqueues  bhist  bpeek  bstop  bresume
-│   └── mocklsfd
-└── tests/
+│   ├── bsub bjobs bkill bqueues bhist bpeek bstop bresume bmod bgdel
+│   ├── mocklsfd
+│   └── primesim_sub finesim_sub spectrefx_sub verilog_sub   # 툴별 제출 wrapper
+└── tests/test_mocklsf.py
 ```
+
+> 실제 환경처럼 job 마다 wrapper(`primesim_sub` 등)로 제출하는 방법은
+> [`lsfmgr.md`](lsfmgr.md) 참고 (lsfmgr `submit_wrapper`).
 
 ## 동작 방식
 
@@ -114,7 +119,8 @@ LSF 없이 이 경로를 재현·검증할 수 있다.
 ## 테스트
 
 ```bash
-python3 -m pytest tests/ -v
+python3 -m pytest tests/test_mocklsf.py -v      # mocklsf 단위 테스트
+python3 -m pytest tests/ -q                     # lsfmgr 포함 전체
 ```
 
 ## 상태 초기화

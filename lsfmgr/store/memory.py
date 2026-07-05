@@ -87,6 +87,13 @@ class InMemoryStore(JobSetStore):
                 out.append(record)
         return out
 
+    def remove_job(self, jobset_id: str, job_key: str) -> JobRecord:
+        with self._lock:
+            jobs = self._jobs.get(jobset_id)
+            if jobs is None or job_key not in jobs:
+                raise JobNotFoundError(f"{jobset_id}/{job_key}")
+            return jobs.pop(job_key)
+
     def update_job(self, record: JobRecord) -> JobRecord:
         with self._lock:
             jobs = self._jobs.get(record.jobset_id)
@@ -115,10 +122,12 @@ class InMemoryStore(JobSetStore):
         return recs
 
     def transition(self, jobset_id: str, job_key: str, new_state: JobState,
-                   **fields: Any) -> JobRecord:
+                   guard=None, **fields: Any) -> Optional[JobRecord]:
         self._reject_key_fields(fields)
         with self._lock:                        # read-modify-write 원자성 (CS-1)
             old = self.get_job(jobset_id, job_key)
+            if guard is not None and not guard(old):
+                return None                     # CAS 불일치 — 전이 건너뜀
             new = replace(old, state=new_state, updated_at=datetime.now(),
                           **fields)
             self._jobs[jobset_id][job_key] = new

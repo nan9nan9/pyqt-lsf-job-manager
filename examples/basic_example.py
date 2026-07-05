@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""lsfmgr 통합 데모 — 단일 GUI 대시보드.
+"""lsfmgr 기본 예제 — 단일 GUI 대시보드로 주요 기능을 모두 다룬다.
 
 하나의 화면에서 lsfmgr 의 주요 기능을 모두 다룬다:
   - submit_wrapper 로 제출 + 진행률 바 / 취소   (QT-5/QT-6, rate limit)
@@ -14,7 +14,7 @@
 그 결과의 `Job <id>` 로 job 을 관리한다. 테스트 환경은 저장소 동봉 mocklsf 이며,
 실제 LSF 에서 돌리려면 LSFMGR_REAL=1 을 준다.
 
-실행:  python examples/dashboard.py
+실행:  python examples/basic_example.py
 """
 import os
 import re
@@ -80,7 +80,7 @@ configure_mocklsf(pend=(1, 4), run=(4, 10), submit_fail_rate=0.12,
                   exit_rate=0.12)
 
 # 세션 복원 데모용 영속 DB (lsfmgr JobSet 메타 저장소; mocklsf 상태와는 별개).
-DB = os.path.join(tempfile.gettempdir(), "lsfmgr_demo_dashboard.db")
+DB = os.path.join(tempfile.gettempdir(), "lsfmgr_demo_basic.db")
 
 # job 상태별 색 (모니터링 테이블).
 _STATE_COLOR = {
@@ -110,8 +110,22 @@ class SubmitForm(QGroupBox):
         self.label = QLineEdit("sweep")
         self.auto_poll = QCheckBox("auto_poll (AUTO-1)")
         self.auto_poll.setChecked(True)
+        # job 당 PEND/RUN 시간(초) 범위 — 이 submit 의 job 들에 적용된다.
+        # (mocklsf 는 submit 시점에 job 별 계획값을 min~max 사이에서 정한다)
+        self.pend_min = QSpinBox(minimum=0, maximum=600, value=1)
+        self.pend_max = QSpinBox(minimum=0, maximum=600, value=4)
+        self.run_min = QSpinBox(minimum=0, maximum=3600, value=4)
+        self.run_max = QSpinBox(minimum=0, maximum=3600, value=10)
         btn = QPushButton("Submit")
         btn.clicked.connect(on_submit)
+
+        def _range(lo, hi):
+            h = QHBoxLayout()
+            h.setContentsMargins(0, 0, 0, 0)
+            h.addWidget(lo)
+            h.addWidget(QLabel("~"))
+            h.addWidget(hi)
+            return h
 
         form = QFormLayout(self)
         form.addRow("job 수", self.count)
@@ -121,6 +135,8 @@ class SubmitForm(QGroupBox):
         form.addRow("wrapper", self.wrapper)
         form.addRow("queue", self.queue)
         form.addRow("label", self.label)
+        form.addRow("PEND 시간(초)", _range(self.pend_min, self.pend_max))
+        form.addRow("RUN 시간(초)", _range(self.run_min, self.run_max))
         form.addRow(self.auto_poll)
         form.addRow(btn)
 
@@ -140,6 +156,11 @@ class SubmitForm(QGroupBox):
             return wrapper(tool, *args)          # bin/<tool> 절대경로 + 인자
 
         return [one(i) for i in range(n)]
+
+    def timing(self):
+        """이 submit 에 적용할 (PEND, RUN) 시간 범위(초) — mocklsf 계획값용."""
+        return ((self.pend_min.value(), self.pend_max.value()),
+                (self.run_min.value(), self.run_max.value()))
 
     def call_kwargs(self) -> dict:
         kw = dict(workers=self.workers.value(),
@@ -195,17 +216,18 @@ class Dashboard(QWidget):
         self.jobtable.verticalHeader().setVisible(False)
         self.jobtable.setEditTriggers(QTableWidget.NoEditTriggers)
 
-        right = QWidget()
-        rlay = QVBoxLayout(right)
-        rlay.addWidget(QLabel("JobSet 목록 (선택 후 아래 제어):"))
-        rlay.addWidget(self.tree, stretch=1)
-        rlay.addLayout(ctrl)
-        rlay.addWidget(QLabel("선택 JobSet 의 job 상태:"))
-        rlay.addWidget(self.jobtable, stretch=2)
+        state_top = QWidget()
+        stlay = QVBoxLayout(state_top)
+        stlay.setContentsMargins(0, 0, 0, 0)
+        stlay.addWidget(QLabel("JobSet 목록 (선택 후 아래 제어):"))
+        stlay.addWidget(self.tree, stretch=1)
+        stlay.addLayout(ctrl)
+        stlay.addWidget(QLabel("선택 JobSet 의 job 상태:"))
+        stlay.addWidget(self.jobtable, stretch=2)
 
         top = QSplitter(Qt.Horizontal)
         top.addWidget(self.form)
-        top.addWidget(right)
+        top.addWidget(state_top)
         top.setStretchFactor(1, 1)
 
         # --- 진행률 바 + 세션 복원 버튼 ---
@@ -217,14 +239,14 @@ class Dashboard(QWidget):
         midbar.addWidget(self.bar, stretch=1)
         midbar.addWidget(self.btn_restart)
 
-        # --- 하단: Facade 이벤트 로그 ---
+        # --- 하단: Facade 이벤트 로그 (실행 명령·job_id·상태 전이) ---
         self.log = QPlainTextEdit(readOnly=True)
         self.log.setMaximumBlockCount(500)
 
         lay = QVBoxLayout(self)
         lay.addWidget(top, stretch=3)
         lay.addLayout(midbar)
-        lay.addWidget(QLabel("Facade Signal 이벤트 스트림 (전 JobSet 공통):"))
+        lay.addWidget(QLabel("Facade Signal 이벤트 스트림 (실행 명령·job_id·상태 전이):"))
         lay.addWidget(self.log, stretch=1)
 
     # ------------------------------------------------------------------
@@ -261,10 +283,15 @@ class Dashboard(QWidget):
     def submit(self):
         if self.mgr is None:
             return
+        # 이 submit 의 job 들에 적용할 PEND/RUN 시간을 mocklsf 에 반영한다.
+        # (submit 직전 env 설정 → 뒤이어 뜨는 bsub 프로세스가 job 별 계획값에 사용)
+        pend, run = self.form.timing()
+        configure_mocklsf(pend=pend, run=run)
         kw = self.form.call_kwargs()
+        cmds = self.form.commands()
         # 각 job 을 wrapper 커맨드로 제출 — lsfmgr 는 커맨드를 그대로 실행하고
         # 'Job <id>' 를 파싱해 job_id 로 관리한다(인자 조립·주입 없음).
-        js = self.mgr.submit_wrapper(self.form.commands(), **kw)
+        js = self.mgr.submit_wrapper(cmds, **kw)
         self._add_row(js.id, kw.get("label", ""))
         self._active_submit = js.id
         self.bar.setMaximum(self.form.count.value())

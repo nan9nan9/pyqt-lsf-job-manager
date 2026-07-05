@@ -72,7 +72,13 @@ class JobsetQuerier:
                 st = statuses.get((rec.job_id, rec.array_index))
                 if st is not None:
                     return st
-            return by_name.get(rec.lsf_job_name)     # name fallback 매칭
+            st = by_name.get(rec.lsf_job_name)       # name fallback 매칭
+            # 동명이지만 다른 인스턴스(id 불일치)면 버린다 — 다른 job의
+            # 상태/exit_code가 이 레코드에 혼입되는 것을 막는다
+            if (st is not None and rec.job_id is not None
+                    and st.job_id != rec.job_id):
+                return None
+            return st
 
         leftover_ids = sorted({r.job_id for r in targets
                                if r.job_id is not None and lookup(r) is None})
@@ -81,6 +87,24 @@ class JobsetQuerier:
                 self.command.bjobs_by_ids(leftover_ids)), "chunk")
 
         # --- 3) 상태 반영 + bjobs 미발견분은 bhist fallback (FR-4.3) ---
+        # 이 사이클은 시작 시점 스냅샷(targets) 기반이고 bjobs 왕복 동안 수 초가
+        # 흐른다 — 그 사이 레코드가 바뀌었으면(resubmit_jobs의 리셋→재제출 등)
+        # 스냅샷 기준 갱신이 새 job_id/상태를 옛 값으로 되돌린다. guard(CAS)로
+        # "스냅샷과 동일할 때만" 전이시키고, 밀린 갱신은 다음 사이클에 맡긴다.
+        def unchanged(rec: JobRecord):
+            return lambda cur: (cur.job_id == rec.job_id
+                                and cur.state is rec.state)
+
+        def safe_transition(rec: JobRecord, *args, **kw):
+            """job 1건 전이 — 사이클 도중 remove_job으로 키가 사라졌으면
+            None (guard 거부와 동일 취급). 사이클 전체 중단을 막는다."""
+            try:
+                return self.store.transition(jobset_id, rec.job_key,
+                                             *args, **kw)
+            except LsfmgrError:
+                log.warning("전이 대상 소실 — 건너뜀: %s", rec.job_key)
+                return None
+
         changed: List[JobRecord] = []
         lost: List[JobRecord] = []
         missing: List[JobRecord] = []
@@ -89,11 +113,21 @@ class JobsetQuerier:
             if st is None:
                 missing.append(rec)
                 continue
-            if st.state is not rec.state or st.exit_code != rec.exit_code:
-                changed.append(self.store.transition(
-                    jobset_id, rec.job_key, st.state,
+            # 상태·exit_code 외에 실행시간 창(start/finish)·실행 디렉토리가 새로
+            # 채워질 때도 반영 — set-once라 매 폴링 반복 갱신(이벤트 스팸) 없음.
+            if (st.state is not rec.state or st.exit_code != rec.exit_code
+                    or st.start_time != rec.start_time
+                    or st.finish_time != rec.finish_time
+                    or st.working_dir != rec.working_dir):
+                new = safe_transition(
+                    rec, st.state,
+                    guard=unchanged(rec),
                     exit_code=st.exit_code,
-                    job_id=rec.job_id if rec.job_id is not None else st.job_id))
+                    run_time_s=st.run_time_s, start_time=st.start_time,
+                    finish_time=st.finish_time, working_dir=st.working_dir,
+                    job_id=rec.job_id if rec.job_id is not None else st.job_id)
+                if new is not None:
+                    changed.append(new)
 
         if missing:
             hist: Dict = {}
@@ -110,8 +144,10 @@ class JobsetQuerier:
                              or hist.get((rec.job_id, None)))
                 if found is not None:
                     state, exit_code = found
-                    changed.append(self.store.transition(
-                        jobset_id, rec.job_key, state, exit_code=exit_code))
+                    new = safe_transition(rec, state, exit_code=exit_code,
+                                          guard=unchanged(rec))
+                    if new is not None:
+                        changed.append(new)
                 elif probe_failed or not bhist_ok:
                     # 조회 수단 실패가 섞인 사이클 — LOST 확정 보류.
                     # LSF 순단이면 다음 사이클에서 정상 복구되고, 진짜
@@ -119,9 +155,12 @@ class JobsetQuerier:
                     log.warning("조회 실패로 %s 판단 보류 (LOST 확정 안 함)",
                                 rec.job_key)
                 else:
-                    new = self.store.transition(
-                        jobset_id, rec.job_key, JobState.LOST,
-                        fail_reason="NOT_FOUND_IN_LSF")
+                    new = safe_transition(
+                        rec, JobState.LOST,
+                        fail_reason="NOT_FOUND_IN_LSF",
+                        guard=unchanged(rec))
+                    if new is None:
+                        continue        # 그 사이 재제출/제거됨 — LOST 아님
                     changed.append(new)
                     lost.append(new)
                     log.error("job LOST 확정: %s (job_id=%s)",

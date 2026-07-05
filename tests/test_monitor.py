@@ -61,6 +61,60 @@ def test_done_exit_transition(qtbot, manager, fake_lsf, submitted):
 
 
 # ----------------------------------------------------------------------
+# 실행 시간 (run_time / start_time / finish_time) — LSF bjobs 기준
+# ----------------------------------------------------------------------
+def test_runtime_captured_from_bjobs(qtbot, manager, fake_lsf, submitted):
+    from datetime import datetime
+    rec0 = manager.get_jobs(submitted)[0]
+    # 완료 job에 LSF 실행시간 필드를 실어 보냄
+    j = fake_lsf.jobs[str(rec0.job_id)]
+    j.stat, j.exit_code = "DONE", 0
+    j.run_time_s = 125
+    j.start_time = "2026-07-05 14:00:00"
+    j.finish_time = "2026-07-05 14:02:05"
+    j.working_dir = "/proj/run/job0"
+
+    with qtbot.waitSignal(manager.jobset_updated, timeout=10000):
+        manager.query_once(submitted)
+
+    after = manager.store.get_job(submitted, rec0.job_key)
+    assert after.state is JobState.DONE
+    assert after.run_time_s == 125                       # LSF run_time(초)
+    assert after.start_time == datetime(2026, 7, 5, 14, 0, 0)
+    assert after.finish_time == datetime(2026, 7, 5, 14, 2, 5)
+    assert after.working_dir == "/proj/run/job0"         # LSF exec_cwd
+    # 실행시간이 안 실린 job은 None 유지 (파싱 실패 없음)
+    others = [r for r in manager.get_jobs(submitted)
+              if r.job_key != rec0.job_key]
+    assert all(r.run_time_s is None for r in others)
+
+
+def test_name_fallback_rejects_id_mismatch(qtbot, manager, fake_lsf,
+                                           submitted):
+    """이름은 같지만 job_id가 다른 인스턴스(name 재사용)는 fallback 매칭에서
+    버린다 — 다른 job의 상태/exit_code가 이 레코드에 혼입되면 안 된다."""
+    from tests.fake_lsf import FakeJob
+    rec0 = manager.get_jobs(submitted)[0]
+    # 원본 job은 bjobs에서 사라지고(bhist에도 없음),
+    fake_lsf.vanish_job(rec0.job_id, in_bhist=False)
+    # 같은 이름의 '다른' job(id 상이)이 group probe에 잡히도록 심는다
+    js = manager.store.get_jobset(submitted)
+    fake_lsf.jobs["99999"] = FakeJob(
+        job_id=99999, array_index=None, name=rec0.lsf_job_name,
+        group=js.lsf_group_paths[0], queue="normal", command="impostor",
+        stat="DONE", exit_code=0)
+
+    with qtbot.waitSignal(manager.jobset_updated, timeout=10000):
+        manager.query_once(submitted)
+
+    after = manager.store.get_job(submitted, rec0.job_key)
+    # 사칭 job의 DONE이 혼입되지 않아야 한다 — id 불일치로 fallback 거부
+    # (원본은 미발견 → bhist에도 없음 → LOST 경로)
+    assert not (after.state is JobState.DONE and after.job_id == rec0.job_id)
+    assert after.state in (JobState.LOST, rec0.state)
+
+
+# ----------------------------------------------------------------------
 # bhist fallback → LOST (FR-4.3, 수용 기준 6)
 # ----------------------------------------------------------------------
 def test_bhist_fallback(qtbot, manager, fake_lsf, submitted):

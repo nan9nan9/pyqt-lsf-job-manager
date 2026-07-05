@@ -1,6 +1,6 @@
-# lsfmgr 예제 — 통합 대시보드
+# lsfmgr 기본 예제
 
-lsfmgr 의 주요 기능을 **하나의 GUI 대시보드**(`dashboard.py`)에서 모두 다룹니다.
+lsfmgr 의 주요 기능을 **하나의 GUI 대시보드**(`basic_example.py`)에서 모두 다룹니다.
 실제 LSF cluster 없이 실행되도록 저장소에 동봉된 **mocklsf**(가상 LSF)를 테스트
 환경으로 씁니다. job 제출은 **`submit_wrapper`** 로 이뤄지며, job 마다
 `primesim_sub`/`verilog_sub` 등 서로 다른 wrapper 커맨드(또는 '혼합')를 그대로
@@ -8,7 +8,8 @@ lsfmgr 의 주요 기능을 **하나의 GUI 대시보드**(`dashboard.py`)에서
 
 ```bash
 pip install -e .[test]        # 프로젝트 루트에서
-python examples/dashboard.py
+python examples/basic_example.py      # 통합 GUI 대시보드
+python examples/handler_example.py    # JobSet handler 예제 (콘솔)
 ```
 
 ## 대시보드가 다루는 기능
@@ -27,9 +28,21 @@ python examples/dashboard.py
 기본으로 제출 실패율(0.12)·EXIT 확률(0.12)을 주입해 retry/EXIT 상태가 자연스럽게
 관찰됩니다.
 
+## handler 예제 (`handler_example.py`)
+
+JobSet 에 **이름 있는 handler** 를 붙여, job 이 RUN 인 동안 2초마다 worker
+스레드에서 job 출력 파일을 파싱하고(중간 수집), DONE/EXIT 시 최종 수집을 한 번 더
+수행하는 콘솔 예제입니다. `js.add_handler(name, fn, interval_s=, start_states=,
+end_states=)` 등록 → `handler_finished(jsid, name, HandlerResult)` 로 결과 수신 →
+모든 job 최종 수집 후 handler 휴면(재실행 시 자동 재가동)까지의 전체 흐름을
+보여줍니다.
+`ctx.working_dir`(LSF exec_cwd)/`run_time_s` 같은 LSF 유래 필드 활용도 포함합니다.
+자세한 동작 규칙은 [`../docs/lsfmgr.md`](../docs/lsfmgr.md) §2.5 참고.
+
 ## 파일
 
-- `dashboard.py` — 통합 GUI 대시보드 (기본 예제).
+- `basic_example.py` — 통합 GUI 대시보드 (기본 예제).
+- `handler_example.py` — JobSet handler 주기 실행/최종 수집 (콘솔 예제).
 - `common.py` — mocklsf 테스트 환경 셋업 + manager 생성 헬퍼:
   - `make_manager(wrapper="primesim_sub", **kwargs)` / `mocklsf_paths(...)` —
     mocklsf 명령 경로를 주입한 manager 구성. `wrapper` 로
@@ -46,11 +59,11 @@ mocklsf 자체에 대한 자세한 내용은 [`../docs/mocklsf.md`](../docs/mock
 ## 실제 LSF 에서 실행
 
 ```bash
-LSFMGR_REAL=1 python examples/dashboard.py   # mocklsf 대신 PATH 의 bsub/bjobs/bkill
+LSFMGR_REAL=1 python examples/basic_example.py   # mocklsf 대신 PATH 의 bsub/bjobs/bkill
 ```
 
 ## 스모크 테스트 (headless)
 
 ```bash
-LSFMGR_DEMO_AUTOQUIT=20 QT_QPA_PLATFORM=offscreen python examples/dashboard.py
+LSFMGR_DEMO_AUTOQUIT=20 QT_QPA_PLATFORM=offscreen python examples/basic_example.py
 ```

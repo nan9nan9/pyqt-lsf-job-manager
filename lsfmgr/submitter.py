@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import stat as stat_mod
 import threading
 import time
@@ -22,8 +23,8 @@ from datetime import datetime
 from typing import Callable, Dict, List, Optional, Sequence
 
 from .command import LsfCommand
-from .config import ArrayJobSpec, JobSpec, LsfConfig
-from .errors import LsfmgrError, SubmitError
+from .config import ArrayJobSpec, JobSpec, LsfConfig, spec_to_json
+from .errors import SubmitError
 from .jobset_core import JobSetManager
 from .options import Options
 from .qt import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
@@ -222,41 +223,118 @@ class BulkSubmitter(QObject):
 
         각 argv 를 그대로 subprocess 실행하고 'Job <id>' 를 파싱한다. lsfmgr 가
         인자를 조립하지 않고 argv 를 다루는 점만 submit_bulk 와 다르다.
+        record_command은 shlex 인용 보존 — resubmit 시 split 왕복으로 원본
+        argv가 복원돼야 한다 (공백 포함 인자 손상 방지).
         """
         self._launch(
             jobset_id, argvs, options,
-            record_command=lambda argv: " ".join(argv),
+            record_command=lambda argv: shlex.join(argv),
             make_task=lambda ctx, key, argv: _WrapperSubmitTask(self, ctx, key,
-                                                               argv, 0))
+                                                               argv, 0),
+            via_wrapper=True)
 
-    def _launch(self, jobset_id: str, items: Sequence, options: Options,
-                record_command: Callable[[object], str],
-                make_task: Callable[..., QRunnable]) -> None:
-        """단건 submit 공통 골격 — pool/‏ctx 구성 + CREATED 레코드 선생성 + 발화.
+    def resubmit_existing(self, jobset_id: str,
+                          keyed_items: Sequence, options: Options) -> None:
+        """[async→Signal] 기존 레코드 재제출 (resubmit_jobs 용).
 
-        item(JobSpec 또는 argv)마다 make_task(ctx, job_key, item) 로 worker 를
-        만들어 병렬 실행한다. 재시도·rate limit·취소는 ctx 를 통해 공유된다.
-        """
+        keyed_items: [(job_key, JobSpec | argv토큰리스트), ...] — item 타입으로
+        제출 경로를 job 단위로 고른다(JobSpec=bsub 조립, list=wrapper 그대로).
+        merge로 wrapper/bsub job이 한 jobset에 섞여 있어도 정확히 동작한다.
+        새 CREATED 레코드를 만들지 않고 **이미 존재하는 레코드**를 리셋(이전
+        job_id/exit_code/실행시간 초기화 + command 갱신) 후 같은 job_key로
+        재submit한다. 결과는 finished(SubmitReport)."""
+        if self._shutdown:
+            # shutdown 후 queued 경로로 도달할 수 있다 — 새 pool/프로세스를
+            # 만들면 아무도 기다려주지 않는 좀비가 된다 (CS-8)
+            log.warning("shutdown 후 재제출 요청 무시: %s", jobset_id)
+            return
+        keyed = list(keyed_items)
+        ctx = self._new_context(jobset_id, len(keyed), options)
+        # 기존 레코드 리셋 — 이전 실행의 흔적(job_id/exit_code/실행시간/위치)을
+        # 지우고 새 command 반영. 지우지 않으면 재제출 실패 시 죽은 옛 job_id·
+        # 이전 실행의 start/finish/working_dir가 새 커맨드의 것처럼 잔존한다.
+        launch = []
+        for key, item in keyed:
+            try:
+                self.store.transition(
+                    jobset_id, key, JobState.CREATED,
+                    job_id=None, exit_code=None, fail_reason=None,
+                    retry_count=0, command=self._item_command(item),
+                    submit_time=None, run_time_s=None, start_time=None,
+                    finish_time=None, working_dir=None,
+                    spec_json=(spec_to_json(item)
+                               if isinstance(item, JobSpec) else None))
+            except Exception:                    # noqa: BLE001 — CS-5
+                # 키 소실(remove_job 경합)·store 장애(sqlite lock 등) 어느
+                # 쪽이든 이 키만 건너뛰고 나머지는 진행 — 여기서 전파되면
+                # ctx가 미완(finished 미발행)으로 고착되어 jobset이 잠긴다
+                log.exception("재제출 리셋 실패 — 건너뜀: %s/%s",
+                              jobset_id, key)
+                self._count(ctx, cancelled=True)
+                continue
+            launch.append((key, item))
+        for key, item in launch:
+            ctx.pool.start(self._make_resubmit_task(ctx, key, item))
+        if not launch:
+            QTimer.singleShot(0, lambda: self._finish_if_done(ctx, force=True))
+
+    @staticmethod
+    def _item_command(item) -> str:
+        """레코드에 저장할 command 문자열 — wrapper argv는 shlex 인용을 보존해
+        재제출 시 shlex.split 왕복이 원본 argv를 복원하게 한다."""
+        return item.command if isinstance(item, JobSpec) else shlex.join(item)
+
+    def _make_resubmit_task(self, ctx: _SubmitContext, key: str,
+                            item) -> QRunnable:
+        if isinstance(item, JobSpec):
+            return _SubmitTask(self, ctx, key, item, 0)
+        return _WrapperSubmitTask(self, ctx, key, item, 0)
+
+    def is_active(self, jobset_id: str) -> bool:
+        """해당 jobset에 아직 끝나지 않은 submit 사이클이 있는지 (resubmit_jobs 가드)."""
+        with self._ctx_lock:
+            ctx = self._contexts.get(jobset_id)
+        return ctx is not None and not ctx.finished
+
+    def _new_context(self, jobset_id: str, total: int,
+                     options: Options) -> _SubmitContext:
+        """submit 사이클 1건의 pool/ctx 구성 + 등록 (submit/resubmit 공통)."""
         pool = QThreadPool()
         pool.setMaxThreadCount(options.workers)
         ctx = _SubmitContext(
-            jobset_id=jobset_id, total=len(items),
-            max_retry=options.max_retry,
-            pool=pool,
+            jobset_id=jobset_id, total=total,
+            max_retry=options.max_retry, pool=pool,
             limiter=TokenBucketLimiter(options.rate_limit_per_s),
             options=options)
         with self._ctx_lock:
             self._contexts[jobset_id] = ctx
+        return ctx
+
+    def _launch(self, jobset_id: str, items: Sequence, options: Options,
+                record_command: Callable[[object], str],
+                make_task: Callable[..., QRunnable],
+                via_wrapper: bool = False) -> None:
+        """단건 submit 공통 골격 — pool/‏ctx 구성 + CREATED 레코드 선생성 + 발화.
+
+        item(JobSpec 또는 argv)마다 make_task(ctx, job_key, item) 로 worker 를
+        만들어 병렬 실행한다. 재시도·rate limit·취소는 ctx 를 통해 공유된다.
+        via_wrapper는 레코드에 제출 경로를 남긴다 — resubmit_jobs가 job 단위로
+        재제출 경로를 복원하는 근거 (merge된 혼합 jobset에서도 정확).
+        """
+        ctx = self._new_context(jobset_id, len(items), options)
 
         # CREATED 레코드 선생성 → 요약 불변식(합계==intended) 즉시 성립.
         # 배치 API 필수 — 건당 insert는 Sqlite에서 caller 스레드 블로킹.
         self.store.add_jobs([
             JobRecord(job_id=None, array_index=None, jobset_id=jobset_id,
                       lsf_job_name=f"{jobset_id}_{idx}",
-                      state=JobState.CREATED, command=record_command(item))
+                      state=JobState.CREATED, command=record_command(item),
+                      via_wrapper=via_wrapper,
+                      spec_json=(spec_to_json(item)
+                                 if isinstance(item, JobSpec) else None))
             for idx, item in enumerate(items)])
         for idx, item in enumerate(items):
-            pool.start(make_task(ctx, f"{jobset_id}_{idx}", item))
+            ctx.pool.start(make_task(ctx, f"{jobset_id}_{idx}", item))
         if not items:
             # 동기 emit 금지 — caller(manager.submit)가 아직 핸들을 만들기
             # 전이라 finished가 유실된다. 이벤트 루프 한 바퀴 뒤로 지연.
@@ -415,9 +493,11 @@ class BulkSubmitter(QObject):
                                           JobState.SUBMIT_FAILED,
                                           fail_reason=rec.fail_reason
                                           or default_reason)
-            except LsfmgrError:
-                log.warning("retry 포기 확정 실패(무시): %s/%s",
-                            ctx.jobset_id, key)
+            except Exception:                    # noqa: BLE001 — CS-5
+                # store 장애(sqlite lock 등)여도 _count까지는 반드시 도달해야
+                # 한다 — 여기서 전파되면 done<total 고착 → finished 미발행
+                log.exception("retry 포기 확정 실패(무시): %s/%s",
+                              ctx.jobset_id, key)
         self._count(ctx, failed=True)
 
     # ------------------------------------------------------------------
@@ -460,6 +540,11 @@ class BulkSubmitter(QObject):
         log.info("submit 완료 %s: 성공 %d / 실패 %d / 취소 %d (총 %d)",
                  ctx.jobset_id, report.succeeded, report.failed,
                  report.cancelled, report.total)
+        # 완료된 ctx 정리 — 장수 세션에서 jobset 수만큼 누적되는 것 방지.
+        # (다른 사이클이 이미 새 ctx로 교체했으면 그대로 둔다)
+        with self._ctx_lock:
+            if self._contexts.get(ctx.jobset_id) is ctx:
+                del self._contexts[ctx.jobset_id]
         self.finished.emit(ctx.jobset_id, report)
 
 

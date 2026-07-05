@@ -9,6 +9,7 @@ import logging
 import re
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from .config import LsfConfig, cmd_tokens
@@ -44,6 +45,10 @@ class JobStatus:
     state: JobState
     exit_code: Optional[int]
     job_name: str
+    run_time_s: Optional[int] = None       # LSF run_time(초)
+    start_time: Optional[datetime] = None  # LSF start_time
+    finish_time: Optional[datetime] = None # LSF finish_time
+    working_dir: Optional[str] = None      # LSF exec_cwd (실행 디렉토리)
 
 
 _JOB_ID_RE = re.compile(r"Job <(\d+)>")
@@ -51,6 +56,46 @@ _ARRAY_ID_RE = re.compile(r"^(\d+)(?:\[(\d+)\])?$")
 # bjobs가 매칭 결과 없음을 알릴 때의 메시지들
 _NO_JOB_PATTERNS = ("no unfinished job", "no matching job", "is not found",
                     "no job found")
+
+# LSF -o 시간 필드 파싱 — run_time은 "NNN second(s)", start/finish는 시각 문자열.
+# LSF 버전/로케일마다 포맷이 달라 방어적으로 여러 형식을 시도한다.
+_RUN_TIME_RE = re.compile(r"(\d+)")
+_LSF_TIME_FORMATS = ("%Y-%m-%d %H:%M:%S", "%b %d %H:%M:%S %Y",
+                     "%b %d %H:%M %Y", "%b %d %H:%M:%S", "%b %d %H:%M")
+
+
+def _parse_run_time(s: str) -> Optional[int]:
+    """'120 second(s)' → 120. 미실행('-'/빈값)은 None."""
+    s = s.strip()
+    if not s or s == "-":
+        return None
+    m = _RUN_TIME_RE.search(s)
+    return int(m.group(1)) if m else None
+
+
+def _parse_lsf_time(s: str) -> Optional[datetime]:
+    """LSF 시각 문자열 → datetime. 파싱 불가/미해당('-')은 None (graceful).
+    'E' 접미(estimated — RUN 중 예상 종료시각)는 실측이 아니므로 버린다."""
+    s = s.strip()
+    if s.endswith(" E"):
+        return None                        # 예상값 — 실제 시각으로 저장 금지
+    s = re.sub(r"\s+[A-Z]$", "", s).strip()   # 상태 접미(L/X 등) 제거
+    if not s or s == "-":
+        return None
+    for fmt in _LSF_TIME_FORMATS:
+        try:
+            dt = datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+        if dt.year == 1900:                # 연도 없는 포맷 → 올해로 보정
+            dt = dt.replace(year=datetime.now().year)
+            # 연말 경계: 12월에 시작한 job을 1월에 조회하면 '올해 12월'은
+            # 미래가 된다 — 하루 여유를 두고 미래면 작년으로 되돌린다
+            if dt > datetime.now() + timedelta(days=1):
+                dt = dt.replace(year=dt.year - 1)
+        return dt
+    log.debug("LSF 시간 파싱 불가: %r", s)
+    return None
 
 
 def chunk_args(items: Sequence[str], chunk_size: int, arg_max: int,
@@ -214,7 +259,12 @@ class LsfCommand:
     # ------------------------------------------------------------------
     # 필드 폭 명시 필수 — LSF -o는 폭 미지정 시 기본 폭(JOBID 7자 등)으로
     # 잘라내므로("js_2026*") 긴 job name/array id의 파싱·매칭이 전멸한다
-    _BJOBS_FMT = "jobid:20 stat:12 exit_code:12 jobname:128 delimiter=';'"
+    # 필드명은 LSF -o 공식 명칭 사용 — job_name (jobname 은 실제 LSF 미지원).
+    # 폭은 truncation 한도다 — delimiter 모드에선 패딩이 없어 출력량 증가는
+    # 없으므로 긴 이름/경로가 잘리지 않게 넉넉히 잡는다
+    _BJOBS_FMT = ("jobid:20 stat:12 exit_code:12 job_name:512 "
+                  "run_time:25 start_time:30 finish_time:30 exec_cwd:2048 "
+                  "delimiter=';'")
 
     def _bjobs(self, selector: List[str]) -> List[JobStatus]:
         argv = cmd_tokens(self.config.bjobs_path) + [
@@ -286,10 +336,28 @@ class LsfCommand:
                     exit_code = int(exit_s)
                 except ValueError:
                     pass
+            # 시간/위치 필드 — 정확히 8필드일 때만 신뢰한다. 8이 아니면
+            # (구형 LSF 열 누락, 또는 job name에 ';'가 들어가 필드가 밀림)
+            # 오염된 값을 저장하느니 버리는 게 안전하다 (id/stat 매칭은 생존).
+            run_time_s = start_time = finish_time = working_dir = None
+            if len(parts) == 8:
+                run_time_s = _parse_run_time(parts[4])
+                start_time = _parse_lsf_time(parts[5])
+                # RUN 중 finish_time은 예상치(estimated)일 수 있다 —
+                # 실측만 저장하도록 종료 상태에서만 채운다
+                if state in (JobState.DONE, JobState.EXIT):
+                    finish_time = _parse_lsf_time(parts[6])
+                cwd = parts[7].strip()
+                working_dir = cwd if cwd and cwd != "-" else None
+            elif len(parts) != 4:
+                log.debug("bjobs 필드 수 이상(%d) — 시간/cwd 필드 무시: %r",
+                          len(parts), line)
             out.append(JobStatus(
                 job_id=int(m.group(1)),
                 array_index=int(m.group(2)) if m.group(2) else None,
-                state=state, exit_code=exit_code, job_name=name))
+                state=state, exit_code=exit_code, job_name=name,
+                run_time_s=run_time_s, start_time=start_time,
+                finish_time=finish_time, working_dir=working_dir))
         return out
 
     # ------------------------------------------------------------------

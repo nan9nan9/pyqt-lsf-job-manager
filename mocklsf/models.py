@@ -60,6 +60,7 @@ class Job:
     requested_hosts: str = ""        # -m 로 지정된 호스트 (공백 구분)
     proj: str = "default"
     job_group: str = ""              # bsub -g 로 지정된 job group 경로 (없으면 "")
+    cwd: str = ""                    # bsub 실행 디렉토리 (exec_cwd 로 노출)
     row_id: int = 0                  # DB rowid (내부용)
 
     @property

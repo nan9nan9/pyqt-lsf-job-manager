@@ -27,6 +27,10 @@ class FakeJob:
     vanished: bool = False       # bjobs에서 사라짐 (LOST 시나리오)
     in_bhist: bool = True        # vanished여도 bhist에는 남는지
     env: Optional[str] = None    # bsub -env 원문
+    run_time_s: Optional[int] = None     # LSF run_time(초)
+    start_time: Optional[str] = None     # bjobs -o 시각 원문
+    finish_time: Optional[str] = None
+    working_dir: Optional[str] = None    # LSF exec_cwd
 
 
 _ARRAY_NAME_RE = re.compile(r"^(.*)\[(\d+)-(\d+)\]$")
@@ -146,7 +150,12 @@ class FakeLsf:
             jid = (f"{j.job_id}[{j.array_index}]" if j.array_index
                    else str(j.job_id))
             ec = "-" if j.exit_code is None else str(j.exit_code)
-            lines.append(f"{jid};{j.stat};{ec};{j.name}")
+            rt = "-" if j.run_time_s is None else f"{j.run_time_s} second(s)"
+            st_ = j.start_time or "-"
+            ft = j.finish_time or "-"
+            cwd = j.working_dir or "-"
+            lines.append(
+                f"{jid};{j.stat};{ec};{j.name};{rt};{st_};{ft};{cwd}")
         return CommandResult(0, "\n".join(lines) + "\n", "")
 
     def _select(self, opts, id_args: List[str],

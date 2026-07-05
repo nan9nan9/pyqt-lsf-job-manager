@@ -5,7 +5,7 @@ manager가 소유/발급하며, Low-level Facade Signal 위에 얹힌 편의 계
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Optional, Set
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Set
 
 from .errors import JobSetClosedError
 from .qt import QObject, Signal
@@ -24,6 +24,7 @@ class JobSet(QObject):
     failed = Signal(list)          # SUBMIT_FAILED/EXIT/LOST 변경분 [JobRecord]
     killed = Signal(object)        # KillReport
     error = Signal(str)            # worker 예외 등
+    handler_finished = Signal(str, object)   # handler_name, HandlerResult
 
     def __init__(self, manager: "LsfJobManager", jobset_id: str):
         super().__init__(manager)
@@ -104,6 +105,39 @@ class JobSet(QObject):
         self._check_open()
         return self._manager.add_job(self._jobset_id, record,
                                      sync_lsf=sync_lsf)
+
+    def remove_job(self, job_key: str) -> JobRecord:
+        """[sync] job 제외 — 제거된 레코드 반환 (add_job의 역연산).
+        LSF의 실제 job은 유지된다(추적만 해제 — 필요하면 먼저 kill)."""
+        self._check_open()
+        return self._manager.remove_job(self._jobset_id, job_key)
+
+    def resubmit_jobs(self, job_keys: Sequence[str], *,
+                      commands: Optional[Dict[str, str]] = None,
+                      verify: bool = True, **opts: object) -> None:
+        """[async→Signal] 지정 job들을 상태 기반으로 재실행 — 결과는 finished.
+        살아있는 job은 kill 후, 나머지는 그냥 재제출한다(레코드 재사용).
+        commands로 job_key별 새 커맨드 지정 가능(생략 시 기존 커맨드 재사용)."""
+        self._check_open()
+        self._manager.resubmit_jobs(self._jobset_id, job_keys,
+                                    commands=commands, verify=verify, **opts)
+
+    def add_handler(self, name: str, fn: "Callable[..., object]", *,
+                    interval_s: float = 10.0,
+                    start_states: object = None,
+                    end_states: object = None) -> None:
+        """[main→Signal] 이름 있는 handler를 이 JobSet에 등록 — 주기 실행 시작.
+        결과는 handler_finished(name, HandlerResult) Signal. 상세는
+        LsfJobManager.add_handler 참고."""
+        self._check_open()
+        self._manager.add_handler(
+            self._jobset_id, name, fn, interval_s=interval_s,
+            start_states=start_states, end_states=end_states)
+
+    def remove_handler(self, name: str) -> None:
+        """[main] handler 해제 — 타이머 중지."""
+        self._check_open()
+        self._manager.remove_handler(self._jobset_id, name)
 
     def detect_lost(self) -> List[JobRecord]:
         """[sync, LSF 조회 포함] 손실 감지/복구 (FR-5.3) — blocking 주의."""

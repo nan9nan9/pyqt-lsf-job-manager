@@ -15,6 +15,7 @@ from .errors import (
 )
 from .errors import JobSetClosedError
 from .handle import JobSet
+from .handlers import HandlerContext, HandlerResult
 from .manager import LsfJobManager
 from .options import Options
 from .reports import KillReport, ReconcileReport, SubmitReport
@@ -40,6 +41,8 @@ __all__ = [
     "SubmitReport",
     "KillReport",
     "ReconcileReport",
+    "HandlerContext",
+    "HandlerResult",
     "LsfmgrError",
     "PersistenceNotSupportedError",
     "JobSetNotFoundError",

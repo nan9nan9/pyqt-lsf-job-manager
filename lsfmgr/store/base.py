@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
+from typing import (
+    Any, Callable, Dict, Iterable, List, Optional, Sequence, Set,
+)
 
 from ..errors import PersistenceNotSupportedError
 from ..states import JobRecord, JobSetRecord, JobState
@@ -53,6 +55,12 @@ class JobSetStore(ABC):
         return [self.add_job(r) for r in records]
 
     @abstractmethod
+    def remove_job(self, jobset_id: str, job_key: str) -> JobRecord:
+        """job 1건을 저장소에서 제거하고 제거된 레코드를 반환.
+        없으면 JobNotFoundError. LSF의 실제 job은 건드리지 않는다 —
+        저장소 추적에서만 제외한다(필요하면 호출 전에 kill할 것)."""
+
+    @abstractmethod
     def update_job(self, record: JobRecord) -> JobRecord: ...
 
     @abstractmethod
@@ -65,10 +73,14 @@ class JobSetStore(ABC):
 
     @abstractmethod
     def transition(self, jobset_id: str, job_key: str, new_state: JobState,
-                   **fields: Any) -> JobRecord:
+                   guard: Optional[Callable[[JobRecord], bool]] = None,
+                   **fields: Any) -> Optional[JobRecord]:
         """원자적 상태 전이 (read-modify-write, CS-1).
         fields로 job_id/exit_code/fail_reason 등 동시 갱신.
         키 필드(lsf_job_name/jobset_id)는 변경 불가 — ValueError.
+        guard가 주어지면 lock 안에서 현재 레코드로 평가해 False면 전이를
+        건너뛰고 None 반환 (CAS) — 스냅샷 기반 갱신(polling)이 그 사이
+        바뀐 레코드(재제출 등)를 덮어쓰는 것을 막는다.
         Sqlite 모드에서는 전이 이력 event를 기록한다 (§2.2)."""
 
     @staticmethod

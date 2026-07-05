@@ -100,6 +100,65 @@ def test_transition_missing_job(store):
         store.transition("js1", "nope", JobState.PEND)
 
 
+def test_remove_job(store):
+    store.create_jobset(make_jobset(n=3))
+    for i in range(3):
+        store.add_job(make_job(idx=i, job_id=100 + i))
+    # 제거 → 제거된 레코드 반환 + 나머지 유지
+    rec = store.remove_job("js1", "js1_1")
+    assert rec.lsf_job_name == "js1_1" and rec.job_id == 101
+    assert {r.lsf_job_name for r in store.get_jobs("js1")} == {"js1_0", "js1_2"}
+    with pytest.raises(JobNotFoundError):
+        store.get_job("js1", "js1_1")
+
+
+def test_remove_job_missing(store):
+    store.create_jobset(make_jobset())
+    with pytest.raises(JobNotFoundError):
+        store.remove_job("js1", "nope")
+
+
+def test_transition_guard_cas(store):
+    # guard(CAS)가 False면 전이가 무시되고 None — 스냅샷 stale write 방어
+    store.create_jobset(make_jobset(n=1))
+    store.add_job(make_job(idx=0, job_id=100, state=JobState.RUN))
+    # 스냅샷 이후 다른 경로가 레코드를 바꿨다고 가정 (job_id 100→200)
+    store.transition("js1", "js1_0", JobState.PEND, job_id=200)
+    # 옛 스냅샷(job_id=100, RUN) 기준의 stale 갱신 시도 → guard가 거부
+    res = store.transition(
+        "js1", "js1_0", JobState.EXIT, exit_code=1, job_id=100,
+        guard=lambda cur: cur.job_id == 100 and cur.state is JobState.RUN)
+    assert res is None
+    cur = store.get_job("js1", "js1_0")
+    assert cur.state is JobState.PEND and cur.job_id == 200   # 안 덮임
+    # guard 통과 케이스
+    ok = store.transition(
+        "js1", "js1_0", JobState.RUN,
+        guard=lambda cur: cur.job_id == 200)
+    assert ok is not None and ok.state is JobState.RUN
+
+
+def test_via_wrapper_roundtrip(store):
+    store.create_jobset(make_jobset(n=2))
+    store.add_job(make_job(idx=0, via_wrapper=True))
+    store.add_job(make_job(idx=1))
+    assert store.get_job("js1", "js1_0").via_wrapper is True
+    assert store.get_job("js1", "js1_1").via_wrapper is False
+
+
+def test_runtime_fields_roundtrip(store):
+    # run_time_s/start_time/finish_time 저장·복원 (sqlite 컬럼 포함)
+    store.create_jobset(make_jobset(n=1))
+    store.add_job(make_job(idx=0, job_id=7))
+    st = datetime(2026, 7, 5, 14, 0, 0)
+    ft = datetime(2026, 7, 5, 14, 5, 30)
+    store.transition("js1", "js1_0", JobState.DONE, exit_code=0,
+                     run_time_s=330, start_time=st, finish_time=ft)
+    got = store.get_job("js1", "js1_0")
+    assert got.run_time_s == 330
+    assert got.start_time == st and got.finish_time == ft
+
+
 # ----------------------------------------------------------------------
 # summary 불변식 (FR-5.2, 수용 기준 4)
 # ----------------------------------------------------------------------

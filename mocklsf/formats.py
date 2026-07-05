@@ -10,7 +10,7 @@ import re
 import time
 from typing import List
 
-from .models import PEND, Job
+from .models import FINISHED_STATES, PEND, Job
 
 # 기본 bjobs 컬럼 폭 (실제 LSF 와 동일). 필드 간 공백 1칸 구분.
 _DEFAULT_FMT = "%-7s %-7s %-5s %-10s %-11s %-11s %-10s %s"
@@ -30,6 +30,13 @@ def fmt_submit_time(epoch) -> str:
     if epoch is None:
         return "-"
     return time.strftime("%b %e %H:%M", time.localtime(epoch))
+
+
+def _fmt_o_time(epoch) -> str:
+    """-o 시각 필드용 — 'Jul  4 10:23:45' (초 포함, 실제 LSF -o 동작)."""
+    if epoch is None:
+        return "-"
+    return time.strftime("%b %e %H:%M:%S", time.localtime(epoch))
 
 
 def _trunc_name(name: str, width: int) -> str:
@@ -148,11 +155,28 @@ def _field_value(job: Job, name: str) -> str:
     if name == "submit_time":
         return fmt_submit_time(job.submit_time)
     if name == "start_time":
-        return fmt_submit_time(job.start_time) if job.start_time else "-"
+        # -o 시각 필드는 초까지 (실제 LSF -o 동작) — 분 단위로 자르면
+        # 경과시간 계산이 최대 59초 왜곡된다.
+        return _fmt_o_time(job.start_time) if job.start_time else "-"
     if name == "finish_time":
-        return fmt_submit_time(job.finish_time) if job.finish_time else "-"
+        # 주의: RUN 중 finish_time 은 스케줄러의 '계획' 종료 시각이다 —
+        # 실제 LSF 처럼 종료 후에만 노출한다.
+        if job.stat in FINISHED_STATES and job.finish_time:
+            return _fmt_o_time(job.finish_time)
+        return "-"
+    if name == "run_time":
+        # 실제 LSF 표기: "123 second(s)". 실행 전이면 "-".
+        if not job.start_time:
+            return "-"
+        end = (job.finish_time if job.stat in FINISHED_STATES
+               and job.finish_time else time.time())
+        return f"{max(0, int(end - job.start_time))} second(s)"
+    if name in ("exec_cwd", "sub_cwd"):
+        return job.cwd or "-"
     if name in ("exit_code",):
-        return str(job.exit_code)
+        # 실제 LSF: 미종료 job 은 "-" — planned exit code 를 미리 노출하면
+        # lsfmgr 가 RUN 중인 job 에 미래의 exit_code 를 저장하게 된다
+        return str(job.exit_code) if job.stat in FINISHED_STATES else "-"
     if name in ("nreq_slot", "slots", "nalloc_slot", "min_req_proc"):
         return str(job.num_cpus)
     if name == "proj_name":

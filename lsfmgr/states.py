@@ -77,6 +77,19 @@ class JobRecord:
     submit_time: Optional[datetime] = None
     command: str = ""                # retry 재submit용
     updated_at: Optional[datetime] = None
+    # --- 실행 시간/위치 (LSF bjobs 기준) ---
+    run_time_s: Optional[int] = None     # LSF run_time(초) — 종료 job은 최종 실행시간
+    start_time: Optional[datetime] = None    # LSF start_time (실행 시작)
+    finish_time: Optional[datetime] = None   # LSF finish_time (종료)
+    working_dir: Optional[str] = None    # LSF exec_cwd (실제 실행 디렉토리)
+    # 제출 경로 — wrapper(커맨드 그대로 실행) vs bsub(lsfmgr 인자 조립).
+    # job 단위 속성이다: merge로 wrapper/bsub jobset이 섞여도 재제출 경로를
+    # 레코드만 보고 정확히 고를 수 있어야 한다 (resubmit_jobs)
+    via_wrapper: bool = False
+    # bsub 경로의 제출 옵션 스냅샷(JobSpec 직렬화 JSON) — resubmit_jobs가
+    # queue/resources/outfile/env 를 원본 그대로 복원하는 근거.
+    # command 만 다시 만들면 이 옵션들이 조용히 기본값으로 소실된다
+    spec_json: Optional[str] = None
 
     @property
     def job_key(self) -> str:

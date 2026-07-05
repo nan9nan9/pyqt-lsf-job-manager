@@ -15,11 +15,13 @@ import os
 import shlex
 from dataclasses import replace as dc_replace
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from .command import LsfCommand, Runner
-from .config import ArrayJobSpec, JobSpec, LsfConfig
+from .config import ArrayJobSpec, JobSpec, LsfConfig, spec_from_json
+from .errors import JobNotFoundError, LsfmgrError
 from .handle import JobSet
+from .handlers import HandlerContext, JobSetHandlerService, StateSpec
 from .jobset_core import JobSetManager, detect_array_template
 from .killer import Killer
 from .monitor import JobsetQuerier, PollingService
@@ -31,6 +33,7 @@ from .options import (
     validate_options,
 )
 from .qt import QCoreApplication, QObject, QRunnable, QThreadPool, Signal
+from .resubmit import ResubmitCoordinator, ResubmitPlan
 from .reports import ReconcileReport
 from .states import JobRecord, JobSetRecord, JobState
 from .store.base import JobSetStore
@@ -56,6 +59,7 @@ class LsfJobManager(QObject):
     job_lost = Signal(str, object)             # jobset_id, JobRecord
     kill_finished = Signal(str, object)        # jobset_id, KillReport
     error_occurred = Signal(str, str)          # jobset_id, message
+    handler_finished = Signal(str, str, object)  # jobset_id, handler_name, HandlerResult
 
     def __init__(self, store: Optional[JobSetStore] = None,
                  config: Optional[LsfConfig] = None,
@@ -136,6 +140,16 @@ class LsfJobManager(QObject):
         self.killer.finished.connect(self.kill_finished)
         self.killer.error.connect(self.error_occurred)
 
+        # resubmit_jobs 오케스트레이터 — kill(worker) → resubmit(main) 순차 조율
+        self._resubmitter = ResubmitCoordinator(self)
+
+        # JobSet별 사용자 handler 주기 실행 (FR-7)
+        self.handlers = JobSetHandlerService(self.store, parent=self)
+        self.handlers.finished.connect(self.handler_finished)
+
+        # jobset별 마지막 polling interval — resubmit 후 polling 재개에 사용
+        self._poll_intervals: Dict[str, float] = {}
+
         self._misc_pool = QThreadPool(self)     # reconcile 등 단발 작업
         self._misc_pool.setMaxThreadCount(2)
         self._shutdown_done = False
@@ -146,6 +160,7 @@ class LsfJobManager(QObject):
         self.jobset_updated.connect(self._handle_relay("updated"))
         self.kill_finished.connect(self._handle_relay("killed"))
         self.error_occurred.connect(self._handle_relay("error"))
+        self.handler_finished.connect(self._handle_relay("handler_finished"))
         self.submit_finished.connect(self._h_finished)
         self.jobs_updated.connect(self._h_jobs_updated)
 
@@ -309,7 +324,10 @@ class LsfJobManager(QObject):
         return self._submit_array_impl(spec, opts, jobset_id=jobset_id)
 
     def cancel_submit(self, jobset_id: str) -> None:
-        """[async→Signal] 진행 중 submit 중단 — submit된 job은 유지 (QT-6)."""
+        """[async→Signal] 진행 중 submit 중단 — submit된 job은 유지 (QT-6).
+        resubmit_jobs의 kill-phase 대기 중이면 그 plan도 취소한다 (이 구간엔
+        submitter ctx가 없어 cancel이 조용히 증발하는 창이 있었다)."""
+        self._resubmitter.cancel(jobset_id)
         self.submitter.cancel_submit(jobset_id)
 
     # --- 내부 submit 구현 (High/Low 공유) ---
@@ -341,12 +359,16 @@ class LsfJobManager(QObject):
     def start_polling(self, jobset_id: str,
                       interval_s: Optional[float] = None) -> None:
         """[async→Signal] 주기 polling 시작 — 갱신은 jobset_updated."""
-        self.polling.start_polling(
-            jobset_id, interval_s if interval_s is not None
-            else self._defaults["poll_interval_s"])
+        eff = (interval_s if interval_s is not None
+               else self._defaults["poll_interval_s"])
+        self._poll_intervals[jobset_id] = eff    # resubmit 후 재개용 기억
+        self.polling.start_polling(jobset_id, eff)
 
     def stop_polling(self, jobset_id: str) -> None:
         """[async→Signal] polling 중지."""
+        # 재개 기억도 지운다 — 사용자가 일부러 끈 polling을 resubmit_jobs가
+        # 마음대로 되살리지 않게 (재개는 AUTO-2 자동중지 복구 용도만)
+        self._poll_intervals.pop(jobset_id, None)
         self.polling.stop_polling(jobset_id)
 
     def query_once(self, jobset_id: str) -> None:
@@ -397,6 +419,115 @@ class LsfJobManager(QObject):
         """[sync] job 편입 (sync_lsf=True면 bmod -g — LSF 호출 포함)."""
         return self.jobsets.add_job(jobset_id, record, sync_lsf=sync_lsf)
 
+    def remove_job(self, jobset_id: str, job_key: str) -> JobRecord:
+        """[sync] job 편입 취소 — 제거된 레코드 반환 (add_job의 역연산).
+        LSF의 실제 job은 유지된다(저장소 추적에서만 제외)."""
+        return self.jobsets.remove_job(jobset_id, job_key)
+
+    def resubmit_jobs(self, jobset_id: str, job_keys: Sequence[str], *,
+                 commands: Optional[Dict[str, str]] = None,
+                 verify: bool = True, workers: Optional[int] = None,
+                 max_retry: Optional[int] = None,
+                 rate_limit_per_s: Optional[float] = None) -> None:
+        """[async→Signal] 지정 job들을 상태에 따라 (재)실행 — 결과는 submit_finished.
+
+        submit/resubmit을 호출자가 고르지 않는다. **각 job의 현재 상태**로 매니저가
+        자동 분기한다:
+          - LSF에 살아있는 job(is_on_lsf, 예: PEND/RUN) → **kill 후** 재제출
+          - 그 외(CREATED/SUBMIT_FAILED/LOST/DONE/EXIT) → 그냥 제출
+        레코드는 **재사용**된다 — 같은 job_key(-J 이름)로 다시 제출하고 job_id/
+        exit_code만 교체하므로 목록 슬롯·intended_count가 유지된다(삭제/재생성 없음).
+
+        job_keys: (재)실행할 job_key(lsf_job_name) 목록.
+        commands: {job_key: 새 커맨드} — 생략 시 기존 rec.command 재사용.
+        verify=True면 kill 후 실제 종료를 확인한 뒤 재제출한다.
+        """
+        recs = {r.job_key: r for r in self.get_jobs(jobset_id)}
+        targets: List[JobRecord] = []
+        for key in dict.fromkeys(job_keys):    # 중복 제거 (순서 유지) —
+            rec = recs.get(key)                # 같은 key 2회면 이중 제출됨
+            if rec is None:
+                raise JobNotFoundError(f"{jobset_id}/{key}")
+            if rec.array_index is not None:
+                raise LsfmgrError(
+                    f"array element({key})는 resubmit_jobs로 재제출할 수 없습니다")
+            targets.append(rec)
+        # kill-phase(코디네이터) 진행 중에도 거부해야 한다 — 이 구간엔
+        # submitter ctx가 아직 없어 is_active만으로는 plan 덮어쓰기를 못 막는다
+        if (self.submitter.is_active(jobset_id)
+                or self._resubmitter.is_active(jobset_id)):
+            raise LsfmgrError(
+                f"{jobset_id}: submit/resubmit 진행 중에는 "
+                f"resubmit_jobs를 호출할 수 없습니다")
+        if not targets:
+            return
+
+        kw: Dict[str, Any] = {}
+        if workers is not None:
+            kw["workers"] = workers
+        if max_retry is not None:
+            kw["max_retry"] = max_retry
+        if rate_limit_per_s is not None:
+            kw["rate_limit_per_s"] = rate_limit_per_s
+        opts = self.resolve_options(kw, context="submit")
+
+        cmds = commands or {}
+        live_ids = sorted({r.job_id for r in targets
+                           if r.state.is_on_lsf and r.job_id is not None})
+
+        # 재제출 경로는 job 단위 속성(rec.via_wrapper)으로 결정 — jobset 부착물
+        # 유무로 판별하면 merge된 혼합 jobset에서 wrapper job을 bsub로(이중
+        # 제출), bsub job을 로컬 실행으로(오실행) 보내는 오판이 생긴다
+        def to_item(r: JobRecord):
+            new_cmd = cmds.get(r.job_key)
+            if r.via_wrapper:
+                return shlex.split(new_cmd if new_cmd is not None
+                                   else r.command)
+            # bsub 경로 — 원 제출 옵션(queue/resources/outfile/env) 복원.
+            # command만 다시 만들면 이 옵션들이 기본값으로 조용히 소실된다
+            try:
+                spec = (spec_from_json(r.spec_json) if r.spec_json
+                        else JobSpec(command=r.command))
+            except (ValueError, TypeError) as e:
+                # 손상/신버전 spec_json (전방 호환) — 옵션은 포기하고
+                # command만으로 진행. 여기서 죽으면 재제출 전체가 막힌다
+                log.warning("spec_json 복원 실패(%s) — 옵션 없이 재제출: %s",
+                            e, r.job_key)
+                spec = JobSpec(command=r.command)
+            if new_cmd is not None:
+                spec = dc_replace(spec, command=new_cmd)
+            return spec
+
+        keyed = [(r.job_key, to_item(r)) for r in targets]
+
+        self.submit_started.emit(jobset_id)
+        self._resubmitter.start(ResubmitPlan(
+            jobset_id=jobset_id, keyed=keyed, opts=opts,
+            live_ids=live_ids, verify=verify))
+
+    # ------------------------------------------------------------------
+    # JobSet handler (FR-7)
+    # ------------------------------------------------------------------
+    def add_handler(self, jobset_id: str, name: str,
+                    fn: "Callable[[HandlerContext], Any]", *,
+                    interval_s: float = 10.0,
+                    start_states: StateSpec = None,
+                    end_states: StateSpec = None) -> None:
+        """[main→Signal] jobset에 이름 있는 handler 등록 — 주기 실행 시작.
+
+        interval_s초마다 각 job을 검사해서 start_states에 든 job은 handler(fn)를
+        worker 스레드에서 실행하고, end_states 도달 시 마지막으로 한 번 더 실행한다.
+        결과(fn 반환값)는 `handler_finished(jobset_id, name, HandlerResult)` 로 온다.
+        polling이 돌고 있어야 state 전이를 본다."""
+        self.store.get_jobset(jobset_id)          # 존재 검증
+        self.handlers.add_handler(
+            jobset_id, name, fn, interval_s=interval_s,
+            start_states=start_states, end_states=end_states)
+
+    def remove_handler(self, jobset_id: str, name: str) -> None:
+        """[main] handler 해제 — 타이머 중지."""
+        self.handlers.remove_handler(jobset_id, name)
+
     def merge_jobsets(self, jobset_ids: Sequence[str], *,
                       sync_lsf: bool = False,
                       keep_originals: bool = False) -> str:
@@ -409,6 +540,8 @@ class LsfJobManager(QObject):
                 # polling 중지 필수 — 삭제된 jobset을 계속 polling하면
                 # 매 주기 JobSetNotFoundError → error Signal 폭주
                 self.polling.stop_polling(old)
+                self.handlers.remove_all(old)
+                self._poll_intervals.pop(old, None)
                 self._invalidate_handle(old)
         return new_id
 
@@ -429,6 +562,8 @@ class LsfJobManager(QObject):
         js = self.jobsets.close_jobset(jobset_id, force=force,
                                        run_bgdel=False)   # 실패 시 여기서 예외
         self.polling.stop_polling(jobset_id)
+        self.handlers.remove_all(jobset_id)
+        self._poll_intervals.pop(jobset_id, None)
         self._invalidate_handle(jobset_id)
         if js.lsf_group_paths:
             paths = list(js.lsf_group_paths)
@@ -495,6 +630,8 @@ class LsfJobManager(QObject):
                 app.aboutToQuit.disconnect(self.shutdown)
             except (TypeError, RuntimeError):
                 pass                             # 미연결/이미 해제 — 무시
+        self.handlers.shutdown()        # handler 타이머 중지 + task 완료 대기
+        self._resubmitter.shutdown()         # resubmit_jobs kill-phase 완료 대기
         self.submitter.shutdown()       # 진행 중 bsub 완료 대기 (job_id 보존)
         self.polling.shutdown()
         self.killer.shutdown()

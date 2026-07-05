@@ -8,6 +8,7 @@
 """
 
 import getpass
+import os
 import random
 import re
 import time
@@ -57,6 +58,7 @@ def parse_args(argv: List[str]) -> Tuple[dict, List[str]]:
         "num_cpus": 1,
         "proj": "default",
         "group": "",
+        "cwd": os.getcwd(),      # 실제 LSF: exec cwd 기본값은 제출 디렉토리
     }
     i = 0
     cmd_start = None
@@ -82,6 +84,8 @@ def parse_args(argv: List[str]) -> Tuple[dict, List[str]]:
                 opts["proj"] = val
             elif tok == "-g":
                 opts["group"] = val
+            elif tok == "-cwd":
+                opts["cwd"] = val
             # 그 외 값 받는 옵션은 소비만 하고 무시.
             i += 2
             continue
@@ -208,6 +212,7 @@ def build_jobs(job_id: int, opts: dict, command: List[str],
             requested_hosts=hosts,
             proj=opts["proj"],
             job_group=opts.get("group", ""),
+            cwd=opts.get("cwd", ""),
         )
         for k, v in _plan_timing().items():
             setattr(j, k, v)

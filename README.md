@@ -104,15 +104,15 @@ js = mgr.submit_wrapper([
 - 모니터링·kill용 `bjobs`/`bkill`은 실제 LSF면 PATH, mocklsf면 경로를 지정합니다.
 
 > 작성 규칙·실행 방식(멀티 프로세스)·검증·트러블슈팅, 그리고 lsfmgr가 직접 bsub를
-> 조립하는 저수준 `submit`(+`bsub_path`)은 **[`docs/wrapper_guide.md`](docs/wrapper_guide.md)**
+> 조립하는 저수준 `submit`(+`bsub_path`)은 **[`docs/lsfmgr.md`](docs/lsfmgr.md)**
 > 에 정리되어 있습니다.
 
 ---
 
-## 3. JobSet 핸들 — 모든 것의 중심
+## 3. JobSet — 모든 것의 중심
 
-`submit()`은 문자열 ID가 아니라 **JobSet 핸들**을 반환합니다.
-이 핸들 하나로 해당 묶음의 모니터링/제어/조회를 전부 합니다.
+`submit()`은 문자열 ID가 아니라 **JobSet**을 반환합니다.
+이 JobSet 하나로 해당 묶음의 모니터링/제어/조회를 전부 합니다.
 
 ### 3.1 Signal (이 JobSet의 이벤트만 옴 — 필터링 불필요)
 
@@ -163,8 +163,8 @@ js.id                      # jobset_id 문자열 (로그/저장용)
 ### 3.4 그 외
 
 ```python
-merged = js_a.merge_with(js_b)         # 병합 → 새 핸들
-js2 = mgr.jobset(jobset_id)            # ID로 핸들 재획득
+merged = js_a.merge_with(js_b)         # 병합 → 새 JobSet
+js2 = mgr.jobset(jobset_id)            # ID로 JobSet 재획득
 ```
 
 ---
@@ -206,7 +206,7 @@ js.updated.connect(on_update)
 
 1. **slot은 main 스레드에서 실행** — Signal은 자동 queued connection이므로
    slot에서 바로 위젯 갱신 OK.
-2. **Signal로 받은 객체는 불변(frozen)** — 수정하지 말고 핸들 API를 쓰세요.
+2. **Signal로 받은 객체는 불변(frozen)** — 수정하지 말고 JobSet API를 쓰세요.
 3. **shutdown은 자동** — `QApplication.aboutToQuit`에 자동 연결됩니다.
    명시적으로 부르고 싶으면 `mgr.shutdown()` (멱등, 중복 안전).
 4. **대량 갱신은 batch** — `failed`/`updated`는 변경분/요약 단위로 오므로
@@ -231,7 +231,7 @@ mgr = LsfJobManager(persistent=True, db_path="/local_disk/jk/jobs.db")
 if mgr.persistent:
     for rec in mgr.list_orphan_jobsets():          # 미종결 JobSet 목록
         if ask_user(rec.label):                    # 복원 여부는 앱이 결정
-            js = mgr.recover_jobset(rec.jobset_id) # 핸들 반환
+            js = mgr.recover_jobset(rec.jobset_id) # JobSet 반환
             js.reconcile()                         # 죽어있는 동안의
                                                    # DONE/EXIT/LOST 반영 (비동기)
             # reconcile 완료 → updated Signal → 이후 자동 polling
@@ -292,7 +292,7 @@ worker 예외는 스레드를 죽이지 않고 로그 + `js.error` Signal로 전
 여러 JobSet을 한 화면에서 통합 관리하는 대시보드처럼 전역 이벤트 스트림이
 필요한 경우, manager의 전역 Signal을 직접 쓸 수 있습니다
 (`jobset_updated(jsid, summary)`, `jobs_updated(jsid, records)` 등 —
-핸들 Signal과 동일 이벤트의 이중 발행). 일반적인 경우엔 핸들 API로 충분합니다.
+JobSet Signal과 동일 이벤트의 이중 발행). 일반적인 경우엔 JobSet API로 충분합니다.
 
 ---
 
@@ -331,5 +331,5 @@ primesim_sub -q normal run1.sp   # == bsub -q normal run1.sp → "Job <id> ..."
 `submit_wrapper`에 이 커맨드들을 그대로 넘기면 lsfmgr가 실행하고 `Job <id>`를
 파싱해 job_id 기반으로 관리합니다. job 마다 다른 wrapper를 섞어 쓸 수 있습니다.
 
-실제 환경에서 wrapper를 작성·지정하는 방법은 **[`docs/wrapper_guide.md`](docs/wrapper_guide.md)**,
+실제 환경에서 wrapper를 작성·지정하는 방법은 **[`docs/lsfmgr.md`](docs/lsfmgr.md)**,
 mocklsf 자체는 [`docs/mocklsf.md`](docs/mocklsf.md)를 참고하세요.
