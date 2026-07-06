@@ -233,6 +233,19 @@ js.remove_handler("collect")             # 해제
 > 폴링으로 채워지는** `JobRecord` 필드다(사용자 입력 아님). 실행 시작 후 값이 생기며,
 > `mgr.get_jobs()` 로도 조회할 수 있다.
 
+> 참고 — **실패 원인 확인 (2경로)**:
+> - **`JobRecord.fail_message`** — `SUBMIT_FAILED`/`RETRY_WAIT` 에서
+>   bsub/wrapper 를 터미널에서 실행했을 때 나왔을 stderr/stdout 원문이
+>   자동 저장된다 (예: `LSF error: queue unavailable`). 재시도 성공/재제출
+>   리셋 시 지워진다. `js.failed_jobs` 나 `jobs_failed` Signal 레코드에서
+>   바로 읽는다.
+> - **`js.fetch_job_detail(job_key)`** — `EXIT` 원인은 자동 수집하지
+>   않는다(폴링 오버헤드 0). 상태 셀 클릭 등 필요한 시점에 호출하면
+>   `bhist -l` 원문이 `js.job_detail_ready(job_key, text)` Signal 로 온다
+>   (worker 스레드 수행 — GUI 안 멎음). 동기 버전 `js.job_detail(job_key)`
+>   는 blocking 주의. 제출 실패 job 에 호출하면 저장된 fail_message 를
+>   돌려주므로 클릭 핸들러 하나로 모든 실패 상태를 처리할 수 있다.
+
 ---
 
 ## 3. wrapper 가 지켜야 할 계약 (2가지)

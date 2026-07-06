@@ -267,6 +267,7 @@ class BulkSubmitter(QObject):
                 rec = self.store.transition(
                     jobset_id, key, JobState.SUBMITTING,
                     job_id=None, exit_code=None, fail_reason=None,
+                    fail_message=None,
                     retry_count=0, command=self._item_command(item),
                     submit_time=None, run_time_s=None, start_time=None,
                     finish_time=None, working_dir=None,
@@ -423,7 +424,7 @@ class BulkSubmitter(QObject):
                         job_id: int) -> None:
         rec = self.store.transition(ctx.jobset_id, job_key, JobState.PEND,
                                     job_id=job_id, submit_time=datetime.now(),
-                                    fail_reason=None)
+                                    fail_reason=None, fail_message=None)
         self._count(ctx, succeeded=True, changed=rec)
 
     def _task_failed(self, ctx: _SubmitContext, job_key: str, attempt: int,
@@ -436,9 +437,12 @@ class BulkSubmitter(QObject):
         if (getattr(err, "retryable", True) and attempt < ctx.max_retry
                 and not ctx.cancel_event.is_set() and not self._shutdown):
             # RETRY_WAIT → QTimer 스케줄 (스레드 sleep 점유 금지, §3.2)
+            # fail_message: 재시도 대기 중에도 마지막 시도의 터미널 메시지를
+            # 표에 보여줄 수 있고, 포기 확정(_finalize_retry) 시에도 잔존한다
             self.store.transition(ctx.jobset_id, job_key, JobState.RETRY_WAIT,
                                   retry_count=attempt + 1,
-                                  fail_reason=err.fail_reason)
+                                  fail_reason=err.fail_reason,
+                                  fail_message=err.diagnostic()[:4000])
             with ctx.lock:
                 ctx.retried_keys.add(job_key)
             self._schedule_retry(
@@ -450,7 +454,8 @@ class BulkSubmitter(QObject):
         rec = self.store.transition(ctx.jobset_id, job_key,
                                     JobState.SUBMIT_FAILED,
                                     retry_count=attempt,
-                                    fail_reason=err.fail_reason)
+                                    fail_reason=err.fail_reason,
+                                    fail_message=err.diagnostic()[:4000])
         self._count(ctx, failed=True, reason=err.fail_reason, changed=rec)
 
     def _task_cancelled(self, ctx: _SubmitContext, job_key: str) -> None:
@@ -466,7 +471,8 @@ class BulkSubmitter(QObject):
         try:
             self.store.transition(ctx.jobset_id, job_key,
                                   JobState.SUBMIT_FAILED,
-                                  fail_reason="INTERNAL_ERROR")
+                                  fail_reason="INTERNAL_ERROR",
+                                  fail_message=repr(err)[:4000])
         except Exception:                       # noqa: BLE001
             log.exception("crash 후 전이 실패: %s", job_key)
         self.error.emit(ctx.jobset_id, f"{job_key}: {err!r}")
@@ -613,7 +619,7 @@ class _ArraySubmitTask(QRunnable):
             self._run()
         except Exception as e:                  # noqa: BLE001
             log.exception("array submit 예외: %s", self.ctx.jobset_id)
-            changed = self._fail_all("INTERNAL_ERROR")
+            changed = self._fail_all("INTERNAL_ERROR", repr(e)[:4000])
             self.submitter.error.emit(self.ctx.jobset_id, repr(e))
             self.submitter._count(self.ctx, failed=True,
                                   reason="ARRAY_SUBMIT_FAILED",
@@ -649,16 +655,18 @@ class _ArraySubmitTask(QRunnable):
         except SubmitError as e:
             if (self.attempt < ctx.max_retry and not ctx.cancel_event.is_set()
                     and not sub._shutdown):
+                msg = e.diagnostic()[:4000]
                 for key in keys:
                     sub.store.transition(jsid, key, JobState.RETRY_WAIT,
                                          retry_count=self.attempt + 1,
-                                         fail_reason=e.fail_reason)
+                                         fail_reason=e.fail_reason,
+                                         fail_message=msg)
                 nxt = self.attempt + 1      # 값 즉시 캡처 (task는 autoDelete)
                 sub._schedule_retry(
                     ctx, keys, ctx.options.retry_delay_s(self.attempt),
                     lambda: _ArraySubmitTask(sub, ctx, spec, nxt))
                 return
-            changed = self._fail_all(e.fail_reason)
+            changed = self._fail_all(e.fail_reason, e.diagnostic()[:4000])
             sub._count(ctx, failed=True, reason="ARRAY_SUBMIT_FAILED",
                        changed=changed)
             return
@@ -669,7 +677,7 @@ class _ArraySubmitTask(QRunnable):
         for key in keys:
             r = sub.store.transition(jsid, key, JobState.PEND,
                                      job_id=array_id, submit_time=now,
-                                     fail_reason=None)
+                                     fail_reason=None, fail_message=None)
             if r is not None:
                 recs.append(r)
         sub._count(ctx, succeeded=True, changed=recs)
@@ -690,7 +698,7 @@ class _ArraySubmitTask(QRunnable):
                  | stat_mod.S_IXUSR | stat_mod.S_IXGRP)
         return sh_path
 
-    def _fail_all(self, reason: str) -> list:
+    def _fail_all(self, reason: str, message: Optional[str] = None) -> list:
         """전 element를 SUBMIT_FAILED로 확정. 반환: 전이된 레코드 목록 —
         _count(changed=...)로 넘겨 jobs_updated/jobs_failed 발행을 보장한다
         (누락 시 UI 표가 SUBMITTING에 고착)."""
@@ -700,7 +708,8 @@ class _ArraySubmitTask(QRunnable):
             try:
                 rec = self.submitter.store.transition(
                     jsid, f"{jsid}[{i}]", JobState.SUBMIT_FAILED,
-                    retry_count=self.attempt, fail_reason=reason)
+                    retry_count=self.attempt, fail_reason=reason,
+                    fail_message=message)
                 if rec is not None:
                     changed.append(rec)
             except Exception:                   # noqa: BLE001

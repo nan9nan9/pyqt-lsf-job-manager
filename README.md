@@ -128,7 +128,7 @@ js = mgr.submit_wrapper([
 | `jobset_updated` | `dict` 요약 | **submit 완료 시(초기 PEND)** + polling/refresh 후 |
 | `submit_progress` | `(done, total)` | submit/resubmit 진행 (throttled) |
 | `submit_finished` | `SubmitReport` | submit/resubmit 완료 (retry 포함 최종) |
-| `jobs_failed` | `list[JobRecord]` | SUBMIT_FAILED/EXIT/LOST 변경분 |
+| `jobs_failed` | `list[JobRecord]` | SUBMIT_FAILED/EXIT/LOST 변경분 — `rec.fail_message`에 실패 진단 원문 |
 | `kill_progress` | `(done, total)` | 대량 chunk kill 진행 (throttled, 마지막 100%) |
 | `kill_finished` | `KillReport` | kill 완료 |
 | `handler_finished` | `(name, HandlerResult)` | 등록한 handler 1회 실행 완료마다 (§3.5) |
@@ -176,6 +176,17 @@ js.jobs(states={JobState.RUN})
 js.detect_lost()           # 손실 감지 (name 패턴 복구 시도 포함)
 js.id                      # jobset_id 문자열 (로그/저장용)
 ```
+
+> **실패 원인 표시** — 두 경로로 확인합니다.
+> - **SUBMIT_FAILED/RETRY_WAIT**: `rec.fail_message`에 bsub/wrapper 실행의
+>   stderr/stdout(터미널에서 봤을 메시지)이 자동 저장됩니다. 재시도 성공/
+>   재제출 시 자동으로 지워집니다.
+> - **EXIT**: 자동 수집하지 않습니다(폴링 오버헤드 0). 상태 셀 클릭 등
+>   필요한 시점에 `js.fetch_job_detail(job_key)`를 호출하면 `bhist -l`
+>   원문이 `js.job_detail_ready(job_key, text)` Signal로 옵니다(bhist는
+>   worker 스레드 — GUI 안 멎음). 동기 버전은 `js.job_detail(job_key)`.
+>   제출 실패 job에 호출하면 저장된 fail_message를 돌려주므로, 클릭 핸들러
+>   하나로 모든 실패 상태를 처리할 수 있습니다.
 
 > 조회 값은 **마지막 polling 시점 스냅샷**입니다 (최대 `poll_interval_s`
 > 지연). 단 `SUBMIT_FAILED`는 submit 과정에서 직접 기록되므로 항상 정확합니다.

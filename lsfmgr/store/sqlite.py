@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     array_index  INTEGER,
     state        TEXT NOT NULL,
     fail_reason  TEXT,
+    fail_message TEXT,
     retry_count  INTEGER NOT NULL DEFAULT 0,
     exit_code    INTEGER,
     submit_time  TEXT,
@@ -129,7 +130,8 @@ class SqliteStore(JobSetStore):
                            ("start_time", "TEXT"), ("finish_time", "TEXT"),
                            ("working_dir", "TEXT"),
                            ("via_wrapper", "INTEGER NOT NULL DEFAULT 0"),
-                           ("spec_json", "TEXT")):
+                           ("spec_json", "TEXT"),
+                           ("fail_message", "TEXT")):
             if name not in cols:
                 try:
                     con.execute(f"ALTER TABLE jobs ADD COLUMN {name} {decl}")
@@ -226,6 +228,7 @@ class SqliteStore(JobSetStore):
             job_id=r["job_id"], array_index=r["array_index"],
             jobset_id=r["jobset_id"], lsf_job_name=r["lsf_job_name"],
             state=JobState(r["state"]), fail_reason=r["fail_reason"],
+            fail_message=r["fail_message"],
             retry_count=r["retry_count"], exit_code=r["exit_code"],
             submit_time=_dt(r["submit_time"]), command=r["command"],
             updated_at=_dt(r["updated_at"]),
@@ -241,10 +244,10 @@ class SqliteStore(JobSetStore):
                     "description", "parent_jobset_id", "created_by",
                     "created_at", "merged_from", "session_id", "closed")
     _JOB_COLS = ("jobset_id", "lsf_job_name", "job_id", "array_index",
-                 "state", "fail_reason", "retry_count", "exit_code",
-                 "submit_time", "command", "updated_at", "run_time_s",
-                 "start_time", "finish_time", "working_dir", "via_wrapper",
-                 "spec_json")
+                 "state", "fail_reason", "fail_message", "retry_count",
+                 "exit_code", "submit_time", "command", "updated_at",
+                 "run_time_s", "start_time", "finish_time", "working_dir",
+                 "via_wrapper", "spec_json")
 
     def _put_jobset(self, con: sqlite3.Connection, js: JobSetRecord) -> None:
         con.execute(
@@ -262,8 +265,8 @@ class SqliteStore(JobSetStore):
             f"INSERT OR REPLACE INTO jobs ({','.join(self._JOB_COLS)}) "
             f"VALUES ({','.join('?' * len(self._JOB_COLS))})",
             (j.jobset_id, j.lsf_job_name, j.job_id, j.array_index,
-             j.state.value, j.fail_reason, j.retry_count, j.exit_code,
-             _iso(j.submit_time), j.command, _iso(j.updated_at),
+             j.state.value, j.fail_reason, j.fail_message, j.retry_count,
+             j.exit_code, _iso(j.submit_time), j.command, _iso(j.updated_at),
              j.run_time_s, _iso(j.start_time), _iso(j.finish_time),
              j.working_dir, int(j.via_wrapper), j.spec_json))
 
@@ -581,7 +584,9 @@ class SqliteStore(JobSetStore):
             "jobs": [{
                 "job_id": j.job_id, "array_index": j.array_index,
                 "lsf_job_name": j.lsf_job_name, "state": j.state.value,
-                "fail_reason": j.fail_reason, "retry_count": j.retry_count,
+                "fail_reason": j.fail_reason,
+                "fail_message": j.fail_message,
+                "retry_count": j.retry_count,
                 "exit_code": j.exit_code, "submit_time": _iso(j.submit_time),
                 "command": j.command, "updated_at": _iso(j.updated_at),
                 "run_time_s": j.run_time_s,

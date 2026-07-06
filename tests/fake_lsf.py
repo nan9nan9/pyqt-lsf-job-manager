@@ -243,12 +243,16 @@ class FakeLsf:
         _, rest = _parse_opts(args, {"-n"}, flags={"-l"})
         blocks = []
         for a in rest:
-            if not a.isdigit():
+            m = re.match(r"^(\d+)(?:\[(\d+)\])?$", a)   # "id" 또는 "id[idx]"
+            if not m:
                 continue
-            jid = int(a)
+            jid = int(m.group(1))
+            idx = int(m.group(2)) if m.group(2) else None
             # 실제 bhist처럼 array는 element별 블록("Job <id[idx]>") 출력
             for j in self.jobs.values():
                 if j.job_id != jid or not j.in_bhist:
+                    continue
+                if idx is not None and j.array_index != idx:
                     continue
                 if j.stat == "DONE":
                     body = "Done successfully."

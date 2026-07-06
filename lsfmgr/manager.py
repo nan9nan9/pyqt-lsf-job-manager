@@ -64,6 +64,7 @@ class LsfJobManager(QObject):
     kill_progress = Signal(str, int, int)      # jobset_id, done, total (chunk kill)
     error_occurred = Signal(str, str)          # jobset_id, message
     handler_finished = Signal(str, str, object)  # jobset_id, handler_name, HandlerResult
+    job_detail_ready = Signal(str, str, str)   # jobset_id, job_key, 상세 텍스트
 
     def __init__(self, store: Optional[JobSetStore] = None,
                  config: Optional[LsfConfig] = None,
@@ -170,6 +171,7 @@ class LsfJobManager(QObject):
         self.kill_progress.connect(self._handle_relay("kill_progress"))
         self.error_occurred.connect(self._handle_relay("error_occurred"))
         self.handler_finished.connect(self._handle_relay("handler_finished"))
+        self.job_detail_ready.connect(self._handle_relay("job_detail_ready"))
         self.submit_finished.connect(self._h_finished)
         self.submit_finished.connect(self._emit_summary_after_submit)
         self.kill_finished.connect(self._emit_updates_after_kill)
@@ -409,6 +411,39 @@ class LsfJobManager(QObject):
                  states: Optional[Set[JobState]] = None) -> List[JobRecord]:
         """[sync, snapshot] job 상세 (Store 조회)."""
         return self.store.get_jobs(jobset_id, states)
+
+    def fetch_job_detail(self, jobset_id: str, job_key: str) -> None:
+        """[async→Signal] job 1건의 실패/종료 상세 텍스트 조회 — 결과는
+        job_detail_ready(jobset_id, job_key, text).
+
+        UI에서 상태 셀 클릭 시 온디맨드로 호출한다 (폴링과 무관 — 자동 수집
+        오버헤드 없음). LSF에 제출됐던 job(job_id 확보)은 `bhist -l` 원문,
+        제출 실패 job(job_id 없음)은 저장된 fail_message(터미널 stderr/stdout).
+        blocking(bhist)은 worker 스레드에서 수행되므로 GUI가 멎지 않는다."""
+        rec = self.store.get_job(jobset_id, job_key)   # 존재 검증 (동기)
+
+        def work():
+            try:
+                text = self._job_detail_text(rec)
+            except LsfmgrError as e:
+                text = f"(조회 실패) {e}"
+            self.job_detail_ready.emit(jobset_id, job_key, text)
+
+        self._misc_pool.start(_CallTask(work))
+
+    def job_detail(self, jobset_id: str, job_key: str) -> str:
+        """[sync, LSF 조회 포함] fetch_job_detail의 동기 버전 — blocking 주의
+        (GUI main 스레드에서는 fetch_job_detail 권장)."""
+        return self._job_detail_text(self.store.get_job(jobset_id, job_key))
+
+    def _job_detail_text(self, rec: JobRecord) -> str:
+        """상세 텍스트 결정 — bhist -l 원문 우선, 없으면 fail_message."""
+        if rec.job_id is None:                # 제출 실패 — LSF에 이력 없음
+            return rec.fail_message or ""
+        text = self.command.bhist_detail(rec.job_id, rec.array_index)
+        if not text.strip():                  # bhist 이력 만료 등
+            return rec.fail_message or ""
+        return text
 
     # ------------------------------------------------------------------
     # Kill (FR-3)

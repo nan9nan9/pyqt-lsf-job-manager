@@ -241,13 +241,15 @@ class LsfCommand:
             raise SubmitError(
                 f"bsub exit {res.returncode}: {res.stderr.strip()[:200]}",
                 fail_reason=f"BSUB_EXIT_{res.returncode}",
-                returncode=res.returncode, stderr=res.stderr)
+                returncode=res.returncode, stderr=res.stderr,
+                stdout=res.stdout)
 
         m = _JOB_ID_RE.search(res.stdout)
         if not m:
             raise SubmitError(
                 f"job id 파싱 실패: {res.stdout.strip()[:200]}",
-                fail_reason="NO_JOBID_PARSED", stderr=res.stderr)
+                fail_reason="NO_JOBID_PARSED", stderr=res.stderr,
+                stdout=res.stdout)
         return int(m.group(1))
 
     def _bsub_argv(self, command: str, *, queue, job_name, group_path,
@@ -302,13 +304,14 @@ class LsfCommand:
             raise SubmitError(
                 f"wrapper exit {res.returncode}: {res.stderr.strip()[:200]}",
                 fail_reason=f"BSUB_EXIT_{res.returncode}",
-                returncode=res.returncode, stderr=res.stderr, retryable=True)
+                returncode=res.returncode, stderr=res.stderr,
+                stdout=res.stdout, retryable=True)
         m = _JOB_ID_RE.search(res.stdout)
         if not m:
             raise SubmitError(
                 f"job id 파싱 실패: {res.stdout.strip()[:200]}",
                 fail_reason="NO_JOBID_PARSED", stderr=res.stderr,
-                retryable=False)
+                stdout=res.stdout, retryable=False)
         return int(m.group(1))
 
     # ------------------------------------------------------------------
@@ -465,6 +468,19 @@ class LsfCommand:
                 continue
             result.update(self._parse_bhist(res.stdout))
         return result
+
+    def bhist_detail(self, job_id: int,
+                     array_index: Optional[int] = None) -> str:
+        """job 1건의 bhist -l 원문 조회 — EXIT 원인 확인용 (blocking).
+
+        UI에서 상태 클릭 시 온디맨드로 호출한다(폴링과 무관 — 자동 수집
+        오버헤드 없음). array element는 array_index로 "id[idx]" 지정.
+        미발견이면 빈 문자열, 장애(timeout 등)는 LsfCommandError."""
+        target = (f"{job_id}[{array_index}]" if array_index is not None
+                  else str(job_id))
+        argv = cmd_tokens(self.config.bhist_path) + ["-l", "-n", "0", target]
+        res = self._run_query(argv)
+        return res.stdout if res is not None else ""
 
     @staticmethod
     def _parse_bhist(stdout: str

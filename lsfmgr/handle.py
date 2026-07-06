@@ -28,6 +28,7 @@ class JobSet(QObject):
     kill_progress = Signal(int, int)   # chunk kill 진행 (done, total)
     error_occurred = Signal(str)       # worker 예외 등
     handler_finished = Signal(str, object)   # handler_name, HandlerResult
+    job_detail_ready = Signal(str, str)      # job_key, 상세 텍스트 (fetch_job_detail)
 
     def __init__(self, manager: "LsfJobManager", jobset_id: str):
         super().__init__(manager)
@@ -164,6 +165,20 @@ class JobSet(QObject):
         """[sync, LSF 조회 포함] 손실 감지/복구 (FR-5.3) — blocking 주의."""
         self._check_open()
         return self._manager.detect_lost(self._jobset_id)
+
+    def fetch_job_detail(self, job_key: str) -> None:
+        """[async→Signal] job 1건의 실패/종료 상세 텍스트 조회 — 결과는
+        job_detail_ready(job_key, text) Signal. 상태 셀 클릭 핸들러에서
+        호출하면 된다 (bhist는 worker 스레드 — GUI 안 멎음).
+        EXIT/DONE 등 제출됐던 job은 bhist -l 원문, 제출 실패 job은 저장된
+        fail_message(터미널 stderr/stdout)."""
+        self._check_open()
+        self._manager.fetch_job_detail(self._jobset_id, job_key)
+
+    def job_detail(self, job_key: str) -> str:
+        """[sync, LSF 조회 포함] fetch_job_detail의 동기 버전 — blocking 주의."""
+        self._check_open()
+        return self._manager.job_detail(self._jobset_id, job_key)
 
     # ------------------------------------------------------------------
     # 조회 — 전부 [sync, snapshot]: Store만 읽음, LSF 호출 없음

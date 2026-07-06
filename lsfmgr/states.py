@@ -72,6 +72,11 @@ class JobRecord:
     lsf_job_name: str                # "<jobset_id>_<idx>" 또는 "<jobset_id>[<idx>]"
     state: JobState
     fail_reason: Optional[str] = None    # "NO_JOBID_PARSED"|"BSUB_TIMEOUT"|...
+    # 실패 진단 원문 — UI가 "왜 실패했나"를 그대로 보여주는 용도.
+    # SUBMIT_FAILED/RETRY_WAIT에서 bsub/wrapper 실행의 stderr/stdout(터미널
+    # 메시지)이 저장된다. EXIT의 원인은 저장하지 않는다 — 필요 시점에
+    # manager.fetch_job_detail()로 bhist -l 원문을 온디맨드 조회 (폴링 부하 0)
+    fail_message: Optional[str] = None
     retry_count: int = 0
     exit_code: Optional[int] = None
     submit_time: Optional[datetime] = None
