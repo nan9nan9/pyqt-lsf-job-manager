@@ -1,4 +1,4 @@
-"""ResubmitCoordinator — resubmit_jobs의 kill→재제출 오케스트레이션.
+"""ResubmitCoordinator — resubmit_jobs의 kill→재제출 오케스트레이션 (FR-8).
 
 kill(+verify)은 worker 스레드에서 blocking으로, 이어지는 재제출은 main
 스레드에서 수행한다 (Qt 스레드 규율: 블로킹은 worker, QObject/pool 조작은

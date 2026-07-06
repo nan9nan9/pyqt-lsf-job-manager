@@ -119,10 +119,11 @@ js = mgr.submit_wrapper([
 | Signal | 인자 | 시점 |
 |---|---|---|
 | `updated` | `dict` 요약 | polling/refresh 후 |
-| `progress` | `(done, total)` | submit 진행 (throttled) |
-| `finished` | `SubmitReport` | submit 완료 (retry 포함 최종) |
+| `progress` | `(done, total)` | submit/resubmit 진행 (throttled) |
+| `finished` | `SubmitReport` | submit/resubmit 완료 (retry 포함 최종) |
 | `failed` | `list[JobRecord]` | SUBMIT_FAILED/EXIT/LOST 변경분 |
 | `killed` | `KillReport` | kill 완료 |
+| `handler_finished` | `(name, HandlerResult)` | 등록한 handler 1회 실행 완료마다 (§3.5) |
 | `error` | `str` | worker 예외 등 |
 
 요약 dict 예:
@@ -138,9 +139,11 @@ js = mgr.submit_wrapper([
 js.kill()                              # 전체 kill (명령 1회, ARG_MAX 안전)
 js.kill(only_state=JobState.PEND)      # PEND만
 js.kill(verify=True)                   # 실제 종료까지 확인
-js.cancel()                            # 진행 중 submit 중단 (된 것은 유지)
+js.cancel()                            # 진행 중 submit/resubmit 중단 (된 것은 유지)
 js.refresh()                           # 지금 즉시 1회 조회 요청
 js.stop_polling(); js.start_polling(interval_s=30)
+js.resubmit_jobs([job_key, ...])       # 특정 job 재실행 — 살아있으면 kill 후
+                                       # (레코드 재사용, 원 제출 옵션 보존)
 js.close()                             # 종결 (전원 terminal일 때)
 ```
 
@@ -165,7 +168,37 @@ js.id                      # jobset_id 문자열 (로그/저장용)
 ```python
 merged = js_a.merge_with(js_b)         # 병합 → 새 JobSet
 js2 = mgr.jobset(jobset_id)            # ID로 JobSet 재획득
+js.add_job(record); js.remove_job(key) # job 편입 / 편입 취소 (intended 유지)
 ```
+
+### 3.5 job별 주기 handler — 실행 중 파싱 + 최종 수집
+
+JobSet에 **이름 있는 handler**를 붙이면, 각 job이 지정한 state 구간에 있는
+동안 몇 초마다 **worker 스레드에서** 실행됩니다. 시뮬레이션이 도는 동안 출력
+디렉토리를 주기적으로 파싱하고, 끝나면 최종 수집을 한 번 더 하는 용도입니다.
+
+```python
+def collect(ctx):                          # worker 스레드 — GUI 안 막음
+    # ctx.job_id / ctx.working_dir(LSF exec_cwd) / ctx.record / ctx.final
+    return parse_outputs(ctx.working_dir)  # 반환값이 Signal로 전달됨
+
+js.handler_finished.connect(
+    lambda name, res: print(name, res.job_key, res.data, res.final))
+
+js.add_handler("collect", collect,
+               interval_s=5,                            # 5초마다
+               start_states={JobState.RUN},             # RUN이 되면 시작
+               end_states={JobState.DONE, JobState.EXIT})  # 종료 시 최종 1회
+js.remove_handler("collect")               # 완전 해제
+```
+
+- `handler_finished`는 **1회 실행이 끝날 때마다** job별로 옵니다 — 최종 실행은
+  `res.final`로 구분. 예외는 `res.error`에 담겨 옵니다(다른 job에 영향 없음).
+- 모든 job이 최종 실행까지 끝나면 handler는 **휴면**(타이머 정지, 등록 유지)
+  하고, `resubmit_jobs`로 재실행하면 자동 재무장/재가동됩니다.
+- polling이 돌고 있어야 state 전이를 봅니다(§AUTO-1 기본 동작이면 자동).
+- 실행 예제: `examples/handler_example.py`, 상세 규칙:
+  [`docs/lsfmgr.md`](docs/lsfmgr.md) §2.5.
 
 ---
 
