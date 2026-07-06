@@ -259,6 +259,13 @@ JobSetStore(ABC) ── InMemoryStore(기본) | SqliteStore(persistent=True)
   최대 `max_retry`회, `retry_backoff` 정책, 성공 시 동일 JobSet 편입
 - **FR-3 Kill**: 전략 우선순위 ①`bkill -g` ②array ③`-J` 패턴 ④chunking,
   부분 kill(`only_state`), verify 옵션. **[v7] `js.kill()` JobSet 메서드 추가**
+  - **[v7.1] FR-3.4 확인+재시도**: bkill 출력의 `Job <id> is being terminated`
+    확인 문구를 파싱해 미확인분을 재시도(`kill_max_retry`), `KillReport`에
+    `unconfirmed`/`kill_retries` 보고
+  - **[v7.1] FR-3.5 kill 상태 정책** (`kill_status_policy`): `"optimistic"`(기본)
+    = terminated 확인 시 즉시 EXIT로 전이(`KillReport.changed`, jobs_updated/
+    jobset_updated 발화, EXIT는 terminal이라 폴링 제외) / `"actual"` = 실제 LSF
+    상태(verify/폴링)로만 EXIT 반영. bkill이 비동기임을 앱이 정책으로 선택
 - **FR-4 Monitoring**: 조회 전략 group→array→name→chunking,
   `is_on_lsf`만 조회, bhist fallback→LOST, polling은 batch 반영 후 Signal.
   **[v7] AUTO-1/AUTO-2 자동 polling 라이프사이클**

@@ -82,29 +82,47 @@ class _KillTask(QRunnable):
         calls = 0
         unconfirmed = 0
         retries = 0
+        optimistic = (k.command.config.kill_status_policy == "optimistic")
+        killed_recs: List = []       # optimistic EXIT 대상 (kill 확인된 레코드)
 
         if self.job_ids is not None:
             # 개별 ID kill — 확인 후 미확인분 재시도 (FR-3.4)
             requested = len(self.job_ids)
             targets = [str(i) for i in self.job_ids]
-            calls, unconfirmed, retries = self._kill_confirm(targets, errors)
+            calls, unconfirmed, retries, resolved = self._kill_confirm(
+                targets, errors)
             strategies.append("chunk")
+            if optimistic and self.jobset_id:
+                killed_recs = self._records_for(resolved)
         elif self.only_state is not None:
             # 부분 kill (FR-3.2) — Store에서 해당 상태 job을 골라 chunking.
             # (bkill -stat은 LSF 버전 의존이라 결정적 방식을 기본으로 한다)
             # array element는 반드시 "id[idx]"로 지정 — parent id로 죽이면
             # 다른 상태의 element까지 전부 kill된다.
             recs = k.store.get_jobs(self.jobset_id, states={self.only_state})
-            targets = [f"{r.job_id}[{r.array_index}]"
-                       if r.array_index is not None else str(r.job_id)
-                       for r in recs if r.job_id is not None]
+            targets = [self._id_str(r) for r in recs if r.job_id is not None]
             requested = len(targets)
             if targets:
-                calls, unconfirmed, retries = self._kill_confirm(
+                calls, unconfirmed, retries, resolved = self._kill_confirm(
                     targets, errors)
                 strategies.append(f"chunk(state={self.only_state.value})")
+                if optimistic:
+                    killed_recs = [r for r in recs
+                                   if self._id_str(r) in resolved]
         else:
-            requested, calls = self._kill_whole_jobset(strategies, errors)
+            requested, calls, alive = self._kill_whole_jobset(
+                strategies, errors)
+            # 전체 kill은 group/name 전략(1명령)이라 per-id 확인이 없다 —
+            # 전략이 오류 없이 수행됐으면 살아있던 대상 전부를 확인된 것으로
+            # 간주한다(kill 명령이 수락됨).
+            if optimistic and not errors:
+                killed_recs = alive
+
+        # optimistic 정책: 확인된 job을 즉시 EXIT로 전이 (bjobs 대기 없이).
+        # EXIT는 terminal이라 폴링 대상(is_on_lsf)에서 빠져 다시 조회되지 않는다.
+        changed: List = []
+        if optimistic and killed_recs:
+            changed = self._mark_exited(killed_recs)
 
         still_alive: Optional[int] = None
         if self.verify and self.jobset_id:
@@ -114,21 +132,46 @@ class _KillTask(QRunnable):
             jobset_id=self.jobset_id, requested=requested,
             strategies=strategies, command_calls=calls,
             still_alive=still_alive, unconfirmed=unconfirmed,
-            kill_retries=retries, errors=errors)
+            kill_retries=retries, changed=changed, errors=errors)
+
+    @staticmethod
+    def _id_str(rec) -> str:
+        return (f"{rec.job_id}[{rec.array_index}]"
+                if rec.array_index is not None else str(rec.job_id))
+
+    def _records_for(self, resolved: set) -> List:
+        """resolved id 집합에 해당하는 jobset 레코드 — optimistic EXIT 대상."""
+        return [r for r in self.killer.store.get_jobs(self.jobset_id)
+                if r.job_id is not None and self._id_str(r) in resolved]
+
+    def _mark_exited(self, recs: List) -> List:
+        """확인된 kill 대상을 EXIT로 전이 (아직 on-lsf인 것만, guard로 CAS).
+        반환: 실제 전이된 레코드."""
+        changed = []
+        for r in recs:
+            new = self.killer.store.transition(
+                self.jobset_id, r.job_key, JobState.EXIT,
+                fail_reason="KILLED",
+                guard=lambda cur: cur.state.is_on_lsf)
+            if new is not None:
+                changed.append(new)
+        return changed
 
     def _kill_confirm(self, targets: List[str],
-                      errors: List[str]) -> Tuple[int, int, int]:
+                      errors: List[str]) -> Tuple[int, int, int, set]:
         """concrete-id kill — bkill 출력의 확인('is being terminated' 등)을
         보고 미확인분을 재시도한다 (submit retry와 대칭, FR-3.4).
-        반환: (LSF 호출 횟수, 최종 미확인 수, 재시도 라운드 수)."""
+        반환: (LSF 호출 횟수, 최종 미확인 수, 재시도 라운드 수, 해소된 id 집합)."""
         k = self.killer
         cfg = k.command.config
         pending = set(targets)
+        resolved_all: set = set()
         calls = 0
         attempt = 0
         while True:
             resolved, c = k.command.bkill_targets_confirm(sorted(pending))
             calls += c
+            resolved_all |= resolved
             pending -= resolved
             if not pending or attempt >= cfg.kill_max_retry:
                 break
@@ -142,7 +185,7 @@ class _KillTask(QRunnable):
                    f"(재시도 {attempt}회 후): {sorted(pending)[:20]}")
             log.error(msg)
             errors.append(msg)
-        return calls, len(pending), attempt
+        return calls, len(pending), attempt, resolved_all
 
     def _kill_whole_jobset(self, strategies: List[str],
                            errors: List[str]) -> tuple:
@@ -152,7 +195,7 @@ class _KillTask(QRunnable):
         alive = [r for r in k.store.get_jobs(self.jobset_id)
                  if r.state.is_on_lsf]
         if not alive:
-            return 0, 0
+            return 0, 0, []
 
         calls = 0
         covered = False
@@ -186,7 +229,7 @@ class _KillTask(QRunnable):
             if targets:
                 calls += k.command.bkill_targets(targets)
                 strategies.append("chunk")
-        return len(alive), calls
+        return len(alive), calls, alive
 
     @staticmethod
     def _attempt(fn, name: str, strategies: List[str],

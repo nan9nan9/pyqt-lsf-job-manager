@@ -33,6 +33,8 @@ class KillReport:
     still_alive: Optional[int] = None    # verify=True일 때 재조회 후 잔존 수
     unconfirmed: int = 0                 # 재시도 후에도 kill 확인 못 한 수 (FR-3.4)
     kill_retries: int = 0                # kill 재시도 라운드 수
+    changed: List = field(default_factory=list)   # optimistic 정책에서 EXIT로
+                                         # 전이된 JobRecord (FR-3.5)
     errors: List[str] = field(default_factory=list)
 
 

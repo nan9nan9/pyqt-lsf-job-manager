@@ -27,6 +27,7 @@ MANAGER_ONLY_KEYS = frozenset({
     "script_dir", "arg_max",
     "bsub_path", "bjobs_path", "bkill_path", "bhist_path", "bmod_path",
     "bgdel_path",
+    "kill_status_policy", "kill_max_retry", "kill_retry_delay_s",
 })
 
 #: ① 라이브러리 내장 기본값
@@ -133,6 +134,21 @@ def _validate(key: str, value: Any) -> Any:
         if value not in ("auto", "array", "bulk"):
             raise ValueError(f"mode는 auto/array/bulk (got {value!r})")
         return value
+    if key == "kill_status_policy":
+        if value not in ("optimistic", "actual"):
+            raise ValueError(
+                f"kill_status_policy는 optimistic/actual (got {value!r})")
+        return value
+    if key == "kill_max_retry":
+        v = int(value)
+        if v < 0:
+            raise ValueError(f"kill_max_retry는 0 이상 (got {value})")
+        return v
+    if key == "kill_retry_delay_s":
+        v = float(value)
+        if v < 0:
+            raise ValueError(f"kill_retry_delay_s는 0 이상 (got {value})")
+        return v
     if key in ("auto_poll", "verify_kill"):
         return bool(value)
     if key == "tags":

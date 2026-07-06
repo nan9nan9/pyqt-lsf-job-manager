@@ -44,6 +44,13 @@ class LsfConfig:
     kill_max_retry: int = 2              # kill 확인 실패 시 재시도 (FR-3.4)
     kill_retry_delay_s: float = 3.0      # kill 재시도 간격 — bkill은 비동기라
                                          # 확인('is being terminated')까지 여유
+    #: kill 상태 정책 (FR-3.5)
+    #: "optimistic" — bkill 'is being terminated' 확인 시 즉시 EXIT로 간주(기본).
+    #                 bkill이 비동기라 실제 종료 전이지만, kill 의도가 수락됐으니
+    #                 EXIT로 낙관 표시하고 폴링은 이 job을 더 조회하지 않는다.
+    #: "actual"     — terminated 확인만으론 상태를 안 바꾸고, 실제 LSF 상태
+    #                 (bjobs verify/폴링)로만 EXIT를 반영한다.
+    kill_status_policy: str = "optimistic"
 
     poll_interval_s: float = 10.0        # FR-4.4 기본 polling 주기
 
@@ -51,6 +58,10 @@ class LsfConfig:
         self.workers = max(1, min(32, int(self.workers)))
         if self.chunk_size < 1:
             self.chunk_size = 200
+        if self.kill_status_policy not in ("optimistic", "actual"):
+            raise ValueError(
+                "kill_status_policy는 'optimistic' 또는 'actual' "
+                f"(got {self.kill_status_policy!r})")
 
     def resolve_script_dir(self) -> str:
         path = self.script_dir or os.path.join(

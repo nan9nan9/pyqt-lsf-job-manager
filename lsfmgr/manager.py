@@ -44,7 +44,8 @@ log = logging.getLogger("lsfmgr.manager")
 #: LsfConfig 필드로 직접 전달되는 manager 전용 키
 _CONFIG_KEYS = ("bsub_path", "bjobs_path", "bkill_path", "bhist_path",
                 "bmod_path", "bgdel_path", "script_dir", "lsf_group_root",
-                "arg_max", "default_queue", "chunk_size")
+                "arg_max", "default_queue", "chunk_size",
+                "kill_status_policy", "kill_max_retry", "kill_retry_delay_s")
 
 
 class LsfJobManager(QObject):
@@ -163,6 +164,7 @@ class LsfJobManager(QObject):
         self.handler_finished.connect(self._handle_relay("handler_finished"))
         self.submit_finished.connect(self._h_finished)
         self.submit_finished.connect(self._emit_summary_after_submit)
+        self.kill_finished.connect(self._emit_updates_after_kill)
         self.jobs_updated.connect(self._h_jobs_updated)
 
         # AUTO-3: 앱 종료 시 shutdown 자동 연결 (명시 호출과 중복 안전)
@@ -665,6 +667,21 @@ class LsfJobManager(QObject):
         self.jobset_updated.emit(jsid, summary)
         if records:
             self.jobs_updated.emit(jsid, records)
+
+    def _emit_updates_after_kill(self, jsid: str, report) -> None:
+        """kill 완료 시 상태 반영을 update Signal로 발화. optimistic 정책이면
+        EXIT로 전이된 job(report.changed)을 jobs_updated로, 그리고 요약을
+        jobset_updated로 — 폴링 없이도 UI가 kill 결과를 즉시 본다.
+        (actual 정책이면 changed가 비어 요약만 나가고, 실제 EXIT는 폴링/verify로)"""
+        if not jsid:
+            return                       # kill_jobs(jobset_id="") — 대상 없음
+        changed = getattr(report, "changed", None)
+        if changed:
+            self.jobs_updated.emit(jsid, changed)
+        try:
+            self.jobset_updated.emit(jsid, self.store.summary(jsid))
+        except LsfmgrError:
+            pass
 
     def _handle_of(self, jobset_id: str) -> Optional[JobSet]:
         h = self._handles.get(jobset_id)

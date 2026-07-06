@@ -107,6 +107,59 @@ def test_kill_retries_until_confirmed(qtbot, manager, fake_lsf, submitted):
     assert all(j.job_id not in ids for j in fake_lsf.alive_jobs())
 
 
+# ----------------------------------------------------------------------
+# kill 상태 정책 (FR-3.5) — optimistic(기본) vs actual
+# ----------------------------------------------------------------------
+def test_kill_optimistic_marks_exit_immediately(qtbot, manager, fake_lsf,
+                                                submitted):
+    """기본 정책(optimistic): terminated 확인 시 폴링/verify 없이 즉시 EXIT.
+    jobs_updated(EXIT 레코드) + jobset_updated(요약)로 UI에 바로 반영."""
+    per_job = []
+    manager.jobs_updated.connect(lambda j, recs: per_job.append(recs))
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
+        manager.kill_jobset(submitted)               # verify 없음
+    _, report = blocker.args
+    assert len(report.changed) == 30                 # 즉시 EXIT 전이
+    s = manager.summary(submitted)
+    assert s.get("EXIT", 0) == 30 and s.get("PEND", 0) == 0
+    assert per_job and all(r.state is JobState.EXIT for r in per_job[-1])
+
+
+def test_kill_actual_waits_for_lsf(qtbot, fake_lsf, config):
+    """actual 정책: terminated 확인만으론 상태를 안 바꾸고, 실제 LSF 상태
+    (verify/폴링)로만 EXIT를 반영한다."""
+    from lsfmgr import LsfJobManager, InMemoryStore
+    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
+                        kill_status_policy="actual")
+    try:
+        assert mgr.config.kill_status_policy == "actual"
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            jsid = mgr.submit_bulk([JobSpec(command=f"r {i}")
+                                    for i in range(5)])
+        with qtbot.waitSignal(mgr.kill_finished, timeout=10000) as blocker:
+            mgr.kill_jobset(jsid)                     # verify 없음
+        _, report = blocker.args
+        assert report.changed == []                  # optimistic 전이 없음
+        # store는 아직 초기 PEND — 실제 LSF 상태를 안 당겨옴
+        assert mgr.summary(jsid).get("PEND", 0) == 5
+        assert mgr.summary(jsid).get("EXIT", 0) == 0
+        # verify=True면 재조회로 실제 EXIT 반영
+        with qtbot.waitSignal(mgr.kill_finished, timeout=10000):
+            mgr.kill_jobset(jsid, verify=True)
+        assert mgr.summary(jsid).get("EXIT", 0) == 5
+    finally:
+        mgr.shutdown()
+
+
+def test_kill_status_policy_validation(fake_lsf):
+    from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
+    with pytest.raises(ValueError):
+        LsfConfig(kill_status_policy="bogus")
+    with pytest.raises(ValueError):                  # manager kwarg 경로
+        LsfJobManager(store=InMemoryStore(), runner=fake_lsf,
+                      kill_status_policy="nope")
+
+
 def test_kill_unconfirmed_reported(qtbot, manager, fake_lsf, submitted):
     """확인이 끝내 안 되면(장애 지속) unconfirmed로 보고하고 error에 남긴다."""
     ids = [r.job_id for r in manager.get_jobs(submitted)][:3]
