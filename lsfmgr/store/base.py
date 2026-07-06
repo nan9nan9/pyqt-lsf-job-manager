@@ -9,11 +9,15 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import (
-    Any, Callable, Dict, Iterable, List, Optional, Sequence, Set,
+    Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple,
 )
 
-from ..errors import PersistenceNotSupportedError
+from ..errors import JobNotFoundError, PersistenceNotSupportedError
 from ..states import JobRecord, JobSetRecord, JobState
+
+#: transition_many 입력 1건 — (job_key, new_state, guard, fields)
+TransitionSpec = Tuple[
+    str, JobState, Optional[Callable[[JobRecord], bool]], Dict[str, Any]]
 
 
 class JobSetStore(ABC):
@@ -94,6 +98,26 @@ class JobSetStore(ABC):
         건너뛰고 None 반환 (CAS) — 스냅샷 기반 갱신(polling)이 그 사이
         바뀐 레코드(재제출 등)를 덮어쓰는 것을 막는다.
         Sqlite 모드에서는 전이 이력 event를 기록한다 (§2.2)."""
+
+    def transition_many(self, jobset_id: str,
+                        specs: "Sequence[TransitionSpec]") -> List[JobRecord]:
+        """여러 job을 한 번에 전이 — 대량 폴링 갱신의 트랜잭션 비용 절감용.
+
+        specs: [(job_key, new_state, guard, fields_dict), ...].
+        반환: 실제로 전이된 레코드 목록(guard 거부·키 소실분은 제외, 입력 순서).
+        Sqlite는 단일 트랜잭션으로 묶어 건당 commit(수 ms)을 없앤다 — 수만 건
+        전이가 한 사이클에 몰릴 때 폴링 스레드 블로킹/WAL 락 독점을 막는다.
+        기본 구현은 건당 transition (계약 유지)."""
+        out: List[JobRecord] = []
+        for job_key, new_state, guard, fields in specs:
+            try:
+                rec = self.transition(jobset_id, job_key, new_state,
+                                      guard=guard, **fields)
+            except JobNotFoundError:
+                continue                         # 사이클 도중 remove_job 등
+            if rec is not None:
+                out.append(rec)
+        return out
 
     @staticmethod
     def _reject_key_fields(fields: Dict[str, Any]) -> None:

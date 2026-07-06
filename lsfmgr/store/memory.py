@@ -133,6 +133,24 @@ class InMemoryStore(JobSetStore):
             self._jobs[jobset_id][job_key] = new
             return new
 
+    def transition_many(self, jobset_id, specs):
+        """lock 1회로 다건 전이 — 건당 lock acquire/release 제거."""
+        out: List[JobRecord] = []
+        now = datetime.now()
+        with self._lock:
+            jobs = self._jobs.get(jobset_id, {})
+            for job_key, new_state, guard, fields in specs:
+                self._reject_key_fields(fields)
+                old = jobs.get(job_key)
+                if old is None:
+                    continue                     # 사이클 도중 remove_job 등
+                if guard is not None and not guard(old):
+                    continue
+                new = replace(old, state=new_state, updated_at=now, **fields)
+                jobs[job_key] = new
+                out.append(new)
+        return out
+
     # ------------------------------------------------------------------
     # 조회/검색
     # ------------------------------------------------------------------

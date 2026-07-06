@@ -439,6 +439,43 @@ class SqliteStore(JobSetStore):
                      new.updated_at.isoformat()))
         return new
 
+    def transition_many(self, jobset_id, specs):
+        """단일 트랜잭션으로 다건 전이 — 건당 commit(수 ms) 제거 (NFR-3).
+        대량 폴링 갱신이 한 사이클에 몰릴 때 O(건수) commit이 폴링 스레드를
+        수십 초 블로킹하던 것을 트랜잭션 1회로 줄인다."""
+        out: List[JobRecord] = []
+        now = datetime.now()
+        with self._write() as con:              # 원자적 read-modify-write ×N
+            for job_key, new_state, guard, fields in specs:
+                self._reject_key_fields(fields)
+                try:
+                    old = self._get_job_con(con, jobset_id, job_key)
+                except JobNotFoundError:
+                    continue                     # 사이클 도중 remove_job 등
+                if guard is not None and not guard(old):
+                    continue                     # CAS 불일치
+                new = replace(old, state=new_state, updated_at=now, **fields)
+                self._put_job(con, new)
+                if old.state is not new_state:
+                    con.execute(
+                        "INSERT INTO events (jobset_id, job_key, old_state, "
+                        "new_state, at) VALUES (?,?,?,?,?)",
+                        (jobset_id, job_key, old.state.value,
+                         new_state.value, now.isoformat()))
+                out.append(new)
+        return out
+
+    def _get_job_con(self, con: sqlite3.Connection, jobset_id: str,
+                     job_key: str) -> JobRecord:
+        """트랜잭션 내 job 조회 — 열려 있는 con을 재사용(같은 스레드 커넥션)."""
+        cur = con.execute(
+            "SELECT * FROM jobs WHERE jobset_id=? AND lsf_job_name=?",
+            (jobset_id, job_key))
+        row = cur.fetchone()
+        if row is None:
+            raise JobNotFoundError(f"{jobset_id}/{job_key}")
+        return self._row_to_job(row)
+
     # ------------------------------------------------------------------
     # 조회/검색 (공통)
     # ------------------------------------------------------------------
