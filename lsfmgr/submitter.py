@@ -336,17 +336,20 @@ class BulkSubmitter(QObject):
         """
         ctx = self._new_context(jobset_id, len(items), options)
 
-        # CREATED 레코드 선생성 → 요약 불변식(합계==intended) 즉시 성립.
-        # 배치 API 필수 — 건당 insert는 Sqlite에서 caller 스레드 블로킹.
+        # 레코드 선생성 → 요약 불변식(합계==intended) 즉시 성립. 상태는 곧장
+        # SUBMITTING("제출 중") — submit은 즉시 제출 착수라 표에 SUBMITTING →
+        # PEND로 자연스럽게 보인다(resubmit과 통일). 배치 API 필수 — 건당
+        # insert는 Sqlite에서 caller 스레드 블로킹. worker가 다시 SUBMITTING으로
+        # 두는 건 무해한 재설정, 취소 시 _task_cancelled가 CREATED로 되돌린다.
         created = self.store.add_jobs([
             JobRecord(job_id=None, array_index=None, jobset_id=jobset_id,
                       lsf_job_name=f"{jobset_id}_{idx}",
-                      state=JobState.CREATED, command=record_command(item),
+                      state=JobState.SUBMITTING, command=record_command(item),
                       via_wrapper=via_wrapper,
                       spec_json=(spec_to_json(item)
                                  if isinstance(item, JobSpec) else None))
             for idx, item in enumerate(items)])
-        # 초기 CREATED를 즉시 발행 — submit 완료를 안 기다리고 표를 채운다.
+        # 초기 SUBMITTING을 즉시 발행 — submit 완료를 안 기다리고 표를 채운다.
         # (이후 각 job이 PEND/실패로 전이될 때마다 점진 발행)
         if created:
             self.jobs_changed.emit(jobset_id, list(created))
@@ -364,7 +367,7 @@ class BulkSubmitter(QObject):
         created = self.store.add_jobs([
             JobRecord(job_id=None, array_index=i, jobset_id=jobset_id,
                       lsf_job_name=f"{jobset_id}[{i}]",
-                      state=JobState.CREATED,
+                      state=JobState.SUBMITTING,
                       command=(spec.commands[i - 1] if spec.commands
                                else (spec.command or "")))
             for i in range(1, n + 1)])
