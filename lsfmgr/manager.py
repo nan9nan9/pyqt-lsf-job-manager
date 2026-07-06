@@ -10,6 +10,7 @@ QT-0 표기 규약: [async→Signal] = 즉시 반환·결과는 Signal /
 """
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import shlex
@@ -32,7 +33,7 @@ from .options import (
     resolve_options,
     validate_options,
 )
-from .qt import QCoreApplication, QObject, QRunnable, QThreadPool, Signal
+from .qt import QCoreApplication, QObject, QRunnable, QThreadPool, QTimer, Signal
 from .resubmit import ResubmitCoordinator, ResubmitPlan
 from .reports import ReconcileReport
 from .states import JobRecord, JobSetRecord, JobState
@@ -174,10 +175,20 @@ class LsfJobManager(QObject):
         self.kill_finished.connect(self._emit_updates_after_kill)
         self.jobs_updated.connect(self._h_jobs_updated)
 
-        # AUTO-3: 앱 종료 시 shutdown 자동 연결 (명시 호출과 중복 안전)
+        # AUTO-3: 스레드 좀비/‏core dump 원천 차단 — shutdown을 아래 3중으로 보장.
+        # (1) 앱 이벤트루프 정상 종료: aboutToQuit (앱이 이미 있으면 즉시 연결).
+        # (2) 앱을 나중에 만든 경우: 매 이벤트 사이클 초 aboutToQuit 재시도(1회성).
+        # (3) 최후 안전망: 인터프리터 종료 시 atexit. — 모두 멱등이라 중복 안전.
         app = QCoreApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self.shutdown)
+        else:
+            # 매니저를 QApplication보다 먼저 만든 경우 — 앱이 생기면 그때 연결
+            self._hook_timer = QTimer(self)
+            self._hook_timer.setInterval(200)
+            self._hook_timer.timeout.connect(self._try_hook_about_to_quit)
+            self._hook_timer.start()
+        atexit.register(self.shutdown)       # (3) 이벤트루프 없이 끝나도 정리
 
     # ------------------------------------------------------------------
     # 옵션 해석 (OPT-1)
@@ -634,26 +645,53 @@ class LsfJobManager(QObject):
     # ------------------------------------------------------------------
     # 수명 관리
     # ------------------------------------------------------------------
+    def _try_hook_about_to_quit(self) -> None:
+        """QApplication보다 먼저 생성된 매니저용 — 앱이 생기면 aboutToQuit 연결."""
+        if self._shutdown_done:
+            self._hook_timer.stop()
+            return
+        app = QCoreApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self.shutdown)
+            self._hook_timer.stop()
+
     def shutdown(self) -> None:
-        """모든 스레드 안전 종료 (멱등, CS-8).
-        AUTO-3로 aboutToQuit에 자동 연결되며 명시 호출도 안전."""
+        """모든 스레드 안전 종료 (멱등, CS-8). 앱 종료 시 core dump/좀비 스레드를
+        원천 차단하기 위해 aboutToQuit·atexit에 자동 연결되며, 명시 호출도 안전.
+        한 컴포넌트가 실패해도 나머지 스레드는 반드시 join한다(best-effort)."""
         if self._shutdown_done:
             return
         self._shutdown_done = True
         log.info("lsfmgr shutdown 시작")
+        timer = getattr(self, "_hook_timer", None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except RuntimeError:
+                pass
         app = QCoreApplication.instance()
         if app is not None:
             try:
                 app.aboutToQuit.disconnect(self.shutdown)
             except (TypeError, RuntimeError):
                 pass                             # 미연결/이미 해제 — 무시
-        self.handlers.shutdown()        # handler 타이머 중지 + task 완료 대기
-        self._resubmitter.shutdown()         # resubmit_jobs kill-phase 완료 대기
-        self.submitter.shutdown()       # 진행 중 bsub 완료 대기 (job_id 보존)
-        self.polling.shutdown()
-        self.killer.shutdown()
-        self._misc_pool.waitForDone(-1)
-        self.store.close()
+        try:
+            atexit.unregister(self.shutdown)
+        except Exception:                        # noqa: BLE001
+            pass
+        # 각 컴포넌트를 best-effort로 종료 — 하나가 예외를 던져도 나머지 스레드는
+        # 반드시 join해야 좀비/core dump가 안 남는다.
+        for name, fn in (("handlers", self.handlers.shutdown),
+                         ("resubmitter", self._resubmitter.shutdown),
+                         ("submitter", self.submitter.shutdown),
+                         ("polling", self.polling.shutdown),
+                         ("killer", self.killer.shutdown),
+                         ("misc_pool", lambda: self._misc_pool.waitForDone(-1)),
+                         ("store", self.store.close)):
+            try:
+                fn()
+            except Exception:                    # noqa: BLE001 — CS-5/‏CS-8
+                log.exception("shutdown 중 %s 종료 실패(계속)", name)
         log.info("lsfmgr shutdown 완료 — 잔여 스레드 없음")
 
     # ------------------------------------------------------------------

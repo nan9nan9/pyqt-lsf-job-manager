@@ -56,6 +56,37 @@ def test_shutdown_idempotent(manager):
     manager.shutdown()          # 2회 호출해도 안전
 
 
+def test_no_coredump_on_exit_without_shutdown(tmp_path):
+    """앱이 shutdown()을 안 부르고, 이벤트루프도 안 돌리고 종료해도 core dump가
+    안 나야 한다 — atexit 안전망이 폴링 QThread/워커를 정리한다 (CS-8).
+    실제 crash는 서브프로세스 종료 코드로만 잡히므로 별도 프로세스로 실행."""
+    import os
+    import subprocess
+    import sys
+    import textwrap
+
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script = textwrap.dedent("""
+        import os, sys
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        sys.path.insert(0, os.path.join(REPO, "tests"))
+        from qtpy.QtWidgets import QApplication
+        from lsfmgr import LsfJobManager, InMemoryStore, JobSpec, LsfConfig
+        from fake_lsf import FakeLsf
+        app = QApplication(sys.argv)
+        mgr = LsfJobManager(store=InMemoryStore(),
+                            config=LsfConfig(poll_interval_s=5), runner=FakeLsf())
+        jsid = mgr.submit_bulk([JobSpec(command=f"r {i}") for i in range(20)])
+        mgr.start_polling(jsid, 0.2)     # 폴링 QThread 가동 중
+        # shutdown() 미호출 + app.exec() 미실행 → 그냥 종료
+    """).replace("REPO", repr(repo))
+    r = subprocess.run([sys.executable, "-c", script],
+                       capture_output=True, timeout=30)
+    # 정상 종료(0)여야 한다. segfault면 음수(-11), abort면 -6.
+    assert r.returncode == 0, (
+        f"비정상 종료 rc={r.returncode}\n{r.stderr.decode(errors='replace')}")
+
+
 def test_shutdown_during_submit_preserves_job_ids(qtbot, fake_lsf, config):
     """CS-8 — shutdown 시 진행 중 bsub의 job_id 유실 없음."""
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf)
