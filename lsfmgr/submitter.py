@@ -318,10 +318,15 @@ class BulkSubmitter(QObject):
             jobset_id=jobset_id, total=total,
             max_retry=options.max_retry, pool=pool,
             limiter=TokenBucketLimiter(options.rate_limit_per_s),
-            options=options)
+            throttler=self._make_throttler(), options=options)
         with self._ctx_lock:
             self._contexts[jobset_id] = ctx
         return ctx
+
+    def _make_throttler(self) -> EmitThrottler:
+        """config의 progress throttle 설정으로 EmitThrottler 생성 (QT-5)."""
+        return EmitThrottler(self.config.progress_min_interval_s,
+                             self.config.progress_min_step_ratio)
 
     def _launch(self, jobset_id: str, items: Sequence, options: Options,
                 record_command: Callable[[object], str],
@@ -377,7 +382,7 @@ class BulkSubmitter(QObject):
             jobset_id=jobset_id, total=1,
             max_retry=options.max_retry,
             pool=QThreadPool(), limiter=TokenBucketLimiter(None),
-            options=options)
+            throttler=self._make_throttler(), options=options)
         ctx.pool.setMaxThreadCount(1)
         with self._ctx_lock:
             self._contexts[jobset_id] = ctx

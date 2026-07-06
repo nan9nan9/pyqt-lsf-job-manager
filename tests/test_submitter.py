@@ -114,6 +114,27 @@ def test_submit_started_signal(qtbot, manager):
     qtbot.waitSignal(manager.submit_finished, timeout=5000)
 
 
+def test_progress_throttle_option_reduces_emits(qtbot, fake_lsf, config):
+    """progress throttle 옵션을 성기게 하면 jobs_updated 발화 수가 준다."""
+    from dataclasses import replace
+    from lsfmgr import InMemoryStore, LsfJobManager
+
+    def count_emits(**cfgkw):
+        mgr = LsfJobManager(store=InMemoryStore(),
+                            config=replace(config, **cfgkw), runner=fake_lsf)
+        c = [0]
+        mgr.jobs_updated.connect(lambda j, rs: c.__setitem__(0, c[0] + 1))
+        with qtbot.waitSignal(mgr.submit_finished, timeout=20000):
+            mgr.submit_bulk([JobSpec(command=f"r {i}") for i in range(300)],
+                            workers=32)
+        mgr.shutdown()
+        return c[0]
+
+    default = count_emits()
+    coarse = count_emits(progress_min_interval_s=0.5, progress_min_step_ratio=0.1)
+    assert coarse < default                    # 성긴 설정이 덜 발화
+
+
 def test_progress_signal(qtbot, manager):
     seen = []
     manager.submit_progress.connect(lambda j, d, t: seen.append((d, t)))

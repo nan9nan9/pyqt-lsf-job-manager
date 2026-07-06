@@ -88,6 +88,18 @@ def test_range_violation_valueerror(kwargs):
         resolve_options({}, kwargs)
 
 
+def test_progress_throttle_option_validation():
+    """progress throttle 옵션 검증 + config 반영."""
+    from lsfmgr import LsfConfig
+    with pytest.raises(ValueError):
+        LsfConfig(progress_min_step_ratio=2.0)      # 0~1 초과
+    with pytest.raises(ValueError):
+        LsfConfig(progress_min_interval_s=-0.1)      # 음수
+    cfg = LsfConfig(progress_min_interval_s=0.5, progress_min_step_ratio=0.1)
+    assert cfg.progress_min_interval_s == 0.5
+    assert cfg.progress_min_step_ratio == 0.1
+
+
 # ----------------------------------------------------------------------
 # retry_backoff 파싱/지연 계산
 # ----------------------------------------------------------------------

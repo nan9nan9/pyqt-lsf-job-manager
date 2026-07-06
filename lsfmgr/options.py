@@ -28,6 +28,7 @@ MANAGER_ONLY_KEYS = frozenset({
     "bsub_path", "bjobs_path", "bkill_path", "bhist_path", "bmod_path",
     "bgdel_path",
     "kill_status_policy", "kill_max_retry", "kill_retry_delay_s",
+    "progress_min_interval_s", "progress_min_step_ratio",
 })
 
 #: ① 라이브러리 내장 기본값
@@ -148,6 +149,16 @@ def _validate(key: str, value: Any) -> Any:
         v = float(value)
         if v < 0:
             raise ValueError(f"kill_retry_delay_s는 0 이상 (got {value})")
+        return v
+    if key == "progress_min_interval_s":
+        v = float(value)
+        if v < 0:
+            raise ValueError(f"progress_min_interval_s는 0 이상 (got {value})")
+        return v
+    if key == "progress_min_step_ratio":
+        v = float(value)
+        if not (0.0 <= v <= 1.0):
+            raise ValueError(f"progress_min_step_ratio는 0~1 (got {value})")
         return v
     if key in ("auto_poll", "verify_kill"):
         return bool(value)

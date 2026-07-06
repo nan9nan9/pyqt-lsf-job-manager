@@ -66,7 +66,9 @@ class _KillTask(QRunnable):
         self.only_state = only_state
         self.job_ids = job_ids
         self.verify = verify
-        self._prog = EmitThrottler()         # chunk progress throttle (submit 대칭)
+        cfg = killer.command.config          # chunk progress throttle (submit 대칭)
+        self._prog = EmitThrottler(cfg.progress_min_interval_s,
+                                   cfg.progress_min_step_ratio)
 
     def run(self):
         try:

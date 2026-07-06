@@ -56,6 +56,12 @@ class LsfConfig:
 
     poll_interval_s: float = 10.0        # FR-4.4 기본 polling 주기
 
+    #: progress/jobs_updated 발화 빈도 제한 (QT-5) — 이 간격 경과 OR 이 비율만큼
+    #: 진행했을 때만 발화(배치). 값이 클수록 시그널이 성겨져 부하↓·반응성↓.
+    #: submit progress·jobs_updated 점진 발행·kill progress에 공통 적용.
+    progress_min_interval_s: float = 0.1   # 최소 발화 간격(초), 0이면 시간 제한 없음
+    progress_min_step_ratio: float = 0.01  # 최소 진행 비율(0~1), 0이면 매번
+
     def __post_init__(self):
         self.workers = max(1, min(64, int(self.workers)))
         if self.chunk_size < 1:
@@ -64,6 +70,10 @@ class LsfConfig:
             raise ValueError(
                 "kill_status_policy는 'optimistic' 또는 'actual' "
                 f"(got {self.kill_status_policy!r})")
+        if self.progress_min_interval_s < 0:
+            raise ValueError("progress_min_interval_s는 0 이상")
+        if not (0.0 <= self.progress_min_step_ratio <= 1.0):
+            raise ValueError("progress_min_step_ratio는 0~1")
 
     def resolve_script_dir(self) -> str:
         path = self.script_dir or os.path.join(
