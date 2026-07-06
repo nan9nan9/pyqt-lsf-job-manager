@@ -129,18 +129,26 @@ def _parse_lsf_time(s: str) -> Optional[datetime]:
     s = re.sub(r"\s+[A-Z]$", "", s).strip()   # 상태 접미(L/X 등) 제거
     if not s or s == "-":
         return None
+    now = datetime.now()
     for fmt in _LSF_TIME_FORMATS:
-        try:
-            dt = datetime.strptime(s, fmt)
-        except ValueError:
-            continue
-        if dt.year == 1900:                # 연도 없는 포맷 → 올해로 보정
-            dt = dt.replace(year=datetime.now().year)
+        # 연도 없는 포맷은 기본연도 1900(비윤년)이라 "Feb 29" 파싱이 실패해
+        # 시각이 통째로 소실된다 — 연도를 명시해 파싱한다(올해 → 불가 시 작년).
+        attempts = ([(s, fmt)] if "%Y" in fmt
+                    else [(f"{s} {now.year}", fmt + " %Y"),
+                          (f"{s} {now.year - 1}", fmt + " %Y")])
+        for text, f in attempts:
+            try:
+                dt = datetime.strptime(text, f)
+            except ValueError:
+                continue
             # 연말 경계: 12월에 시작한 job을 1월에 조회하면 '올해 12월'은
             # 미래가 된다 — 하루 여유를 두고 미래면 작년으로 되돌린다
-            if dt > datetime.now() + timedelta(days=1):
-                dt = dt.replace(year=dt.year - 1)
-        return dt
+            if "%Y" not in fmt and dt > now + timedelta(days=1):
+                try:
+                    dt = dt.replace(year=dt.year - 1)
+                except ValueError:
+                    continue                   # 2/29 → 비윤년 보정 불가
+            return dt
     log.debug("LSF 시간 파싱 불가: %r", s)
     return None
 

@@ -418,10 +418,11 @@ class LsfJobManager(QObject):
         self.killer.kill_jobset(jobset_id, only_state=only_state,
                                 verify=verify)
 
-    def kill_jobs(self, job_ids: Sequence[int], *,
+    def kill_jobs(self, job_ids: Sequence, *,
                   jobset_id: Optional[str] = None,
                   verify: Optional[bool] = None) -> None:
         """[async→Signal] 개별 ID kill (chunking 자동).
+        job_ids 항목은 int(job 전체) 또는 "id[idx]" 문자열(array element 1개).
         jobset_id를 주면 그 JobSet 컨텍스트로 동작 — optimistic EXIT 전이와
         verify가 켜지고 결과가 js.killed로도 중계된다. 생략하면 optimistic
         전이는 전역 검색으로 처리하되 verify는 스킵된다."""

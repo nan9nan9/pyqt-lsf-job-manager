@@ -68,8 +68,15 @@ class JobSet(QObject):
         self._check_open()
         recs = {r.job_key: r
                 for r in self._manager.get_jobs(self._jobset_id)}
-        ids = [recs[k].job_id for k in job_keys
-               if k in recs and recs[k].job_id is not None]
+        # array element는 반드시 "id[idx]"로 지정 — parent id로 죽이면
+        # 선택하지 않은 나머지 element까지 전부 kill된다
+        ids: List[object] = []
+        for k in job_keys:
+            r = recs.get(k)
+            if r is None or r.job_id is None:
+                continue
+            ids.append(f"{r.job_id}[{r.array_index}]"
+                       if r.array_index is not None else r.job_id)
         self._manager.kill_jobs(ids, jobset_id=self._jobset_id, verify=verify)
 
     def cancel(self) -> None:

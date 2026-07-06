@@ -45,8 +45,9 @@ class Killer(QObject):
         self._pool.start(_KillTask(
             self, jobset_id=jobset_id, only_state=only_state, verify=verify))
 
-    def kill_jobs(self, job_ids: Sequence[int], *, verify: bool = False,
+    def kill_jobs(self, job_ids: Sequence, *, verify: bool = False,
                   jobset_id: str = "") -> None:
+        """job_ids: int(job 전체) 또는 "id[idx]" 문자열(array element 1개)."""
         self._pool.start(_KillTask(
             self, jobset_id=jobset_id, job_ids=list(job_ids), verify=verify))
 
@@ -58,7 +59,7 @@ class _KillTask(QRunnable):
 
     def __init__(self, killer: Killer, *, jobset_id: str,
                  only_state: Optional[JobState] = None,
-                 job_ids: Optional[List[int]] = None, verify: bool = False):
+                 job_ids: Optional[List] = None, verify: bool = False):
         super().__init__()
         self.setAutoDelete(True)
         self.killer = killer
@@ -158,8 +159,9 @@ class _KillTask(QRunnable):
         if self.jobset_id:
             pool = self.killer.store.get_jobs(self.jobset_id)
         else:
+            # "id[idx]" 문자열 target도 parent id로 정규화해 검색
             pool = self.killer.store.find_jobs(
-                {int(i) for i in (self.job_ids or [])})
+                {int(str(i).split("[", 1)[0]) for i in (self.job_ids or [])})
         return [r for r in pool
                 if r.job_id is not None and self._id_str(r) in resolved]
 
@@ -228,6 +230,12 @@ class _KillTask(QRunnable):
         # merge된 jobset에서 group A 성공 + group B 장애 시 covered만 믿으면
         # B 소속 job이 영원히 살아남는다. 장애 시 fallback을 강제한다.
         had_error = False
+        # 부착물(-g/-J/array)은 bsub 경로 job에만 존재한다 — wrapper job은
+        # 커버 자체가 불가능하므로 부착물 성공(covered) 여부와 무관하게
+        # ④ chunk로 직접 죽인다. merge된 혼합 jobset에서 group 성공만 믿으면
+        # wrapper job이 영원히 살아남고, optimistic 정책은 그 생존 job까지
+        # EXIT로 오표시한다.
+        attachable = [r for r in alive if not r.via_wrapper]
 
         def run_tier(attempts) -> None:
             nonlocal calls, covered, had_error
@@ -239,17 +247,22 @@ class _KillTask(QRunnable):
                     calls += 1
                     covered = covered or matched
 
-        run_tier([(f"group:{p}", lambda p=p: k.command.bkill_by_group(p))
-                  for p in js.lsf_group_paths]                       # ①
-                 + [(f"array:{a}", lambda a=a: k.command.bkill_array(a))
-                    for a in js.array_job_ids])                      # ②
-        if not covered or had_error:
-            run_tier([(f"name:{pt}", lambda pt=pt: k.command.bkill_by_name(pt))
-                      for pt in js.name_patterns])                   # ③
-        if not covered or had_error:                                 # ④ 최후 수단
+        if attachable:
+            run_tier([(f"group:{p}", lambda p=p: k.command.bkill_by_group(p))
+                      for p in js.lsf_group_paths]                   # ①
+                     + [(f"array:{a}", lambda a=a: k.command.bkill_array(a))
+                        for a in js.array_job_ids])                  # ②
+            if not covered or had_error:
+                run_tier([(f"name:{pt}",
+                           lambda pt=pt: k.command.bkill_by_name(pt))
+                          for pt in js.name_patterns])               # ③
+        # ④ 최후 수단 — 부착물이 못 덮은 bsub job + 애초에 커버 불가인 wrapper job
+        chunk_recs = (attachable if (not covered or had_error) else [])
+        chunk_recs = chunk_recs + [r for r in alive if r.via_wrapper]
+        if chunk_recs:
             # array element는 parent id 1개로 전체가 죽으므로 dedupe.
             # 이미 죽은 job에 대한 중복 bkill은 no-match로 무해.
-            targets = sorted({str(r.job_id) for r in alive
+            targets = sorted({str(r.job_id) for r in chunk_recs
                               if r.job_id is not None})
             if targets:
                 n = len(targets)

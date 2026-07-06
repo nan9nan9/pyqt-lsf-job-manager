@@ -613,10 +613,11 @@ class _ArraySubmitTask(QRunnable):
             self._run()
         except Exception as e:                  # noqa: BLE001
             log.exception("array submit 예외: %s", self.ctx.jobset_id)
-            self._fail_all("INTERNAL_ERROR")
+            changed = self._fail_all("INTERNAL_ERROR")
             self.submitter.error.emit(self.ctx.jobset_id, repr(e))
             self.submitter._count(self.ctx, failed=True,
-                                  reason="ARRAY_SUBMIT_FAILED")
+                                  reason="ARRAY_SUBMIT_FAILED",
+                                  changed=changed)
 
     def _run(self):
         sub, ctx, spec = self.submitter, self.ctx, self.spec
@@ -657,8 +658,9 @@ class _ArraySubmitTask(QRunnable):
                     ctx, keys, ctx.options.retry_delay_s(self.attempt),
                     lambda: _ArraySubmitTask(sub, ctx, spec, nxt))
                 return
-            self._fail_all(e.fail_reason)
-            sub._count(ctx, failed=True, reason="ARRAY_SUBMIT_FAILED")
+            changed = self._fail_all(e.fail_reason)
+            sub._count(ctx, failed=True, reason="ARRAY_SUBMIT_FAILED",
+                       changed=changed)
             return
 
         sub.jobsets.add_array_attachment(jsid, array_id)
@@ -688,12 +690,19 @@ class _ArraySubmitTask(QRunnable):
                  | stat_mod.S_IXUSR | stat_mod.S_IXGRP)
         return sh_path
 
-    def _fail_all(self, reason: str) -> None:
+    def _fail_all(self, reason: str) -> list:
+        """전 element를 SUBMIT_FAILED로 확정. 반환: 전이된 레코드 목록 —
+        _count(changed=...)로 넘겨 jobs_updated/jobs_failed 발행을 보장한다
+        (누락 시 UI 표가 SUBMITTING에 고착)."""
         jsid = self.ctx.jobset_id
+        changed = []
         for i in range(1, self.spec.size + 1):
             try:
-                self.submitter.store.transition(
+                rec = self.submitter.store.transition(
                     jsid, f"{jsid}[{i}]", JobState.SUBMIT_FAILED,
                     retry_count=self.attempt, fail_reason=reason)
+                if rec is not None:
+                    changed.append(rec)
             except Exception:                   # noqa: BLE001
                 pass
+        return changed
