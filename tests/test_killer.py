@@ -134,7 +134,7 @@ def test_js_kill_jobs_by_key(qtbot, manager, fake_lsf, submitted):
     optimistic EXIT + killed Signal 정상."""
     js = manager.jobset(submitted)
     keys = [r.job_key for r in manager.get_jobs(submitted)][:3]
-    with qtbot.waitSignal(js.killed, timeout=10000) as blocker:
+    with qtbot.waitSignal(js.kill_finished, timeout=10000) as blocker:
         js.kill_jobs(keys)
     report = blocker.args[0]
     assert len(report.changed) == 3

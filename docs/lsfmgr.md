@@ -28,7 +28,7 @@ js = mgr.submit_wrapper([
     "verilog_sub -q long tb_1.v",
     "primesim_sub -q short run_2.sp",
 ])
-# 특정 JobSet 하나만 볼 때는 JobSet Signal(js.updated 등)도 쓸 수 있다(같은 이벤트).
+# 특정 JobSet 하나만 볼 때는 JobSet Signal(js.jobset_updated 등)도 쓸 수 있다(같은 이벤트).
 ```
 
 여러 JobSet 을 한 화면에서 관리한다면 매니저의 통합 Signal 을 쓰는 게 편하다 —
@@ -80,27 +80,32 @@ Signal 은 두 계층이다.
 
 ### 2.2 JobSet Signal (`js.*`) — Manager 이벤트의 이중 발행
 
+**이름을 Manager Signal 과 동일하게** 맞췄다(인자에서 `jsid` 만 빠짐) — 두 계층
+매핑이 1:1 로 명확하다. 단일 JobSet 위젯이면 `jsid` 필터 없이 이걸 쓰고, 여러
+JobSet 을 한 곳에서 보면 `mgr.*` 를 쓴다.
+
 | JobSet Signal | 시그니처 | 대응 Manager Signal | 이 Signal 을 유발하는 함수 |
 |---|---|---|---|
-| `js.progress` | `(done, total)` | `submit_progress` | submit 계열 · `js.resubmit_jobs` |
-| `js.finished` | `(SubmitReport)` | `submit_finished` | submit 계열 · `js.resubmit_jobs` · `js.cancel_submit` |
-| `js.updated` | `(summary)` | `jobset_updated` | submit 완료(초기 PEND) · `js.start_polling` · `js.refresh` · `js.reconcile` |
-| `js.failed` | `([JobRecord])` | (파생) | submit 완료 시 `SUBMIT_FAILED` + polling 중 실패 상태 전이분 |
-| `js.killed` | `(KillReport)` | `kill_finished` | `js.kill` |
+| `js.submit_progress` | `(done, total)` | `submit_progress` | submit 계열 · `js.resubmit_jobs` |
+| `js.submit_finished` | `(SubmitReport)` | `submit_finished` | submit 계열 · `js.resubmit_jobs` · `js.cancel` |
+| `js.jobset_updated` | `(summary)` | `jobset_updated` | submit 완료(초기 PEND) · `js.start_polling` · `js.refresh` · `js.reconcile` |
+| `js.jobs_failed` | `([JobRecord])` | (파생) | submit 완료 시 `SUBMIT_FAILED` + polling 중 실패 상태 전이분 |
+| `js.kill_finished` | `(KillReport)` | `kill_finished` | `js.kill` · `js.kill_jobs` |
 | `js.handler_finished` | `(handler_name, HandlerResult)` | `handler_finished` | `js.add_handler` 로 등록한 handler |
-| `js.error` | `(message)` | `error_occurred` | 워커 예외 |
+| `js.error_occurred` | `(message)` | `error_occurred` | 워커 예외 |
 
-- `js.failed` 는 별도 트리거가 아니라 **파생 Signal** 이다 — 제출 최종 결과에
+- `js.jobs_failed` 는 별도 트리거가 아니라 **파생 Signal** 이다 — 제출 최종 결과에
   `SUBMIT_FAILED` job 이 있거나, polling 변경분에 실패 상태(`is_failed`)가 섞이면
-  발화한다.
-- `js.updated`/`js.jobs` 계열에서 `jobs_updated` 는 변경분이 있을 때만 온다.
+  발화한다. (`mgr.*` 엔 대응이 없어 `jobs_updated` 에서 `is_failed` 로 걸러 쓴다.)
+- 개별 job 변경분(`mgr.jobs_updated`)은 JobSet Signal 로는 중계되지 않는다 —
+  per-job 은 `mgr.jobs_updated(jsid, ...)` 를 쓴다.
 
 > ⚠️ **`mgr.kill_jobs(job_ids)` 를 `jobset_id` 없이 부르면 JobSet Signal 로 중계되지
 > 않고 `verify` 도 스킵된다** (`jobset_id=""`). 결과는 **Manager `kill_finished`** 로만
 > 온다. 단 **optimistic 정책의 EXIT 전이는 전역 검색으로 적용**되어 `jobs_updated`/
 > `jobset_updated` 는 해당 JobSet 으로 발화된다(테이블은 이걸로 갱신).
 > 특정 JobSet 의 일부 job 만 죽이려면 **`js.kill_jobs(job_keys)`** (또는
-> `mgr.kill_jobs(ids, jobset_id=...)`)를 쓰면 `js.killed` 중계·verify 까지 모두 켜진다.
+> `mgr.kill_jobs(ids, jobset_id=...)`)를 쓰면 `js.kill_finished` 중계·verify 까지 모두 켜진다.
 
 ### 2.3 최소 연결 예시
 
@@ -146,7 +151,7 @@ js.resubmit_jobs([f"{js.id}_0"], commands={f"{js.id}_0": "primesim_sub -q long a
 섞여 있어도 각 job 이 자기 제출 경로로 정확히 재실행된다.
 
 - **결과 Signal 은 submit 계열과 동일** — `submit_started` → (`submit_progress`) →
-  `submit_finished`(= `js.finished`). 즉 재실행 결과는 `submit_finished` 로 받는다.
+  `submit_finished`(= `js.submit_finished`). 즉 재실행 결과는 `submit_finished` 로 받는다.
 - `verify=True`(기본)면 kill 후 실제 종료를 확인한 뒤 재제출한다.
 - `commands={job_key: 새 커맨드}` 로 job 별 커맨드 교체 가능(생략 시 기존 커맨드 재사용).
 - **polling 자동 재개** — 전원 terminal 로 polling 이 자동 중지(AUTO-2)된 JobSet 을

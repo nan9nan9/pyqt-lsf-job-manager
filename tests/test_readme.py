@@ -19,7 +19,7 @@ def test_quickstart_verbatim(qtbot, fake_lsf, config):
     try:
         lines = []
         js = mgr.submit([f"hspice run_{i}.sp" for i in range(50)])
-        js.updated.connect(
+        js.jobset_updated.connect(
             lambda s: lines.append(
                 f"RUN={s.get('RUN', 0)} DONE={s.get('DONE', 0)}/{s['total']}"))
         qtbot.waitUntil(lambda: len(lines) >= 1, timeout=10000)
@@ -34,7 +34,7 @@ def test_quickstart_verbatim(qtbot, fake_lsf, config):
 def test_report_ok_alias(qtbot, manager, fake_lsf):
     msgs = []
     js = manager.submit(["a x", "b y"], auto_poll=False, mode="bulk")
-    js.finished.connect(lambda rpt: msgs.append(
+    js.submit_finished.connect(lambda rpt: msgs.append(
         f"submitted {rpt.ok}/{rpt.total} (failed {rpt.failed})"))
     qtbot.waitUntil(lambda: bool(msgs), timeout=10000)
     assert msgs == ["submitted 2/2 (failed 0)"]
@@ -46,7 +46,7 @@ def test_report_ok_alias(qtbot, manager, fake_lsf):
 def test_submit_single_command_with_count(qtbot, manager, fake_lsf):
     js = manager.submit("run_sim.sh $LSB_JOBINDEX", count=100,
                         auto_poll=False)
-    with qtbot.waitSignal(js.finished, timeout=10000):
+    with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     assert len(fake_lsf.calls_of("bsub")) == 1        # array 1회
     recs = js.jobs()
@@ -57,7 +57,7 @@ def test_submit_single_command_with_count(qtbot, manager, fake_lsf):
 
 def test_submit_single_command_without_count(qtbot, manager, fake_lsf):
     js = manager.submit("lone.sh", auto_poll=False)   # 단일 job 취급
-    with qtbot.waitSignal(js.finished, timeout=10000):
+    with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     assert len(js.jobs()) == 1
 
@@ -82,7 +82,7 @@ def test_readme_restore_flow(qtbot, fake_lsf, config, tmp_path):
     m1 = LsfJobManager(store=SqliteStore(db), config=config, runner=fake_lsf)
     js1 = m1.submit([f"r {i}" for i in range(6)], mode="bulk",
                     auto_poll=False)
-    with qtbot.waitSignal(js1.finished, timeout=10000):
+    with qtbot.waitSignal(js1.submit_finished, timeout=10000):
         pass
     m1.shutdown()
 
@@ -99,8 +99,8 @@ def test_readme_restore_flow(qtbot, fake_lsf, config, tmp_path):
         summaries = []
         for rec in m2.list_orphan_jobsets():
             js = m2.recover_jobset(rec.jobset_id)      # 핸들 반환
-            js.updated.connect(summaries.append)
-            with qtbot.waitSignal(js.updated, timeout=10000):
+            js.jobset_updated.connect(summaries.append)
+            with qtbot.waitSignal(js.jobset_updated, timeout=10000):
                 js.reconcile()                         # 비동기
         assert summaries[-1]["DONE"] == 3
         assert summaries[-1]["RUN"] == 3
@@ -124,7 +124,7 @@ def test_reconcile_on_inmemory_handle_raises(qtbot, manager, fake_lsf):
 def test_snapshot_queries_do_not_call_lsf(qtbot, manager, fake_lsf):
     js = manager.submit([f"r {i}" for i in range(5)], mode="bulk",
                         auto_poll=False)
-    with qtbot.waitSignal(js.finished, timeout=10000):
+    with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     fake_lsf.calls.clear()
     _ = js.summary

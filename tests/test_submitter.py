@@ -45,7 +45,7 @@ def test_bulk_submit_sequential(qtbot, manager, fake_lsf):
 def test_submit_emits_jobset_updated_with_initial_pend(qtbot, manager,
                                                        fake_lsf):
     """submit 완료 시 초기 PEND 상태가 jobset_updated로 즉시 발화된다 —
-    폴링(첫 조회)이나 상태 변화 없이도 js.updated가 PEND를 받아야 한다.
+    폴링(첫 조회)이나 상태 변화 없이도 js.jobset_updated가 PEND를 받아야 한다.
     (submit_bulk는 auto_poll도 안 하므로 이 발화가 없으면 갱신이 영영 안 옴)"""
     updates = []
     manager.jobset_updated.connect(lambda jsid, s: updates.append(s))
@@ -72,13 +72,13 @@ def test_submit_emits_jobs_updated_with_records(qtbot, manager, fake_lsf):
 
 
 def test_submit_failure_emits_failed_once(qtbot, manager, fake_lsf):
-    """제출 실패 시 js.failed가 정확히 1회만 발화 (완료 emit과 _h_finished의
+    """제출 실패 시 js.jobs_failed가 정확히 1회만 발화 (완료 emit과 _h_finished의
     이중 발행 제거 확인)."""
     fake_lsf.fail_next_bsub = 99
     js = manager.submit(["x"], max_retry=0, auto_poll=False, mode="bulk")
     failed_batches = []
-    js.failed.connect(failed_batches.append)
-    with qtbot.waitSignal(js.finished, timeout=10000):
+    js.jobs_failed.connect(failed_batches.append)
+    with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     qtbot.wait(50)                       # 후속 큐 신호 소진
     assert len(failed_batches) == 1      # 이중 아님
@@ -86,14 +86,14 @@ def test_submit_failure_emits_failed_once(qtbot, manager, fake_lsf):
 
 
 def test_submit_updated_relayed_to_handle(qtbot, manager, fake_lsf):
-    """핸들 js.updated로도 초기 PEND 요약이 온다 (사용자 예제 경로)."""
+    """핸들 js.jobset_updated로도 초기 PEND 요약이 온다 (사용자 예제 경로)."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         jsid = manager.submit_bulk([JobSpec(command="x")])
     js = manager.jobset(jsid)
     got = []
-    js.updated.connect(lambda s: got.append(s))
+    js.jobset_updated.connect(lambda s: got.append(s))
     # 완료 후 재조회 없이도 이미 발화됐으므로, refresh로 한 번 더 확인
-    with qtbot.waitSignal(js.updated, timeout=10000):
+    with qtbot.waitSignal(js.jobset_updated, timeout=10000):
         js.refresh()
     assert got and got[-1]["total"] == 1
 

@@ -20,7 +20,7 @@ def test_template_braces_variable():
 def test_template_braced_end_to_end(qtbot, manager, fake_lsf):
     js = manager.submit([f"sim run_{i}_final.sp" for i in range(1, 11)],
                         auto_poll=False)
-    with qtbot.waitSignal(js.finished, timeout=10000):
+    with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     calls = fake_lsf.calls_of("bsub")
     assert len(calls) == 1                       # array 1회
@@ -34,7 +34,7 @@ def test_template_braced_end_to_end(qtbot, manager, fake_lsf):
 def test_probe_failure_defers_lost(qtbot, manager, fake_lsf):
     js = manager.submit([f"r {i}" for i in range(10)], mode="bulk",
                         auto_poll=False)
-    with qtbot.waitSignal(js.finished, timeout=10000):
+    with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
 
     fake_lsf.fail_all_queries = True             # LSF 순단 시뮬레이션
@@ -55,7 +55,7 @@ def test_real_loss_still_detected_after_recovery(qtbot, manager, fake_lsf):
     """순단 보류가 진짜 소실 감지(FR-4.3)를 막으면 안 된다."""
     js = manager.submit([f"r {i}" for i in range(3)], mode="bulk",
                         auto_poll=False)
-    with qtbot.waitSignal(js.finished, timeout=10000):
+    with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     rec = js.jobs()[0]
     fake_lsf.vanish_job(rec.job_id, in_bhist=False)
@@ -136,7 +136,7 @@ def test_forced_array_preserves_common_spec_options(qtbot, manager, fake_lsf):
     specs = [JobSpec(command=f"run {i}", queue="gpu",
                      resources="rusage[mem=8G]") for i in range(1, 4)]
     js = manager.submit(specs, mode="array", auto_poll=False)
-    with qtbot.waitSignal(js.finished, timeout=10000):
+    with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     argv = fake_lsf.calls_of("bsub")[0]
     assert argv[argv.index("-q") + 1] == "gpu"
@@ -156,7 +156,7 @@ def test_forced_array_rejects_divergent_options(manager):
 def test_jobspec_env_passed_to_bsub(qtbot, manager, fake_lsf):
     spec = JobSpec(command="sim.sh", env=(("OMP_NUM_THREADS", "4"),))
     js = manager.submit([spec], auto_poll=False)
-    with qtbot.waitSignal(js.finished, timeout=10000):
+    with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     argv = fake_lsf.calls_of("bsub")[0]
     assert "-env" in argv
@@ -170,10 +170,10 @@ def test_jobspec_env_passed_to_bsub(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_polling_autostops_on_empty_jobset(qtbot, manager, fake_lsf):
     js = manager.submit([], auto_poll=False)
-    with qtbot.waitSignal(js.finished, timeout=5000):
+    with qtbot.waitSignal(js.submit_finished, timeout=5000):
         pass
     updates = []
-    js.updated.connect(lambda s: updates.append(s))
+    js.jobset_updated.connect(lambda s: updates.append(s))
     js.start_polling(interval_s=0.1)
     qtbot.waitUntil(lambda: len(updates) >= 2, timeout=10000)
     qtbot.wait(500)                              # idle 2사이클 후 자동 중지

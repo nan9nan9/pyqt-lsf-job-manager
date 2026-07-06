@@ -18,12 +18,14 @@ if TYPE_CHECKING:
 class JobSet(QObject):
     """JobSet 1개에 대한 High-level 핸들. jobset_id 필터링 불필요."""
 
-    updated = Signal(dict)         # 요약 {"total":.., "RUN":.., ...}
-    progress = Signal(int, int)    # submit 진행 (done, total), throttled
-    finished = Signal(object)      # SubmitReport (retry 포함 최종)
-    failed = Signal(list)          # SUBMIT_FAILED/EXIT/LOST 변경분 [JobRecord]
-    killed = Signal(object)        # KillReport
-    error = Signal(str)            # worker 예외 등
+    # 이름은 Manager Signal과 일치시킨다(jsid 인자만 없음) — 두 계층 매핑이
+    # 1:1로 명확해지도록. 같은 이벤트를 이 JobSet으로 좁혀 발행한다.
+    jobset_updated = Signal(dict)      # 요약 {"total":.., "RUN":.., ...}
+    submit_progress = Signal(int, int) # submit 진행 (done, total), throttled
+    submit_finished = Signal(object)   # SubmitReport (retry 포함 최종)
+    jobs_failed = Signal(list)         # SUBMIT_FAILED/EXIT/LOST 변경분 [JobRecord]
+    kill_finished = Signal(object)     # KillReport
+    error_occurred = Signal(str)       # worker 예외 등
     handler_finished = Signal(str, object)   # handler_name, HandlerResult
 
     def __init__(self, manager: "LsfJobManager", jobset_id: str):
@@ -52,7 +54,7 @@ class JobSet(QObject):
     # ------------------------------------------------------------------
     def kill(self, only_state: Optional[JobState] = None,
              verify: Optional[bool] = None) -> None:
-        """[async→Signal] JobSet kill — 결과는 killed Signal (FR-3)."""
+        """[async→Signal] JobSet kill — 결과는 kill_finished Signal (FR-3)."""
         self._check_open()
         self._manager.kill_jobset(self._jobset_id, only_state=only_state,
                                   verify=verify)
@@ -61,7 +63,7 @@ class JobSet(QObject):
                   verify: Optional[bool] = None) -> None:
         """[async→Signal] 이 JobSet의 특정 job만 kill (job_key 지정).
         jobset 컨텍스트가 있어 optimistic EXIT 전이·verify가 켜지고 결과가
-        killed Signal로 온다 — 테이블의 선택 행만 죽일 때 쓴다."""
+        kill_finished Signal로 온다 — 테이블의 선택 행만 죽일 때 쓴다."""
         self._check_open()
         recs = {r.job_key: r
                 for r in self._manager.get_jobs(self._jobset_id)}
@@ -70,24 +72,24 @@ class JobSet(QObject):
         self._manager.kill_jobs(ids, jobset_id=self._jobset_id, verify=verify)
 
     def cancel(self) -> None:
-        """[async→Signal] 진행 중 submit 중단 (QT-6) — 결과는 finished."""
+        """[async→Signal] 진행 중 submit 중단 (QT-6) — 결과는 submit_finished."""
         self._check_open()
         self._manager.cancel_submit(self._jobset_id)
 
     def refresh(self) -> None:
-        """[async→Signal] 1회 강제 조회 — 결과는 updated/failed Signal."""
+        """[async→Signal] 1회 강제 조회 — 결과는 jobset_updated/jobs_failed Signal."""
         self._check_open()
         self._manager.query_once(self._jobset_id)
 
     def reconcile(self) -> None:
         """[async→Signal] 저장 상태 vs LSF 실상태 대조 (Sqlite 전용, FR-6.2).
-        완료 시 updated Signal, 미종결 job이 남아 있으면 polling 자동 시작.
+        완료 시 jobset_updated Signal, 미종결 job이 남아 있으면 polling 자동 시작.
         InMemory Store면 PersistenceNotSupportedError."""
         self._check_open()
         self._manager.reconcile(self._jobset_id)
 
     def start_polling(self, interval_s: Optional[float] = None) -> None:
-        """[async→Signal] 주기 polling 시작 — 갱신은 updated Signal."""
+        """[async→Signal] 주기 polling 시작 — 갱신은 jobset_updated Signal."""
         self._check_open()
         self._manager.start_polling(self._jobset_id, interval_s)
 
@@ -127,7 +129,7 @@ class JobSet(QObject):
     def resubmit_jobs(self, job_keys: Sequence[str], *,
                       commands: Optional[Dict[str, str]] = None,
                       verify: bool = True, **opts: object) -> None:
-        """[async→Signal] 지정 job들을 상태 기반으로 재실행 — 결과는 finished.
+        """[async→Signal] 지정 job들을 상태 기반으로 재실행 — 결과는 submit_finished.
         살아있는 job은 kill 후, 나머지는 그냥 재제출한다(레코드 재사용).
         commands로 job_key별 새 커맨드 지정 가능(생략 시 기존 커맨드 재사용)."""
         self._check_open()

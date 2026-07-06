@@ -157,10 +157,11 @@ class LsfJobManager(QObject):
 
         # --- JobSet 핸들 계층 (v7) — Facade Signal 위에 이중 발행 ---
         self._handles: Dict[str, JobSet] = {}
-        self.submit_progress.connect(self._handle_relay("progress"))
-        self.jobset_updated.connect(self._handle_relay("updated"))
-        self.kill_finished.connect(self._handle_relay("killed"))
-        self.error_occurred.connect(self._handle_relay("error"))
+        # 핸들 Signal 이름은 Facade와 동일 — relay 대상 attr명도 그대로
+        self.submit_progress.connect(self._handle_relay("submit_progress"))
+        self.jobset_updated.connect(self._handle_relay("jobset_updated"))
+        self.kill_finished.connect(self._handle_relay("kill_finished"))
+        self.error_occurred.connect(self._handle_relay("error_occurred"))
         self.handler_finished.connect(self._handle_relay("handler_finished"))
         self.submit_finished.connect(self._h_finished)
         self.submit_finished.connect(self._emit_summary_after_submit)
@@ -716,8 +717,8 @@ class LsfJobManager(QObject):
         h = self._handle_of(jsid)
         if h is None:
             return
-        h.finished.emit(report)
-        # js.failed는 submit 완료 시 발화되는 jobs_updated →
+        h.submit_finished.emit(report)
+        # js.jobs_failed는 submit 완료 시 발화되는 jobs_updated →
         # _h_jobs_updated가 담당한다 (SUBMIT_FAILED 포함) — 여기서 또 쏘면 이중.
 
     def _h_jobs_updated(self, jsid: str, changed: list) -> None:
@@ -726,7 +727,7 @@ class LsfJobManager(QObject):
             return
         failed = [r for r in changed if r.state.is_failed]
         if failed:
-            h.failed.emit(failed)
+            h.jobs_failed.emit(failed)
 
 
 class _CallTask(QRunnable):

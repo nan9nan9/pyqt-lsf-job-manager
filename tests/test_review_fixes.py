@@ -28,7 +28,7 @@ def test_template_rejects_leading_zero_indices():
 def test_leading_zero_commands_submitted_verbatim(qtbot, manager, fake_lsf):
     cmds = [f"sim case_{i:03d}.sp" for i in range(1, 6)]
     js = manager.submit(cmds, auto_poll=False)        # auto → bulk여야 함
-    with qtbot.waitSignal(js.finished, timeout=10000):
+    with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     submitted = sorted(j.command for j in fake_lsf.jobs.values())
     assert submitted == sorted(cmds)                  # 원문 그대로 submit
@@ -81,11 +81,11 @@ def test_sqlite_bulk_submit_fast(qtbot, fake_lsf, config, tmp_path):
 def test_failed_close_keeps_polling_and_handle(qtbot, manager, fake_lsf):
     js = manager.submit([f"r {i}" for i in range(5)], mode="bulk",
                         auto_poll=False)
-    with qtbot.waitSignal(js.finished, timeout=10000):
+    with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     js.start_polling(interval_s=0.2)
     updates = []
-    js.updated.connect(updates.append)
+    js.jobset_updated.connect(updates.append)
     qtbot.waitUntil(lambda: len(updates) >= 1, timeout=10000)
 
     with pytest.raises(LsfmgrError):
@@ -119,7 +119,7 @@ def test_tags_string_not_exploded():
 
 def test_tags_string_end_to_end(qtbot, manager, fake_lsf):
     js = manager.submit(["x"], tags="sweep", auto_poll=False)
-    with qtbot.waitSignal(js.finished, timeout=10000):
+    with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     assert manager.store.get_jobset(js.id).tags == ["sweep"]
     assert [j.jobset_id for j in manager.search_jobsets(tag="sweep")] == [js.id]
@@ -138,7 +138,7 @@ def test_manager_only_kwargs_validated(fake_lsf):
 # ----------------------------------------------------------------------
 def test_empty_submit_finished_reaches_handle(qtbot, manager, fake_lsf):
     js = manager.submit([], auto_poll=False)
-    with qtbot.waitSignal(js.finished, timeout=5000) as blocker:
+    with qtbot.waitSignal(js.submit_finished, timeout=5000) as blocker:
         pass
     rpt = blocker.args[0]
     assert rpt.total == 0 and rpt.ok == 0
@@ -154,11 +154,11 @@ def test_kill_falls_through_when_group_rejected(qtbot, manager, fake_lsf):
     fake_lsf.reject_group = True            # 모든 job이 group 없이 submit됨
     js = manager.submit([f"r {i}" for i in range(20)], mode="bulk",
                         auto_poll=False)
-    with qtbot.waitSignal(js.finished, timeout=10000):
+    with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     assert all(j.group is None for j in fake_lsf.jobs.values())
 
-    with qtbot.waitSignal(js.killed, timeout=10000) as blocker:
+    with qtbot.waitSignal(js.kill_finished, timeout=10000) as blocker:
         js.kill()
     rpt = blocker.args[0]
     # group 전략은 no-match로 표시되고 name 패턴으로 fallback해 전부 kill
@@ -227,7 +227,7 @@ def test_lowlevel_submit_tags_string(qtbot, manager, fake_lsf):
 def test_query_result_checked_count(qtbot, manager, fake_lsf):
     js = manager.submit([f"r {i}" for i in range(10)], mode="bulk",
                         auto_poll=False)
-    with qtbot.waitSignal(js.finished, timeout=10000):
+    with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     fake_lsf.set_all("RUN")
     result = manager.querier.query(js.id)

@@ -18,12 +18,12 @@ from lsfmgr import LsfJobManager
 
 mgr = LsfJobManager()
 js = mgr.submit([f"hspice run_{i}.sp" for i in range(5000)])
-js.updated.connect(lambda s: print(f"RUN={s['RUN']} DONE={s['DONE']}/{s['total']}"))
+js.jobset_updated.connect(lambda s: print(f"RUN={s['RUN']} DONE={s['DONE']}/{s['total']}"))
 ```
 
 이것만으로:
 - 5,000개 job이 병렬 submit되고 (worker 16, 실패 시 3회 재시도)
-- polling이 자동 시작되어 (10초 주기) 요약이 `js.updated`로 도착하고
+- polling이 자동 시작되어 (10초 주기) 요약이 `js.jobset_updated`로 도착하고
 - 전부 끝나면 polling도 자동 중지됩니다
 - 앱 종료 시 스레드 정리(`shutdown`)도 자동입니다
 
@@ -118,15 +118,18 @@ js = mgr.submit_wrapper([
 
 ### 3.1 Signal (이 JobSet의 이벤트만 옴 — 필터링 불필요)
 
+이름은 `mgr.*` Signal과 동일하다(인자에서 `jsid`만 빠짐). 여러 JobSet을 한 곳에서
+보면 `mgr.*`(jsid 포함)를, 단일 JobSet 위젯이면 아래 `js.*`를 쓴다.
+
 | Signal | 인자 | 시점 |
 |---|---|---|
-| `updated` | `dict` 요약 | **submit 완료 시(초기 PEND)** + polling/refresh 후 |
-| `progress` | `(done, total)` | submit/resubmit 진행 (throttled) |
-| `finished` | `SubmitReport` | submit/resubmit 완료 (retry 포함 최종) |
-| `failed` | `list[JobRecord]` | SUBMIT_FAILED/EXIT/LOST 변경분 |
-| `killed` | `KillReport` | kill 완료 |
+| `jobset_updated` | `dict` 요약 | **submit 완료 시(초기 PEND)** + polling/refresh 후 |
+| `submit_progress` | `(done, total)` | submit/resubmit 진행 (throttled) |
+| `submit_finished` | `SubmitReport` | submit/resubmit 완료 (retry 포함 최종) |
+| `jobs_failed` | `list[JobRecord]` | SUBMIT_FAILED/EXIT/LOST 변경분 |
+| `kill_finished` | `KillReport` | kill 완료 |
 | `handler_finished` | `(name, HandlerResult)` | 등록한 handler 1회 실행 완료마다 (§3.5) |
-| `error` | `str` | worker 예외 등 |
+| `error_occurred` | `str` | worker 예외 등 |
 
 요약 dict 예:
 ```python
@@ -173,7 +176,7 @@ js.id                      # jobset_id 문자열 (로그/저장용)
 
 > 조회 값은 **마지막 polling 시점 스냅샷**입니다 (최대 `poll_interval_s`
 > 지연). 단 `SUBMIT_FAILED`는 submit 과정에서 직접 기록되므로 항상 정확합니다.
-> 지금 즉시 최신이 필요하면 `js.refresh()` 후 `updated` Signal에서 읽으세요.
+> 지금 즉시 최신이 필요하면 `js.refresh()` 후 `jobset_updated` Signal에서 읽으세요.
 
 ### 3.4 그 외
 
@@ -220,10 +223,10 @@ js.remove_handler("collect")               # 완전 해제
 
 ```python
 js = mgr.submit(jobs, label="tt_sweep", tags=["sweep", "rev2"])
-js.progress.connect(lambda d, t: bar.setValue(int(d / t * 100)))
-js.finished.connect(lambda rpt: statusbar.showMessage(
+js.submit_progress.connect(lambda d, t: bar.setValue(int(d / t * 100)))
+js.submit_finished.connect(lambda rpt: statusbar.showMessage(
     f"submitted {rpt.ok}/{rpt.total} (failed {rpt.failed})"))
-js.failed.connect(lambda recs: table.append_failures(recs))
+js.jobs_failed.connect(lambda recs: table.append_failures(recs))
 ```
 
 ### 4.2 Array job (mode 자동/강제)
@@ -242,7 +245,7 @@ js = mgr.submit([f"hspice tt_{i}.sp" for i in range(1000)], mode="array")
 def on_update(summary):
     if js.is_done:
         launch_post_processing(js.jobs(states={JobState.DONE}))
-js.updated.connect(on_update)
+js.jobset_updated.connect(on_update)
 ```
 
 ---
@@ -254,7 +257,7 @@ js.updated.connect(on_update)
 2. **Signal로 받은 객체는 불변(frozen)** — 수정하지 말고 JobSet API를 쓰세요.
 3. **shutdown은 자동** — `QApplication.aboutToQuit`에 자동 연결됩니다.
    명시적으로 부르고 싶으면 `mgr.shutdown()` (멱등, 중복 안전).
-4. **대량 갱신은 batch** — `failed`/`updated`는 변경분/요약 단위로 오므로
+4. **대량 갱신은 batch** — `jobs_failed`/`jobset_updated`는 변경분/요약 단위로 오므로
    모델 뷰에 배치 반영하세요.
 5. 바인딩 강제: `QT_API=pyside6` (pyqt5/pyside2/pyqt6/pyside6) 환경변수를
    Qt import 전에 설정. 미설정 시 앱이 import한 바인딩 자동 감지.
@@ -315,7 +318,7 @@ logger.addHandler(my_file_handler)     # %(threadName)s 포함 포맷 권장
 레벨 규약: DEBUG=LSF 명령/stdout/stderr 원문, INFO=submit/kill/전이,
 WARNING=retry·부착물 실패, ERROR=SUBMIT_FAILED/LOST 확정·worker 예외(traceback).
 
-worker 예외는 스레드를 죽이지 않고 로그 + `js.error` Signal로 전달됩니다.
+worker 예외는 스레드를 죽이지 않고 로그 + `js.error_occurred` Signal로 전달됩니다.
 앱 쪽 slot 예외까지 완전 수집하려면 `sys.excepthook`, `threading.excepthook`,
 `qInstallMessageHandler` 훅킹을 권장합니다 (상세는 docs/logging.md).
 
@@ -328,7 +331,7 @@ worker 예외는 스레드를 죽이지 않고 로그 + `js.error` Signal로 전
 - `PyQt5`/`PySide6` 직접 import를 lsfmgr와 혼용 → qtpy 감지가 꼬일 수 있음.
 - SQLite db를 NFS에 두기 → lock 신뢰 불가, 로컬 디스크 권장 (경고 로그 남음).
 - `js.jobs()`를 타이트 루프에서 반복 호출 → 스냅샷은 polling 주기로만
-  갱신되므로 의미 없음. `updated` Signal 기반으로 반응하세요.
+  갱신되므로 의미 없음. `jobset_updated` Signal 기반으로 반응하세요.
 
 ---
 
