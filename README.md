@@ -141,6 +141,7 @@ js = mgr.submit_wrapper([
 js.kill()                              # 전체 kill (명령 1회, ARG_MAX 안전)
 js.kill(only_state=JobState.PEND)      # PEND만
 js.kill(verify=True)                   # 실제 종료까지 확인
+js.kill_jobs([job_key, ...])           # 선택 job만 kill (테이블 선택 행)
 js.cancel()                            # 진행 중 submit/resubmit 중단 (된 것은 유지)
 js.refresh()                           # 지금 즉시 1회 조회 요청
 js.stop_polling(); js.start_polling(interval_s=30)

@@ -401,11 +401,16 @@ class LsfJobManager(QObject):
                                 verify=verify)
 
     def kill_jobs(self, job_ids: Sequence[int], *,
+                  jobset_id: Optional[str] = None,
                   verify: Optional[bool] = None) -> None:
-        """[async→Signal] 개별 ID kill (chunking 자동)."""
+        """[async→Signal] 개별 ID kill (chunking 자동).
+        jobset_id를 주면 그 JobSet 컨텍스트로 동작 — optimistic EXIT 전이와
+        verify가 켜지고 결과가 js.killed로도 중계된다. 생략하면 optimistic
+        전이는 전역 검색으로 처리하되 verify는 스킵된다."""
         if verify is None:
             verify = bool(self._defaults.get("verify_kill", False))
-        self.killer.kill_jobs(job_ids, verify=verify)
+        self.killer.kill_jobs(job_ids, verify=verify,
+                              jobset_id=jobset_id or "")
 
     # ------------------------------------------------------------------
     # JobSet 관리 (FR-5)
@@ -672,16 +677,23 @@ class LsfJobManager(QObject):
         """kill 완료 시 상태 반영을 update Signal로 발화. optimistic 정책이면
         EXIT로 전이된 job(report.changed)을 jobs_updated로, 그리고 요약을
         jobset_updated로 — 폴링 없이도 UI가 kill 결과를 즉시 본다.
-        (actual 정책이면 changed가 비어 요약만 나가고, 실제 EXIT는 폴링/verify로)"""
-        if not jsid:
-            return                       # kill_jobs(jobset_id="") — 대상 없음
-        changed = getattr(report, "changed", None)
-        if changed:
-            self.jobs_updated.emit(jsid, changed)
-        try:
-            self.jobset_updated.emit(jsid, self.store.summary(jsid))
-        except LsfmgrError:
-            pass
+        (actual 정책이면 changed가 비어 요약만 나가고, 실제 EXIT는 폴링/verify로)
+
+        kill_jobs(전역)는 changed가 여러 JobSet에 걸칠 수 있어 jobset별로 묶어
+        발화한다."""
+        changed = getattr(report, "changed", None) or []
+        by_js: Dict[str, list] = {}
+        for r in changed:
+            by_js.setdefault(r.jobset_id, []).append(r)
+        if jsid:                         # jobset 단위 kill은 changed 없어도 요약
+            by_js.setdefault(jsid, [])
+        for j, recs in by_js.items():
+            if recs:
+                self.jobs_updated.emit(j, recs)
+            try:
+                self.jobset_updated.emit(j, self.store.summary(j))
+            except LsfmgrError:
+                pass
 
     def _handle_of(self, jobset_id: str) -> Optional[JobSet]:
         h = self._handles.get(jobset_id)

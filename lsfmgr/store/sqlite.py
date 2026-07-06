@@ -403,6 +403,17 @@ class SqliteStore(JobSetStore):
                               (jobset_id,))
         return [self._row_to_job(r) for r in cur.fetchall()]
 
+    def find_jobs(self, job_ids: Set[int]) -> List[JobRecord]:
+        if not job_ids:
+            return []
+        # 이 세션 소속 jobset의 job만 (list_jobsets와 동일 범위)
+        marks = ",".join("?" * len(job_ids))
+        cur = self._conn().execute(
+            f"SELECT j.* FROM jobs j JOIN jobsets s USING(jobset_id) "
+            f"WHERE s.session_id=? AND j.job_id IN ({marks})",
+            (self.session_id, *job_ids))
+        return [self._row_to_job(r) for r in cur.fetchall()]
+
     def transition(self, jobset_id: str, job_key: str, new_state: JobState,
                    guard=None, **fields: Any) -> Optional[JobRecord]:
         self._reject_key_fields(fields)

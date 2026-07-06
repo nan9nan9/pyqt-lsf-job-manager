@@ -138,6 +138,19 @@ def test_transition_guard_cas(store):
     assert ok is not None and ok.state is JobState.RUN
 
 
+def test_find_jobs_global(store):
+    # job_id로 jobset 무관 전역 검색 (kill_jobs optimistic용)
+    store.create_jobset(make_jobset("a", n=2))
+    store.create_jobset(make_jobset("b", n=1))
+    store.add_job(make_job("a", 0, job_id=101))
+    store.add_job(make_job("a", 1, job_id=102))
+    store.add_job(make_job("b", 0, job_id=201))
+    found = store.find_jobs({101, 201, 999})
+    assert {r.job_id for r in found} == {101, 201}      # 999는 없음
+    assert {r.jobset_id for r in found} == {"a", "b"}   # 여러 jobset 걸침
+    assert store.find_jobs(set()) == []
+
+
 def test_via_wrapper_roundtrip(store):
     store.create_jobset(make_jobset(n=2))
     store.add_job(make_job(idx=0, via_wrapper=True))

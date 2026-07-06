@@ -71,6 +71,18 @@ class JobSetStore(ABC):
     def get_jobs(self, jobset_id: str,
                  states: Optional[Set[JobState]] = None) -> List[JobRecord]: ...
 
+    def find_jobs(self, job_ids: Set[int]) -> List[JobRecord]:
+        """job_id 집합에 해당하는 레코드를 jobset 무관 전역 검색 (kill_jobs
+        optimistic 전이용 — 어느 jobset 소속인지 모를 때). 기본 구현은
+        jobset 순회이고, 백엔드가 최적화(WHERE IN)해도 된다."""
+        if not job_ids:
+            return []
+        out: List[JobRecord] = []
+        for js in self.list_jobsets():
+            out.extend(r for r in self.get_jobs(js.jobset_id)
+                       if r.job_id in job_ids)
+        return out
+
     @abstractmethod
     def transition(self, jobset_id: str, job_key: str, new_state: JobState,
                    guard: Optional[Callable[[JobRecord], bool]] = None,

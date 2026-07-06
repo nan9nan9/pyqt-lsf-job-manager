@@ -92,7 +92,7 @@ class _KillTask(QRunnable):
             calls, unconfirmed, retries, resolved = self._kill_confirm(
                 targets, errors)
             strategies.append("chunk")
-            if optimistic and self.jobset_id:
+            if optimistic:
                 killed_recs = self._records_for(resolved)
         elif self.only_state is not None:
             # 부분 kill (FR-3.2) — Store에서 해당 상태 job을 골라 chunking.
@@ -140,8 +140,14 @@ class _KillTask(QRunnable):
                 if rec.array_index is not None else str(rec.job_id))
 
     def _records_for(self, resolved: set) -> List:
-        """resolved id 집합에 해당하는 jobset 레코드 — optimistic EXIT 대상."""
-        return [r for r in self.killer.store.get_jobs(self.jobset_id)
+        """resolved id 집합에 해당하는 레코드 — optimistic EXIT 대상.
+        jobset_id를 알면 그 jobset에서, 모르면(kill_jobs 원시 id) 전역 검색."""
+        if self.jobset_id:
+            pool = self.killer.store.get_jobs(self.jobset_id)
+        else:
+            pool = self.killer.store.find_jobs(
+                {int(i) for i in (self.job_ids or [])})
+        return [r for r in pool
                 if r.job_id is not None and self._id_str(r) in resolved]
 
     def _mark_exited(self, recs: List) -> List:
@@ -149,8 +155,10 @@ class _KillTask(QRunnable):
         반환: 실제 전이된 레코드."""
         changed = []
         for r in recs:
+            # r.jobset_id 사용 — kill_jobs 전역 검색은 대상이 여러 JobSet에
+            # 걸칠 수 있어 self.jobset_id(빈 값)로는 안 된다
             new = self.killer.store.transition(
-                self.jobset_id, r.job_key, JobState.EXIT,
+                r.jobset_id, r.job_key, JobState.EXIT,
                 fail_reason="KILLED",
                 guard=lambda cur: cur.state.is_on_lsf)
             if new is not None:

@@ -110,6 +110,40 @@ def test_kill_retries_until_confirmed(qtbot, manager, fake_lsf, submitted):
 # ----------------------------------------------------------------------
 # kill 상태 정책 (FR-3.5) — optimistic(기본) vs actual
 # ----------------------------------------------------------------------
+def test_kill_jobs_optimistic_without_jobset(qtbot, manager, fake_lsf,
+                                             submitted):
+    """kill_jobs([ids])를 jobset_id 없이 불러도 optimistic EXIT가 전역 검색으로
+    적용된다 — store가 즉시 EXIT라 폴링이 RUN으로 되돌리는 깜빡임이 없다."""
+    ids = [r.job_id for r in manager.get_jobs(submitted)][:5]
+    per_job = []
+    manager.jobs_updated.connect(lambda j, recs: per_job.append((j, recs)))
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
+        manager.kill_jobs(ids)                       # jobset_id 없음
+    _, report = blocker.args
+    assert len(report.changed) == 5                  # 전역 검색으로 EXIT 전이
+    # store가 즉시 EXIT (수동 추론 불필요)
+    exited = manager.get_jobs(submitted, states={JobState.EXIT})
+    assert {r.job_id for r in exited} == set(ids)
+    # jobs_updated가 해당 jobset으로 EXIT 발화
+    assert any(j == submitted and all(r.state is JobState.EXIT for r in recs)
+               for j, recs in per_job)
+
+
+def test_js_kill_jobs_by_key(qtbot, manager, fake_lsf, submitted):
+    """js.kill_jobs(job_keys) — JobSet의 선택 job만 kill, jobset 컨텍스트라
+    optimistic EXIT + killed Signal 정상."""
+    js = manager.jobset(submitted)
+    keys = [r.job_key for r in manager.get_jobs(submitted)][:3]
+    with qtbot.waitSignal(js.killed, timeout=10000) as blocker:
+        js.kill_jobs(keys)
+    report = blocker.args[0]
+    assert len(report.changed) == 3
+    exited = manager.get_jobs(submitted, states={JobState.EXIT})
+    assert len(exited) == 3
+    # 안 죽인 나머지는 그대로
+    assert manager.summary(submitted).get("PEND", 0) == 27
+
+
 def test_kill_optimistic_marks_exit_immediately(qtbot, manager, fake_lsf,
                                                 submitted):
     """기본 정책(optimistic): terminated 확인 시 폴링/verify 없이 즉시 EXIT.

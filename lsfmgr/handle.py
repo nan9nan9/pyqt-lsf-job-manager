@@ -57,6 +57,18 @@ class JobSet(QObject):
         self._manager.kill_jobset(self._jobset_id, only_state=only_state,
                                   verify=verify)
 
+    def kill_jobs(self, job_keys: "Sequence[str]",
+                  verify: Optional[bool] = None) -> None:
+        """[async→Signal] 이 JobSet의 특정 job만 kill (job_key 지정).
+        jobset 컨텍스트가 있어 optimistic EXIT 전이·verify가 켜지고 결과가
+        killed Signal로 온다 — 테이블의 선택 행만 죽일 때 쓴다."""
+        self._check_open()
+        recs = {r.job_key: r
+                for r in self._manager.get_jobs(self._jobset_id)}
+        ids = [recs[k].job_id for k in job_keys
+               if k in recs and recs[k].job_id is not None]
+        self._manager.kill_jobs(ids, jobset_id=self._jobset_id, verify=verify)
+
     def cancel(self) -> None:
         """[async→Signal] 진행 중 submit 중단 (QT-6) — 결과는 finished."""
         self._check_open()

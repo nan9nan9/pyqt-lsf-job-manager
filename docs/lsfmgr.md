@@ -95,12 +95,12 @@ Signal 은 두 계층이다.
   발화한다.
 - `js.updated`/`js.jobs` 계열에서 `jobs_updated` 는 변경분이 있을 때만 온다.
 
-> ⚠️ **`kill_jobs(job_ids=...)` 는 JobSet Signal 로 오지 않는다.** 이 경로는 내부적으로
-> `jobset_id=""` 로 kill 을 수행하므로, 결과가 **Manager `kill_finished`** 로만 오고
-> 특정 `js.killed` 로는 중계되지 않는다. 또한 `jobset_id` 가 비어 **`verify` 도 무시**
-> 된다(still_alive 검증 스킵). ID 리스트로 직접 죽일 때는 `mgr.kill_finished` /
-> `mgr.error_occurred` 에 직접 connect 하라. JobSet 단위로 죽여 JobSet Signal 과 verify
-> 를 모두 쓰려면 `js.kill()` 또는 `mgr.kill_jobset(jobset_id, verify=True)` 를 쓴다.
+> ⚠️ **`mgr.kill_jobs(job_ids)` 를 `jobset_id` 없이 부르면 JobSet Signal 로 중계되지
+> 않고 `verify` 도 스킵된다** (`jobset_id=""`). 결과는 **Manager `kill_finished`** 로만
+> 온다. 단 **optimistic 정책의 EXIT 전이는 전역 검색으로 적용**되어 `jobs_updated`/
+> `jobset_updated` 는 해당 JobSet 으로 발화된다(테이블은 이걸로 갱신).
+> 특정 JobSet 의 일부 job 만 죽이려면 **`js.kill_jobs(job_keys)`** (또는
+> `mgr.kill_jobs(ids, jobset_id=...)`)를 쓰면 `js.killed` 중계·verify 까지 모두 켜진다.
 
 ### 2.3 최소 연결 예시
 
