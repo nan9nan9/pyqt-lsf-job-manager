@@ -7,7 +7,8 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, Sequence
+import time
+from typing import List, Optional, Sequence, Tuple
 
 from .command import LsfCommand
 from .errors import LsfmgrError
@@ -79,11 +80,14 @@ class _KillTask(QRunnable):
         strategies: List[str] = []
         errors: List[str] = []
         calls = 0
+        unconfirmed = 0
+        retries = 0
 
         if self.job_ids is not None:
-            # 개별 ID kill — 항상 chunking (④)
+            # 개별 ID kill — 확인 후 미확인분 재시도 (FR-3.4)
             requested = len(self.job_ids)
-            calls += k.command.bkill_by_ids(self.job_ids)
+            targets = [str(i) for i in self.job_ids]
+            calls, unconfirmed, retries = self._kill_confirm(targets, errors)
             strategies.append("chunk")
         elif self.only_state is not None:
             # 부분 kill (FR-3.2) — Store에서 해당 상태 job을 골라 chunking.
@@ -96,7 +100,8 @@ class _KillTask(QRunnable):
                        for r in recs if r.job_id is not None]
             requested = len(targets)
             if targets:
-                calls += k.command.bkill_targets(targets)
+                calls, unconfirmed, retries = self._kill_confirm(
+                    targets, errors)
                 strategies.append(f"chunk(state={self.only_state.value})")
         else:
             requested, calls = self._kill_whole_jobset(strategies, errors)
@@ -108,7 +113,36 @@ class _KillTask(QRunnable):
         return KillReport(
             jobset_id=self.jobset_id, requested=requested,
             strategies=strategies, command_calls=calls,
-            still_alive=still_alive, errors=errors)
+            still_alive=still_alive, unconfirmed=unconfirmed,
+            kill_retries=retries, errors=errors)
+
+    def _kill_confirm(self, targets: List[str],
+                      errors: List[str]) -> Tuple[int, int, int]:
+        """concrete-id kill — bkill 출력의 확인('is being terminated' 등)을
+        보고 미확인분을 재시도한다 (submit retry와 대칭, FR-3.4).
+        반환: (LSF 호출 횟수, 최종 미확인 수, 재시도 라운드 수)."""
+        k = self.killer
+        cfg = k.command.config
+        pending = set(targets)
+        calls = 0
+        attempt = 0
+        while True:
+            resolved, c = k.command.bkill_targets_confirm(sorted(pending))
+            calls += c
+            pending -= resolved
+            if not pending or attempt >= cfg.kill_max_retry:
+                break
+            attempt += 1
+            log.warning("kill 미확인 %d건 — 재시도 %d/%d: %s",
+                        len(pending), attempt, cfg.kill_max_retry,
+                        sorted(pending)[:20])
+            time.sleep(cfg.kill_retry_delay_s)
+        if pending:
+            msg = (f"kill 확인 실패 {len(pending)}건 "
+                   f"(재시도 {attempt}회 후): {sorted(pending)[:20]}")
+            log.error(msg)
+            errors.append(msg)
+        return calls, len(pending), attempt
 
     def _kill_whole_jobset(self, strategies: List[str],
                            errors: List[str]) -> tuple:

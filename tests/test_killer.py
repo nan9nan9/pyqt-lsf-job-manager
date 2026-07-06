@@ -87,7 +87,36 @@ def test_kill_individual_ids(qtbot, manager, fake_lsf, submitted):
         manager.kill_jobs(ids)
     _, report = blocker.args
     assert report.requested == 5
+    assert report.unconfirmed == 0                # 전부 'is being terminated' 확인
     assert len(fake_lsf.alive_jobs()) == 25
+
+
+# ----------------------------------------------------------------------
+# kill 확인 + 재시도 (FR-3.4)
+# ----------------------------------------------------------------------
+def test_kill_retries_until_confirmed(qtbot, manager, fake_lsf, submitted):
+    """bkill이 일시 장애(rc≠0, 확인 문구 없음)면 submit처럼 재시도해서,
+    'is being terminated' 확인이 뜰 때까지 반복한다."""
+    ids = [r.job_id for r in manager.get_jobs(submitted)][:3]
+    fake_lsf.fail_next_bkill = 2                  # 처음 2번 bkill은 장애
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
+        manager.kill_jobs(ids)
+    _, report = blocker.args
+    assert report.kill_retries >= 1              # 재시도 발생
+    assert report.unconfirmed == 0               # 결국 전부 확인됨
+    assert all(j.job_id not in ids for j in fake_lsf.alive_jobs())
+
+
+def test_kill_unconfirmed_reported(qtbot, manager, fake_lsf, submitted):
+    """확인이 끝내 안 되면(장애 지속) unconfirmed로 보고하고 error에 남긴다."""
+    ids = [r.job_id for r in manager.get_jobs(submitted)][:3]
+    fake_lsf.fail_next_bkill = 99                # 계속 장애 → 확인 불가
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
+        manager.kill_jobs(ids)
+    _, report = blocker.args
+    assert report.unconfirmed == 3               # 재시도 후에도 미확인
+    assert report.kill_retries == 2              # kill_max_retry 기본 2회
+    assert report.errors                         # 실패 메시지 기록
 
 
 # ----------------------------------------------------------------------

@@ -41,6 +41,10 @@ class LsfConfig:
     retry_backoff: float = 1.0           # >1.0이면 지수 backoff("expo")
     rate_limit_per_s: Optional[float] = None   # bsub 초당 호출 제한 (NFR-4)
 
+    kill_max_retry: int = 2              # kill 확인 실패 시 재시도 (FR-3.4)
+    kill_retry_delay_s: float = 3.0      # kill 재시도 간격 — bkill은 비동기라
+                                         # 확인('is being terminated')까지 여유
+
     poll_interval_s: float = 10.0        # FR-4.4 기본 polling 주기
 
     def __post_init__(self):

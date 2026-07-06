@@ -10,7 +10,9 @@ import re
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import (
+    Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple,
+)
 
 from .config import LsfConfig, cmd_tokens
 from .errors import ArgMaxExceededError, LsfCommandError, SubmitError
@@ -62,6 +64,51 @@ _NO_JOB_PATTERNS = ("no unfinished job", "no matching job", "is not found",
 _RUN_TIME_RE = re.compile(r"(\d+)")
 _LSF_TIME_FORMATS = ("%Y-%m-%d %H:%M:%S", "%b %d %H:%M:%S %Y",
                      "%b %d %H:%M %Y", "%b %d %H:%M:%S", "%b %d %H:%M")
+
+
+# bjobs -o가 확장 필드/옵션을 못 알아볼 때의 stderr 신호. 가장 확실한 건 LSF가
+# 되돌려주는 '필드명 자체'이고(대부분 에러에 echo됨), 그 외 format/field 류
+# 특정 문구를 보조로 쓴다. "unknown host"/"invalid ..." 같은 일시장애 문구가
+# 오판되지 않도록 광범위 단독 단어("unknown"/"invalid"/"no such")는 제외한다.
+_BJOBS_FIELD_ERR = ("run_time", "start_time", "finish_time", "exec_cwd",
+                    "unknown field", "bad field", "field name", "illegal",
+                    "not a valid", "unrecognized", "output format",
+                    "format specification", "invalid format", "illegal option")
+
+
+def _looks_like_field_error(err_text: str) -> bool:
+    e = (err_text or "").lower()
+    return any(p in e for p in _BJOBS_FIELD_ERR)
+
+
+# bkill 출력 1행: "Job <123>..." 또는 "Job <123[4]>: ..." — id와 나머지 메시지.
+_BKILL_LINE_RE = re.compile(r"Job <(\d+(?:\[\d+\])?)>[:\s]?\s*(.*)")
+# 해소 신호 — 더 kill할 필요 없음: 신호 수락 or 이미 없음/끝남.
+_BKILL_RESOLVED_MSGS = (
+    "is being terminated", "is being signaled", "is being requeued",
+    "is being killed", "in progress of being terminated",
+    "already finished", "has already", "no matching job", "is not found",
+    "no unfinished job", "not found",
+)
+
+
+def _parse_bkill_resolved(text: str) -> "set[str]":
+    """bkill stdout/stderr에서 '해소된'(재시도 불필요) job id/target을 뽑는다.
+    미해소(일시 장애 등)는 여기 안 들어가 호출자가 재시도한다."""
+    resolved = set()
+    for line in text.splitlines():
+        m = _BKILL_LINE_RE.search(line)
+        if not m:
+            continue
+        jid, msg = m.group(1), m.group(2).lower()
+        if any(p in msg for p in _BKILL_RESOLVED_MSGS):
+            resolved.add(jid)
+            # bare 부모 id로 array를 kill하면 LSF는 element별("1000[0]")로
+            # 확인 행을 낸다 — 부모 pending("1000")과 매칭되게 부모도 해소 처리
+            # (kill 요청이 그 job에 수락됐다는 의미). 안 하면 불필요 재시도.
+            if "[" in jid:
+                resolved.add(jid.split("[", 1)[0])
+    return resolved
 
 
 def _parse_run_time(s: str) -> Optional[int]:
@@ -125,6 +172,8 @@ class LsfCommand:
                  runner: Optional[Runner] = None):
         self.config = config or LsfConfig()
         self.runner = runner or default_runner
+        # 확장 필드로 시작 — 필드 오류 감지 시 CORE로 강등 (인스턴스 수명 동안 유지)
+        self._bjobs_fmt = self._BJOBS_FULL_FMT
 
     @staticmethod
     def _prog_len(path) -> int:
@@ -261,15 +310,38 @@ class LsfCommand:
     # 잘라내므로("js_2026*") 긴 job name/array id의 파싱·매칭이 전멸한다
     # 필드명은 LSF -o 공식 명칭 사용 — job_name (jobname 은 실제 LSF 미지원).
     # 폭은 truncation 한도다 — delimiter 모드에선 패딩이 없어 출력량 증가는
-    # 없으므로 긴 이름/경로가 잘리지 않게 넉넉히 잡는다
-    _BJOBS_FMT = ("jobid:20 stat:12 exit_code:12 job_name:512 "
-                  "run_time:25 start_time:30 finish_time:30 exec_cwd:2048 "
-                  "delimiter=';'")
+    # 없으므로 긴 이름/경로가 잘리지 않게 넉넉히 잡는다.
+    #
+    # CORE: 어느 LSF 버전에서나 지원되는 필수 4필드 (상태 추적의 최소 단위).
+    # FULL: CORE + 실행시간/위치 확장 필드. 구형 LSF(9.x 등)나 특정 사이트에서는
+    #       run_time/exec_cwd 같은 필드를 -o가 거부해 bjobs 전체가 rc≠0로 죽는다 —
+    #       그러면 폴링이 아무 상태도 못 걷어 job이 PEND(제출 직후 상태)에 고착된다.
+    #       그래서 FULL이 필드 오류로 실패하면 CORE로 자동 강등한다(확장 필드만 포기).
+    _BJOBS_CORE_FMT = "jobid:20 stat:12 exit_code:12 job_name:512 delimiter=';'"
+    _BJOBS_FULL_FMT = ("jobid:20 stat:12 exit_code:12 job_name:512 "
+                       "run_time:25 start_time:30 finish_time:30 exec_cwd:2048 "
+                       "delimiter=';'")
 
     def _bjobs(self, selector: List[str]) -> List[JobStatus]:
-        argv = cmd_tokens(self.config.bjobs_path) + [
-            "-a", "-noheader", "-o", self._BJOBS_FMT] + selector
-        res = self._run_query(argv)
+        def run(fmt: str) -> Optional[CommandResult]:
+            argv = cmd_tokens(self.config.bjobs_path) + [
+                "-a", "-noheader", "-o", fmt] + selector
+            return self._run_query(argv)
+
+        try:
+            res = run(self._bjobs_fmt)
+        except LsfCommandError as e:
+            # FULL 포맷 사용 중 필드/옵션 오류로 보이면 CORE로 영구 강등 후 재시도.
+            # (일시 장애는 강등하지 않고 그대로 전파 — 다음 사이클에 복구)
+            if (self._bjobs_fmt is self._BJOBS_FULL_FMT
+                    and _looks_like_field_error(e.stderr or str(e))):
+                log.warning("bjobs -o 확장 필드 미지원으로 판단 — CORE 포맷으로 "
+                            "강등합니다(run_time/start_time/finish_time/exec_cwd "
+                            "미수집). 원인: %s", (e.stderr or str(e)).strip()[:200])
+                self._bjobs_fmt = self._BJOBS_CORE_FMT
+                res = run(self._bjobs_fmt)
+            else:
+                raise
         if res is None:
             return []
         return self._parse_bjobs(res.stdout)
@@ -446,6 +518,31 @@ class LsfCommand:
 
     def bkill_by_ids(self, job_ids: Sequence[int]) -> int:
         return self.bkill_targets([str(i) for i in job_ids])
+
+    def bkill_targets_confirm(self, targets: Sequence[str]
+                              ) -> Tuple[Set[str], int]:
+        """chunked bkill + 출력 확인 파싱 (FR-3.4).
+
+        반환: (해소된 target 집합, LSF 호출 횟수).
+        '해소'는 더 이상 kill이 필요 없다고 확인된 것 — 'Job <id> is being
+        terminated'(신호 수락) 또는 already-finished/no-matching(이미 없음).
+        해소 안 된 target(일시 장애 등)은 호출자가 재시도한다."""
+        resolved: Set[str] = set()
+        calls = 0
+        base = self._prog_len(self.config.bkill_path) + 10
+        for chunk in chunk_args(list(targets), self.config.chunk_size,
+                                self.config.arg_max, base):
+            argv = cmd_tokens(self.config.bkill_path) + chunk
+            try:
+                res = self._run(argv, self.config.kill_timeout_s)
+            except subprocess.TimeoutExpired:
+                # 이 chunk 전부 미확인 — 재시도 대상으로 남긴다
+                log.warning("bkill timeout — 재시도 대상: %s", chunk)
+                calls += 1
+                continue
+            calls += 1
+            resolved |= _parse_bkill_resolved(res.stdout + "\n" + res.stderr)
+        return resolved, calls
 
     def _run_kill(self, argv: List[str]) -> bool:
         """반환: 매칭된 job이 있었는지 (no-match는 예외가 아니라 False —

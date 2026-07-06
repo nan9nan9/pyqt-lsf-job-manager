@@ -208,12 +208,31 @@ class FakeLsf:
                             if j.job_id == jid and j.array_index is not None
                             and lo <= j.array_index <= hi
                             and j.stat in ("PEND", "RUN")]
-        if not targets:
-            return CommandResult(255, "", "No matching job found\n")
+        # 실제 LSF처럼 job별 확인 메시지를 낸다 — "Job <id> is being terminated".
+        # 이 문구가 있어야 lsfmgr가 kill 확인으로 인정한다 (FR-3.4).
+        def _disp(j):
+            return (f"{j.job_id}[{j.array_index}]" if j.array_index is not None
+                    else str(j.job_id))
+
+        lines = []
         for j in targets:
             j.stat = "EXIT"
             j.exit_code = 130
-        return CommandResult(0, f"{len(targets)} jobs killed\n", "")
+            lines.append(f"Job <{_disp(j)}> is being terminated")
+        # 명시적으로 지정됐지만 매칭 안 된 id(이미 없음)는 no-match 행으로 보고.
+        matched_disp = {_disp(j) for j in targets}
+        matched_ids = {str(j.job_id) for j in targets}
+        stderr_lines = []
+        for a in rest:
+            if a not in matched_disp and a not in matched_ids:
+                stderr_lines.append(f"Job <{a}>: No matching job found")
+        if not targets and stderr_lines:
+            return CommandResult(255, "", "\n".join(stderr_lines) + "\n")
+        if not targets:
+            return CommandResult(255, "", "No matching job found\n")
+        return CommandResult(0, "\n".join(lines) + "\n",
+                             ("\n".join(stderr_lines) + "\n")
+                             if stderr_lines else "")
 
     # ------------------------------------------------------------------
     # bhist

@@ -117,6 +117,36 @@ def test_bjobs_exit_code_parsing(cmd, fake_lsf):
     assert out[0].exit_code == 42
 
 
+def test_bjobs_downgrades_on_unsupported_field(fake_lsf):
+    """확장 -o 필드를 거부하는 LSF에서 CORE 포맷으로 강등해 폴링을 살린다
+    (강등 안 하면 bjobs가 매번 죽어 job이 PEND에 고착)."""
+    def runner(argv, timeout):
+        fmt = argv[argv.index("-o") + 1]
+        if "exec_cwd" in fmt:            # 확장 포맷 거부 (구형 LSF)
+            return CommandResult(255, "", "bjobs: Unknown field: exec_cwd\n")
+        return CommandResult(0, "111;PEND;-;j0\n222;RUN;-;j1\n", "")
+
+    cmd = LsfCommand(LsfConfig(), runner)
+    assert cmd._bjobs_fmt is cmd._BJOBS_FULL_FMT
+    out = cmd.bjobs_by_group("/g")
+    assert cmd._bjobs_fmt is cmd._BJOBS_CORE_FMT      # 강등됨
+    assert [(s.job_id, s.state) for s in out] == \
+        [(111, JobState.PEND), (222, JobState.RUN)]   # 상태는 정상 파싱
+
+
+def test_bjobs_transient_error_no_downgrade():
+    """일시 장애(필드 오류 아님)는 강등하지 않고 전파 — 확장필드 보존."""
+    from lsfmgr.errors import LsfCommandError
+
+    def runner(argv, timeout):
+        return CommandResult(255, "", "LSF error: cannot reach mbatchd\n")
+
+    cmd = LsfCommand(LsfConfig(), runner)
+    with pytest.raises(LsfCommandError):
+        cmd.bjobs_by_group("/g")
+    assert cmd._bjobs_fmt is cmd._BJOBS_FULL_FMT      # 강등 안 됨
+
+
 # ----------------------------------------------------------------------
 # bkill
 # ----------------------------------------------------------------------
@@ -139,6 +169,37 @@ def test_bkill_by_ids_chunked(fake_lsf):
 def test_bkill_no_matching_job_is_ok(cmd):
     # 이미 종료된 job kill은 에러 아님
     cmd.bkill_by_group("/empty")
+
+
+def test_bkill_confirm_parses_terminating(cmd, fake_lsf):
+    ids = [cmd.bsub(f"r {i}") for i in range(3)]
+    resolved, calls = cmd.bkill_targets_confirm([str(i) for i in ids])
+    assert calls == 1
+    assert resolved == {str(i) for i in ids}        # 전부 'is being terminated'
+
+
+def test_bkill_resolved_parser_variants():
+    from lsfmgr.command import _parse_bkill_resolved
+    text = (
+        "Job <101> is being terminated\n"
+        "Job <102>: Job has already finished\n"
+        "Job <103>: No matching job found\n"
+        "Job <104>: LSF error: cannot reach mbatchd\n"   # 미해소 → 재시도 대상
+        "Job <105[2]> is being terminated\n"
+    )
+    resolved = _parse_bkill_resolved(text)
+    # 105[2]는 element + 부모 105 둘 다 해소 (bare 부모 id kill 매칭용)
+    assert resolved == {"101", "102", "103", "105[2]", "105"}
+    assert "104" not in resolved
+
+
+def test_bkill_confirm_array_parent_id(cmd, fake_lsf):
+    """bare 부모 id로 array kill 시 element 확인 행이 부모 pending과 매칭돼
+    한 라운드에 해소된다 (불필요 재시도 없음)."""
+    jid = cmd.bsub("run.sh", job_name="arr[1-4]")   # array 부모 id
+    resolved, calls = cmd.bkill_targets_confirm([str(jid)])
+    assert calls == 1
+    assert str(jid) in resolved                     # 부모 id 해소됨
 
 
 # ----------------------------------------------------------------------
