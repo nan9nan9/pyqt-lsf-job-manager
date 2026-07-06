@@ -19,7 +19,7 @@ PyQt 앱을 실제 LSF 없이 테스트하기 위한 용도. **이 저장소에 
 │   ├── formats.py      # bjobs 출력 포맷 (기본/-w/-l/-o/-json)
 │   └── cli.py          # 각 명령 구현
 ├── bin/                # 실제 LSF 명령과 같은 이름의 실행 래퍼
-│   ├── bsub bjobs bkill bqueues bhist bpeek bstop bresume bmod bgdel
+│   ├── bsub bjobs mjobs bkill bqueues bhist bpeek bstop bresume bmod bgdel
 │   ├── mocklsfd
 │   └── primesim_sub finesim_sub spectrefx_sub verilog_sub   # 툴별 제출 wrapper
 └── tests/test_mocklsf.py
@@ -56,6 +56,7 @@ bjobs
 |------|------|
 | `bsub` | job 제출. Job ID 반환, 1~2초 지연, 아주 가끔 실패 재현. `-g <group>` 로 job group 지정 |
 | `bjobs` | 상태 조회. `-a -w -l -u -J -q -m -g -r -p -s -d -o -noheader -json` |
+| `mjobs` | `bjobs` 의 alias (동일 동작) |
 | `bkill` | job 종료. id / `123[5]` 개별 element / `0`(전체) / `-J` `-u` `-q` `-g`. `-g`·`-J`·`-u`·`-q` 와 함께 온 `0` 은 그 범위로 한정됨 |
 | `bstop` / `bresume` | job suspend / resume (USUSP/PSUSP) |
 | `bqueues` | 큐 상태·job 카운트 |
