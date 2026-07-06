@@ -492,6 +492,9 @@ def main():
     # 자동 제출한다 (대량 job 렌더링/반응 확인용). 워커도 32로 올린다.
     n = os.environ.get("LSFMGR_DEMO_SUBMIT")
     if n:
+        # 스트레스 테스트는 실패 주입/제출 지연을 꺼 깨끗한 대량 경로를 본다
+        # (기본 예제는 retry 시연용으로 submit_fail_rate=0.12를 켜 둔다).
+        configure_mocklsf(submit_fail_rate=0, submit_delay=0)
         win.form.count.setValue(int(n))
         win.form.workers.setValue(32)
         QTimer.singleShot(300, win.submit)
