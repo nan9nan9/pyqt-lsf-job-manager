@@ -193,8 +193,11 @@ def test_closed_handle_raises(qtbot, manager, fake_lsf):
 def test_merge_with_invalidates_originals(qtbot, manager, fake_lsf):
     a = manager.submit(["a 1", "a 2"], auto_poll=False, mode="bulk")
     b = manager.submit(["b 1"], auto_poll=False, mode="bulk")
-    qtbot.waitUntil(lambda: a.summary.get("PEND", 0) == 2
-                    and b.summary.get("PEND", 0) == 1, timeout=10000)
+    # merge는 submit 진행 중이면 거부된다 — summary(store)가 전원 PEND를
+    # 보여도 ctx 마감(is_active=False) 전이라는 창이 있어, 가드 조건 자체를
+    # 기다린다(신호 타이밍 무관, 결정적)
+    qtbot.waitUntil(lambda: not manager.submitter.is_active(a.id)
+                    and not manager.submitter.is_active(b.id), timeout=10000)
     merged = a.merge_with(b)
     assert merged.summary["total"] == 3
     with pytest.raises(JobSetClosedError):

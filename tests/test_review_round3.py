@@ -73,8 +73,10 @@ def test_kill_falls_back_when_one_attachment_errors(qtbot, manager, fake_lsf):
                        auto_poll=False)
     b = manager.submit([f"b {i}" for i in range(5)], mode="bulk",
                        auto_poll=False)
-    qtbot.waitUntil(lambda: a.summary.get("PEND", 0) == 5
-                    and b.summary.get("PEND", 0) == 5, timeout=10000)
+    # merge 가드 조건(submit 마감) 자체를 기다린다 — summary가 전원 PEND여도
+    # ctx 마감 전이면 merge가 거부되는 창을 피한다 (신호 타이밍 무관)
+    qtbot.waitUntil(lambda: not manager.submitter.is_active(a.id)
+                    and not manager.submitter.is_active(b.id), timeout=10000)
     merged = a.merge_with(b)                     # group 부착물 2개
 
     fake_lsf.fail_next_bkill = 1                 # 첫 group bkill만 장애
@@ -92,8 +94,8 @@ def test_kill_falls_back_when_one_attachment_errors(qtbot, manager, fake_lsf):
 def test_merge_stops_polling_of_originals(qtbot, manager, fake_lsf):
     a = manager.submit([f"a {i}" for i in range(3)], mode="bulk")   # AUTO-1
     b = manager.submit([f"b {i}" for i in range(3)], mode="bulk")
-    qtbot.waitUntil(lambda: a.summary.get("PEND", 0) == 3
-                    and b.summary.get("PEND", 0) == 3, timeout=10000)
+    qtbot.waitUntil(lambda: not manager.submitter.is_active(a.id)
+                    and not manager.submitter.is_active(b.id), timeout=10000)
     a.start_polling(interval_s=0.1)
     b.start_polling(interval_s=0.1)
     qtbot.wait(300)
@@ -188,8 +190,8 @@ def test_polling_autostops_on_empty_jobset(qtbot, manager, fake_lsf):
 def test_merge_rejects_duplicate_job_keys(qtbot, manager, fake_lsf):
     a = manager.submit(["a 1", "a 2"], mode="bulk", auto_poll=False)
     b = manager.submit(["b 1"], mode="bulk", auto_poll=False)
-    qtbot.waitUntil(lambda: a.summary.get("PEND", 0) == 2
-                    and b.summary.get("PEND", 0) == 1, timeout=10000)
+    qtbot.waitUntil(lambda: not manager.submitter.is_active(a.id)
+                    and not manager.submitter.is_active(b.id), timeout=10000)
     m = a.merge_with(b, keep_originals=True)     # M은 a의 레코드 포함
     with pytest.raises(ValueError, match="충돌"):
         manager.merge_jobsets([m.id, a.id])      # a_0가 양쪽에 존재

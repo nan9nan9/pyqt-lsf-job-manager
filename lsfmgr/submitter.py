@@ -566,13 +566,18 @@ class BulkSubmitter(QObject):
         self._finish_if_done(ctx)
 
     def _emit_progress(self, ctx: _SubmitContext) -> None:
+        # 발화(progress·jobs_changed)를 ctx.lock 안에서 수행한다 — drain과 emit이
+        # 원자적이어야, 다른 worker 스레드의 _finish_if_done가 그 사이에 끼어들어
+        # finished를 마지막 per-job jobs_changed보다 먼저 post하는 경합을 막는다
+        # (worker→main은 queued connection이라 lock 중 emit은 post만 한다).
         with ctx.lock:
+            if ctx.finished:
+                return                   # 최종 flush는 _finish_if_done 담당
             done, total = ctx.done, ctx.total
-            emit = ctx.throttler.should_emit(done, total)   # QT-5 throttle
-            batch = None
-            if emit and ctx.changed_buffer:
-                batch, ctx.changed_buffer = ctx.changed_buffer, []
-        if emit:
+            if not ctx.throttler.should_emit(done, total):   # QT-5 throttle
+                return
+            batch = ctx.changed_buffer
+            ctx.changed_buffer = []
             self.progress.emit(ctx.jobset_id, done, total)
             if batch:
                 self.jobs_changed.emit(ctx.jobset_id, batch)
@@ -589,6 +594,13 @@ class BulkSubmitter(QObject):
                 cancelled=ctx.cancelled, retried=len(ctx.retried_keys),
                 duration_s=time.monotonic() - ctx.started_at,
                 fail_reasons=dict(ctx.fail_reasons))
+            # 마지막 전이분 flush → finished 를 같은 lock 안에서 순서대로 발화.
+            # 모든 per-job jobs_changed도 ctx.lock 안에서 발화되므로, 락이
+            # 직렬화해 finished가 반드시 마지막 per-job jobs_changed 뒤에
+            # post된다 — UI가 완료 통지 시점에 전 job 갱신을 이미 받도록 보장.
+            if batch:                    # throttle 잔여 마지막 전이분
+                self.jobs_changed.emit(ctx.jobset_id, batch)
+            self.finished.emit(ctx.jobset_id, report)
         log.info("submit 완료 %s: 성공 %d / 실패 %d / 취소 %d (총 %d)",
                  ctx.jobset_id, report.succeeded, report.failed,
                  report.cancelled, report.total)
@@ -597,9 +609,6 @@ class BulkSubmitter(QObject):
         with self._ctx_lock:
             if self._contexts.get(ctx.jobset_id) is ctx:
                 del self._contexts[ctx.jobset_id]
-        if batch:                        # 마지막 전이분 flush (throttle 잔여)
-            self.jobs_changed.emit(ctx.jobset_id, batch)
-        self.finished.emit(ctx.jobset_id, report)
 
 
 class _ArraySubmitTask(QRunnable):
