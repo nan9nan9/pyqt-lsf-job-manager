@@ -89,6 +89,52 @@ class Dashboard(QMainWindow):
 
 ---
 
+## 2.1 프로그레스바 배선 (submit)
+
+가장 단순한 형태 — 시작 시 표시, 진행 시 갱신, 완료 시 숨김:
+
+```python
+# 1) submit 시작 → 바 초기화/표시
+mgr.submit_started.connect(lambda jsid: (
+    bar.setValue(0), bar.setVisible(True)))
+
+# 2) 진행 → 값 갱신  (done, total 그대로 옴, 0.1초/1% throttle이라 스팸 없음)
+mgr.submit_progress.connect(lambda jsid, done, total: (
+    bar.setMaximum(total), bar.setValue(done)))
+
+# 3) 완료 → 마무리/숨김  (마지막 progress는 항상 (total, total) 보장)
+mgr.submit_finished.connect(lambda jsid, rpt: bar.setVisible(False))
+```
+
+- `submit_progress(jsid, done, total)`: **done = bsub 완료된 job 수**(성공+실패+취소
+  합산), total = 전체. `setMaximum(total)` + `setValue(done)` 이면 끝.
+- **throttle**: 0.1초 또는 1% 변화마다만 발화 → 5000개여도 GUI 안 막힘.
+- **마지막 통지는 반드시 `(total, total)`** → 바가 항상 100%로 끝남.
+
+단일 JobSet이면 (jsid 필터 불필요):
+
+```python
+js.submit_progress.connect(lambda done, total: (
+    bar.setMaximum(total), bar.setValue(done)))
+```
+
+## 2.2 프로그레스바 배선 (kill) — 완전히 동일
+
+대량 chunk kill도 `submit_progress`와 같은 시그니처(`done, total`)로 온다:
+
+```python
+mgr.kill_progress.connect(lambda jsid, done, total: (
+    bar.setMaximum(total), bar.setValue(done)))
+mgr.kill_finished.connect(lambda jsid, rpt: bar.setVisible(False))
+# 단일 JobSet: js.kill_progress.connect(lambda done, total: ...)
+```
+
+- 전체 JobSet kill(`js.kill()`)은 `bkill -g` 1회라 진행 없이 바로 완료된다 —
+  `kill_progress`가 유용한 건 **대량 개별 kill/부분 kill/chunk fallback**일 때.
+- submit·kill이 같은 막대를 공유하면 두 `*_progress`를 같은 슬롯에 연결하면 된다.
+
+---
+
 ## 3. 대량 submit (wrapper)
 
 ```python
