@@ -59,7 +59,7 @@ js = mgr.submit(jobs, workers=8, max_retry=0, queue="short",
 
 | 옵션 | 기본값 | 지정 위치 | 설명 |
 |---|---|---|---|
-| `workers` | 16 | 생성자, submit | 병렬 submit worker 수 (1~32) |
+| `workers` | 16 | 생성자, submit | 병렬 submit worker 수 (1~64) |
 | `max_retry` | 3 | 생성자, submit | submit 실패 재시도 (0=끔) |
 | `retry_backoff` | `"fixed:2"` | 생성자, submit | `"fixed:N"`(N초 고정) / `"expo:N"`(지수) |
 | `rate_limit_per_s` | 없음 | 생성자, submit | 초당 bsub 상한 (LSF 부하 보호) |

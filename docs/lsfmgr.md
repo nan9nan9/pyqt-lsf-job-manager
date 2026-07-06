@@ -262,7 +262,7 @@ Job <12345> is submitted to queue <normal>.
 
 - lsfmgr 는 **job(커맨드) 하나마다 wrapper 프로세스를 subprocess 로 하나** 띄운다
   (shell 미경유).
-- 동시에 뜨는 프로세스 수 = `workers` 옵션(기본 16, 1~32).
+- 동시에 뜨는 프로세스 수 = `workers` 옵션(기본 16, 1~64).
   `rate_limit_per_s` 로 초당 실행 횟수도 제한한다.
 
 ```python

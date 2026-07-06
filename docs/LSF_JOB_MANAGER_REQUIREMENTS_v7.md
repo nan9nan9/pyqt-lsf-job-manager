@@ -88,7 +88,7 @@ js = mgr.submit(jobs, workers=8, max_retry=0, queue="short",
 
 | 옵션 | 내장 기본값 | 적용 계층 | 설명 |
 |---|---|---|---|
-| `workers` | 16 | ②③ | 병렬 submit worker 수 (1~32) |
+| `workers` | 16 | ②③ | 병렬 submit worker 수 (1~64) |
 | `max_retry` | 3 | ②③ | submit 실패 재시도 횟수 (0=재시도 없음) |
 | `retry_backoff` | "fixed:2" | ②③ | "fixed:N초" 또는 "expo:base초" |
 | `rate_limit_per_s` | None(무제한) | ②③ | 초당 bsub 상한 |
@@ -110,7 +110,7 @@ js = mgr.submit(jobs, workers=8, max_retry=0, queue="short",
 - 구현 규칙: **OPT-1** 옵션 해석은 `resolve_options(call_kwargs) -> Options`
   한 함수로 일원화 (defaults → manager → call 순 merge, frozen dataclass 반환).
   **OPT-2** 알 수 없는 키워드는 즉시 `TypeError` (오타 조기 발견).
-  **OPT-3** 범위 검증 (workers 1~32 등) 위반 시 `ValueError`.
+  **OPT-3** 범위 검증 (workers 1~64 등) 위반 시 `ValueError`.
   **OPT-4** 세부 제어가 필요한 사용자를 위해 `LsfConfig` 객체 주입도 계속 지원
   (`LsfJobManager(config=cfg)`) — kwargs와 config 동시 지정 시 kwargs 우선.
 

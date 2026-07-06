@@ -35,7 +35,9 @@ class LsfConfig:
     script_dir: str = ""                 # array dispatch 스크립트 저장 위치
                                          # 빈 문자열이면 ~/.lsfmgr/scripts
 
-    workers: int = 16                    # 병렬 submit worker 수 (1~32)
+    workers: int = 16                    # 병렬 submit worker 수 (1~64)
+                                         # 상한↑ 시 submit 호스트 CPU/RAM·master
+                                         # 부하 주의 — rate_limit_per_s와 병행
     max_retry: int = 3                   # submit 재시도 횟수 (FR-2.2)
     retry_delay_s: float = 2.0           # 첫 재시도 대기 (v7 기본 "fixed:2")
     retry_backoff: float = 1.0           # >1.0이면 지수 backoff("expo")
@@ -55,7 +57,7 @@ class LsfConfig:
     poll_interval_s: float = 10.0        # FR-4.4 기본 polling 주기
 
     def __post_init__(self):
-        self.workers = max(1, min(32, int(self.workers)))
+        self.workers = max(1, min(64, int(self.workers)))
         if self.chunk_size < 1:
             self.chunk_size = 200
         if self.kill_status_policy not in ("optimistic", "actual"):

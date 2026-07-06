@@ -75,7 +75,7 @@ def test_kill_context_allows_only_verify():
 # OPT-3: 범위 검증 → ValueError
 # ----------------------------------------------------------------------
 @pytest.mark.parametrize("kwargs", [
-    {"workers": 0}, {"workers": 33},
+    {"workers": 0}, {"workers": 65},
     {"max_retry": -1},
     {"poll_interval_s": 4}, {"poll_interval_s": 61},
     {"mode": "banana"},

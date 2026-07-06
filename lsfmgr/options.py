@@ -100,8 +100,8 @@ def _validate(key: str, value: Any) -> Any:
     """옵션 1개 검증/정규화. 위반 시 ValueError."""
     if key == "workers":
         v = int(value)
-        if not 1 <= v <= 32:
-            raise ValueError(f"workers는 1~32 (got {value})")
+        if not 1 <= v <= 64:
+            raise ValueError(f"workers는 1~64 (got {value})")
         return v
     if key == "max_retry":
         v = int(value)
