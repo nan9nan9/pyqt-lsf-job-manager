@@ -257,12 +257,15 @@ class BulkSubmitter(QObject):
         # 기존 레코드 리셋 — 이전 실행의 흔적(job_id/exit_code/실행시간/위치)을
         # 지우고 새 command 반영. 지우지 않으면 재제출 실패 시 죽은 옛 job_id·
         # 이전 실행의 start/finish/working_dir가 새 커맨드의 것처럼 잔존한다.
+        # 상태는 곧장 SUBMITTING으로 — 재제출은 즉시 제출 착수라, 파이프라인이
+        # EXIT(kill) → SUBMITTING(제출 중) → PEND로 자연스럽게 보인다(CREATED
+        # 중간 표시 생략). worker가 다시 SUBMITTING으로 두는 건 무해한 재설정.
         launch = []
         reset_recs = []
         for key, item in keyed:
             try:
                 rec = self.store.transition(
-                    jobset_id, key, JobState.CREATED,
+                    jobset_id, key, JobState.SUBMITTING,
                     job_id=None, exit_code=None, fail_reason=None,
                     retry_count=0, command=self._item_command(item),
                     submit_time=None, run_time_s=None, start_time=None,
@@ -280,7 +283,7 @@ class BulkSubmitter(QObject):
             if rec is not None:
                 reset_recs.append(rec)
             launch.append((key, item))
-        # 리셋된 CREATED를 즉시 발행 — 재제출도 완료를 안 기다리고 점진 갱신
+        # 리셋된 SUBMITTING을 즉시 발행 — 재제출도 완료를 안 기다리고 표에 반영
         if reset_recs:
             self.jobs_changed.emit(jobset_id, reset_recs)
         for key, item in launch:

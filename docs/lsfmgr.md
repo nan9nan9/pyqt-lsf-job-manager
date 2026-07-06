@@ -155,9 +155,10 @@ js.resubmit_jobs([f"{js.id}_0"], commands={f"{js.id}_0": "primesim_sub -q long a
 - **파이프라인처럼 단계별 `jobs_updated`가 발행된다** — 표가 각 단계를 드러낸다:
   1. **kill 단계** — 살아있던 job(`is_on_lsf`)만 `bkill` 후 **EXIT**로 전이·발행
      (이미 terminal/미제출 job은 안 건드림, 조건별 kill)
-  2. **리셋** — 대상 전체를 **CREATED**로 되돌려 발행
+  2. **제출 착수** — 대상 전체를 리셋하며 곧장 **SUBMITTING**으로 전이·발행
+     (이전 실행 흔적은 지우되 CREATED 중간 표시는 생략)
   3. **재제출** — bsub 완료되는 대로 **PEND**로 점진 발행
-  즉 살아있던 job은 `EXIT → CREATED → PEND` 순으로 표에 나타난다.
+  즉 살아있던 job은 `EXIT → SUBMITTING → PEND` 순으로 표에 나타난다.
 - **결과 Signal 은 submit 계열과 동일** — `submit_started` → (`submit_progress`) →
   `submit_finished`(= `js.submit_finished`). 즉 재실행 결과는 `submit_finished` 로 받는다.
 - `verify=True`(기본)면 kill 후 실제 종료를 확인한 뒤 EXIT 전이·재제출한다.

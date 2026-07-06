@@ -186,11 +186,10 @@ def test_resubmit_jobs_reuses_records_and_kills_live(qtbot, manager, fake_lsf):
 
 def test_resubmit_jobs_pipeline_stages_emitted(qtbot, manager, fake_lsf):
     """resubmit이 파이프라인처럼 단계별 jobs_updated를 발행한다:
-    살아있던 job → EXIT(kill 단계) → CREATED(리셋) → PEND(재제출).
+    살아있던 job → EXIT(kill 단계) → SUBMITTING(제출 중) → PEND(재제출).
     이미 terminal/미제출 job은 kill 안 하고 그대로 재제출된다."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         jsid = manager.submit_bulk([JobSpec(command=f"r {i}") for i in range(3)])
-    recs = {r.job_key: r for r in manager.get_jobs(jsid)}
     live = f"{jsid}_0"                                  # PEND(살아있음) → kill 대상
     dead = f"{jsid}_1"
     manager.store.transition(jsid, dead, JobState.EXIT, exit_code=1)  # 이미 terminal
@@ -202,12 +201,16 @@ def test_resubmit_jobs_pipeline_stages_emitted(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.resubmit_jobs(jsid, [live, dead])
 
-    # 살아있던 job: EXIT(kill) → CREATED(리셋) → PEND(재제출) 순서가 관측됨
-    assert JobState.EXIT in seq[live]
-    assert JobState.PEND in seq[live]
-    assert seq[live].index(JobState.EXIT) < seq[live].index(JobState.PEND)
-    # 이미 EXIT였던 job: kill 단계 EXIT 재발행 없이 CREATED→PEND만
+    # 살아있던 job: EXIT(kill) → SUBMITTING(제출 중) → PEND 순서 관측
+    for st in (JobState.EXIT, JobState.SUBMITTING, JobState.PEND):
+        assert st in seq[live], f"{st} 미관측: {seq[live]}"
+    assert (seq[live].index(JobState.EXIT)
+            < seq[live].index(JobState.SUBMITTING)
+            < seq[live].index(JobState.PEND))
+    assert JobState.CREATED not in seq[live]           # CREATED 중간 표시 생략
+    # 이미 EXIT였던 job: kill 단계 EXIT 재발행 없이 SUBMITTING→PEND만
     assert seq[dead][-1] is JobState.PEND
+    assert JobState.SUBMITTING in seq[dead]
     assert fake_lsf.calls_of("bkill")                  # 살아있던 것만 kill 호출
 
 
