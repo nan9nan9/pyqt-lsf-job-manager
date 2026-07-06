@@ -20,6 +20,7 @@ import os
 import re
 import sys
 import tempfile
+from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -184,6 +185,7 @@ class Dashboard(QWidget):
         self._items = {}                 # jobset_id → QTreeWidgetItem
         self._active_submit = None       # 진행률 바가 추적 중인 jobset_id
         self._laststate = {}             # lsf_job_name → 마지막 관측 상태(전이 로깅)
+        self._row_of = {}                # lsf_job_name → 테이블 행 (증분 upsert용)
 
         # 제출 명령/‏job_id 를 worker 스레드에서 로그로 전달하는 버스.
         self.bus = _LogBus()
@@ -373,38 +375,67 @@ class Dashboard(QWidget):
             item.setText(col, str(v))
 
     def _on_jobs(self, jsid, records):
-        # 변경분 배치 도착 — job 별 상태 전이를 로그로 남긴다.
+        # 변경분 배치 도착 — 상태 전이를 로그로 남긴다. 소량이면 job 별로,
+        # 대량 배치면 요약 1줄로 (5000개 초기 버스트가 로그를 도배하지 않게).
+        trans = []
         for r in records:
             key = r.lsf_job_name
             cur = r.state.value
             prev = self._laststate.get(key)
             if prev != cur:
                 self._laststate[key] = cur
+                trans.append((key, prev, cur, r))
+        if len(trans) <= 12:
+            for key, prev, cur, r in trans:
                 arrow = f"{prev} → {cur}" if prev else f"(신규) → {cur}"
-                extra = f" (exit={r.exit_code})" if r.state == JobState.EXIT \
-                    else ""
+                extra = (f" (exit={r.exit_code})"
+                         if r.state == JobState.EXIT else "")
                 self._log(jsid, f"상태 {key}: {arrow}{extra}")
-        # 선택된 JobSet 이면 테이블도 다시 그린다.
+        elif trans:
+            c = Counter(f"{p or '신규'}→{cur}" for _, p, cur, _ in trans)
+            summ = ", ".join(f"{k} x{v}" for k, v in c.items())
+            self._log(jsid, f"상태 전이 {len(trans)}건: {summ}")
+        # 선택된 JobSet 이면 테이블을 **증분** 갱신한다 — 변경분 배치만 upsert.
+        # (전체 재구성이 아니라 바뀐 행만 손대므로 5000개여도 부드럽다)
         if jsid == self._selected_id():
-            self._reload_jobs()
+            self._apply_jobs(records)
+
+    def _apply_jobs(self, records):
+        """변경분 레코드만 job_key 기준으로 행 upsert (있으면 갱신, 없으면 추가).
+        대량 job에서도 바뀐 행 수만큼만 작업 — 매 배치 전체 재그리기 금지."""
+        self.jobtable.setUpdatesEnabled(False)      # 배치 중 재렌더 억제
+        self.jobtable.setSortingEnabled(False)
+        try:
+            for r in records:
+                key = r.lsf_job_name
+                row = self._row_of.get(key)
+                if row is None:                     # 신규 job → 행 추가
+                    row = self.jobtable.rowCount()
+                    self.jobtable.insertRow(row)
+                    self._row_of[key] = row
+                self._set_row(row, r)
+        finally:
+            self.jobtable.setUpdatesEnabled(True)
+
+    def _set_row(self, row, r):
+        color = _STATE_COLOR.get(r.state)
+        cells = [r.lsf_job_name, str(r.job_id or "-"), r.state.value,
+                 "" if r.exit_code is None else str(r.exit_code),
+                 str(r.retry_count), r.fail_reason or ""]
+        for col, text in enumerate(cells):
+            it = QTableWidgetItem(text)
+            if color and col == 2:
+                it.setForeground(QBrush(QColor(color)))
+            self.jobtable.setItem(row, col, it)
 
     def _reload_jobs(self):
-        js = self._handle()
+        """JobSet 선택이 바뀌면 전체 재구성(+행 맵 재빌드) 1회."""
         self.jobtable.setRowCount(0)
+        self._row_of = {}
+        js = self._handle()
         if js is None:
             return
-        recs = js.jobs()
-        self.jobtable.setRowCount(len(recs))
-        for row, r in enumerate(recs):
-            color = _STATE_COLOR.get(r.state)
-            cells = [r.lsf_job_name, str(r.job_id or "-"), r.state.value,
-                     "" if r.exit_code is None else str(r.exit_code),
-                     str(r.retry_count), r.fail_reason or ""]
-            for col, text in enumerate(cells):
-                it = QTableWidgetItem(text)
-                if color and col == 2:
-                    it.setForeground(QBrush(QColor(color)))
-                self.jobtable.setItem(row, col, it)
+        self._apply_jobs(js.jobs())
 
     # ------------------------------------------------------------------
     # 세션 복원 (07): 앱 비정상 종료 → 재시작 → orphan 복원 → reconcile
@@ -457,6 +488,13 @@ def main():
     win.bind_manager(win._new_manager())
     win.resize(1040, 760)
     win.show()
+    # 스트레스 테스트 훅: LSFMGR_DEMO_SUBMIT=5000 이면 기동 직후 그 개수로
+    # 자동 제출한다 (대량 job 렌더링/반응 확인용). 워커도 32로 올린다.
+    n = os.environ.get("LSFMGR_DEMO_SUBMIT")
+    if n:
+        win.form.count.setValue(int(n))
+        win.form.workers.setValue(32)
+        QTimer.singleShot(300, win.submit)
     maybe_autoquit(app)
     app.exec()
     if os.path.exists(DB) and not os.environ.get("LSFMGR_KEEP_DB"):

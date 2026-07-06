@@ -66,3 +66,13 @@ LSFMGR_REAL=1 python examples/basic_example.py   # mocklsf 대신 PATH 의 bsub/
 ```bash
 LSFMGR_DEMO_AUTOQUIT=20 QT_QPA_PLATFORM=offscreen python examples/basic_example.py
 ```
+
+## 대량 job 스트레스 테스트
+
+`LSFMGR_DEMO_SUBMIT=<개수>` 를 주면 기동 직후 그 개수로 자동 제출한다(워커 32).
+대량 job에서도 테이블은 **job_key 증분 upsert**라 부드럽게 갱신된다(매 배치 전체
+재구성 아님 — 5000행 기준 렌더링 작업이 ~17s → ~0.3s).
+
+```bash
+LSFMGR_DEMO_SUBMIT=5000 python examples/basic_example.py           # GUI로 관찰
+```
