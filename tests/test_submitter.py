@@ -56,19 +56,28 @@ def test_submit_emits_jobset_updated_with_initial_pend(qtbot, manager,
     assert updates[-1]["PEND"] == 5 and updates[-1]["total"] == 5
 
 
-def test_submit_emits_jobs_updated_with_records(qtbot, manager, fake_lsf):
-    """submit 완료 시 개별 job 리스트(jobs_updated)도 발화된다 — 개별 job
-    테이블이 폴링 없이도 각 job_id/PEND로 즉시 채워지게."""
-    per_job = []
-    manager.jobs_updated.connect(lambda jsid, recs: per_job.append(recs))
+def test_submit_emits_created_immediately(qtbot, manager, fake_lsf):
+    """submit 직후(완료 전) 초기 CREATED가 jobs_updated로 즉시 온다 — 대량
+    submit이 오래 걸려도 표가 바로 채워진다."""
+    with qtbot.waitSignal(manager.jobs_updated, timeout=10000) as blk:
+        manager.submit_bulk([JobSpec(command=f"r {i}") for i in range(3)])
+    _, recs = blk.args
+    assert len(recs) == 3
+    assert all(r.state is JobState.CREATED for r in recs)   # 첫 발행은 CREATED
+
+
+def test_submit_emits_jobs_updated_progressively(qtbot, manager, fake_lsf):
+    """submit 진행 중 jobs_updated가 점진 발행되어, 완료를 안 기다리고 각 job이
+    CREATED→PEND로 갱신된다. 최종적으로 전 job이 PEND(job_id 확보)."""
+    seen = {}    # job_key → 마지막 상태
+    manager.jobs_updated.connect(
+        lambda jsid, recs: seen.update({r.job_key: r for r in recs}))
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        jsid = manager.submit_bulk([JobSpec(command=f"r {i}")
-                                    for i in range(4)])
-    assert per_job, "submit 완료 후 jobs_updated 미발화"
-    recs = per_job[-1]
-    assert len(recs) == 4
+        manager.submit_bulk([JobSpec(command=f"r {i}") for i in range(4)])
+    qtbot.wait(50)                       # 마지막 배치 소진
+    assert len(seen) == 4
     assert all(r.job_id is not None and r.state is JobState.PEND
-               for r in recs)
+               for r in seen.values())
 
 
 def test_submit_failure_emits_failed_once(qtbot, manager, fake_lsf):

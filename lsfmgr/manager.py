@@ -59,6 +59,7 @@ class LsfJobManager(QObject):
     jobs_updated = Signal(str, list)           # jobset_id, [JobRecord] 변경분
     job_lost = Signal(str, object)             # jobset_id, JobRecord
     kill_finished = Signal(str, object)        # jobset_id, KillReport
+    kill_progress = Signal(str, int, int)      # jobset_id, done, total (chunk kill)
     error_occurred = Signal(str, str)          # jobset_id, message
     handler_finished = Signal(str, str, object)  # jobset_id, handler_name, HandlerResult
 
@@ -130,6 +131,7 @@ class LsfJobManager(QObject):
         self.submitter.progress.connect(self.submit_progress)
         self.submitter.finished.connect(self.submit_finished)
         self.submitter.error.connect(self.error_occurred)
+        self.submitter.jobs_changed.connect(self._on_submit_jobs_changed)
 
         self.polling = PollingService(self.querier, parent=self)
         self.polling.updated.connect(self._on_poll_updated)
@@ -139,6 +141,7 @@ class LsfJobManager(QObject):
         self.killer = Killer(self.store, self.command, self.querier,
                              parent=self)
         self.killer.finished.connect(self.kill_finished)
+        self.killer.progress.connect(self.kill_progress)
         self.killer.error.connect(self.error_occurred)
 
         # resubmit_jobs 오케스트레이터 — kill(worker) → resubmit(main) 순차 조율
@@ -161,6 +164,7 @@ class LsfJobManager(QObject):
         self.submit_progress.connect(self._handle_relay("submit_progress"))
         self.jobset_updated.connect(self._handle_relay("jobset_updated"))
         self.kill_finished.connect(self._handle_relay("kill_finished"))
+        self.kill_progress.connect(self._handle_relay("kill_progress"))
         self.error_occurred.connect(self._handle_relay("error_occurred"))
         self.handler_finished.connect(self._handle_relay("handler_finished"))
         self.submit_finished.connect(self._h_finished)
@@ -662,21 +666,27 @@ class LsfJobManager(QObject):
             self.jobs_updated.emit(jobset_id, changed)
         self.handlers.tick(jobset_id)
 
+    def _on_submit_jobs_changed(self, jsid: str, records: list) -> None:
+        """submit 진행 중 상태 전이분을 즉시 UI로 발행 — 완료(submit_finished)를
+        기다리지 않는다. 초기 CREATED 선발행 → 각 job이 PEND/실패로 전이될 때마다
+        점진 배치. 대량 submit이 오래 걸려도 표가 바로 채워지고 실시간 갱신된다.
+        (실패분은 _h_jobs_updated가 js.jobs_failed까지 중계)"""
+        self.jobs_updated.emit(jsid, records)
+        try:
+            self.jobset_updated.emit(jsid, self.store.summary(jsid))
+        except LsfmgrError:
+            pass
+
     def _emit_summary_after_submit(self, jsid: str, report) -> None:
-        """submit 완료 시 요약(jobset_updated) + 개별 job(jobs_updated)을 1회
-        발화 — job이 이미 PEND(제출 성공분)/SUBMIT_FAILED로 전이됐는데도 그
-        상태 변화가 update Signal로 안 나가는 공백을 메운다. polling(첫 폴링)
-        전에도, polling을 안 켠 submit_bulk에서도 요약 표(js.updated)와 개별
-        job 테이블(jobs_updated)이 초기 상태를 즉시 받게 된다.
-        (jobs_updated의 실패분 → _h_jobs_updated가 js.failed까지 담당)"""
+        """submit 완료 시 최종 요약(jobset_updated)을 보장 발화 — 진행 중
+        점진 발행(_on_submit_jobs_changed)의 마무리. 개별 job(jobs_updated)은
+        이미 점진 발행이 전부 커버했으므로 여기서 다시 쏘지 않는다(실패분
+        js.jobs_failed 이중 발행 방지)."""
         try:
             summary = self.store.summary(jsid)
-            records = self.store.get_jobs(jsid)
         except LsfmgrError:
             return                       # jobset이 이미 사라짐(merge/close 등)
         self.jobset_updated.emit(jsid, summary)
-        if records:
-            self.jobs_updated.emit(jsid, records)
 
     def _emit_updates_after_kill(self, jsid: str, report) -> None:
         """kill 완료 시 상태 반영을 update Signal로 발화. optimistic 정책이면

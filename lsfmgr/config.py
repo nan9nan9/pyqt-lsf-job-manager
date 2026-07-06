@@ -35,7 +35,7 @@ class LsfConfig:
     script_dir: str = ""                 # array dispatch 스크립트 저장 위치
                                          # 빈 문자열이면 ~/.lsfmgr/scripts
 
-    workers: int = 16                    # 병렬 submit worker 수 (1~64)
+    workers: int = 32                    # 병렬 submit worker 수 (1~64)
                                          # 상한↑ 시 submit 호스트 CPU/RAM·master
                                          # 부하 주의 — rate_limit_per_s와 병행
     max_retry: int = 3                   # submit 재시도 횟수 (FR-2.2)

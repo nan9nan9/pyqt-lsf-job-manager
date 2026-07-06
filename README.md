@@ -22,7 +22,7 @@ js.jobset_updated.connect(lambda s: print(f"RUN={s['RUN']} DONE={s['DONE']}/{s['
 ```
 
 이것만으로:
-- 5,000개 job이 병렬 submit되고 (worker 16, 실패 시 3회 재시도)
+- 5,000개 job이 병렬 submit되고 (worker 32, 실패 시 3회 재시도)
 - polling이 자동 시작되어 (10초 주기) 요약이 `js.jobset_updated`로 도착하고
 - 전부 끝나면 polling도 자동 중지됩니다
 - 앱 종료 시 스레드 정리(`shutdown`)도 자동입니다
@@ -59,7 +59,7 @@ js = mgr.submit(jobs, workers=8, max_retry=0, queue="short",
 
 | 옵션 | 기본값 | 지정 위치 | 설명 |
 |---|---|---|---|
-| `workers` | 16 | 생성자, submit | 병렬 submit worker 수 (1~64) |
+| `workers` | 32 | 생성자, submit | 병렬 submit worker 수 (1~64) |
 | `max_retry` | 3 | 생성자, submit | submit 실패 재시도 (0=끔) |
 | `retry_backoff` | `"fixed:2"` | 생성자, submit | `"fixed:N"`(N초 고정) / `"expo:N"`(지수) |
 | `rate_limit_per_s` | 없음 | 생성자, submit | 초당 bsub 상한 (LSF 부하 보호) |
@@ -127,6 +127,7 @@ js = mgr.submit_wrapper([
 | `submit_progress` | `(done, total)` | submit/resubmit 진행 (throttled) |
 | `submit_finished` | `SubmitReport` | submit/resubmit 완료 (retry 포함 최종) |
 | `jobs_failed` | `list[JobRecord]` | SUBMIT_FAILED/EXIT/LOST 변경분 |
+| `kill_progress` | `(done, total)` | 대량 chunk kill 진행 (throttled, 마지막 100%) |
 | `kill_finished` | `KillReport` | kill 완료 |
 | `handler_finished` | `(name, HandlerResult)` | 등록한 handler 1회 실행 완료마다 (§3.5) |
 | `error_occurred` | `str` | worker 예외 등 |

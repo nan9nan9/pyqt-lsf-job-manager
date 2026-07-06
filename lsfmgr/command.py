@@ -505,30 +505,39 @@ class LsfCommand:
                   if index_range else str(array_job_id))
         return self._run_kill(cmd_tokens(self.config.bkill_path) + [target])
 
-    def bkill_targets(self, targets: Sequence[str]) -> int:
+    def bkill_targets(self, targets: Sequence[str],
+                      on_progress: Optional[Callable[[int], None]] = None) -> int:
         """chunked bkill — "id" 또는 "id[idx]"(array element) 형태 허용.
-        ARG_MAX 안전 (④ 최후 수단). 반환: LSF 호출 횟수."""
+        ARG_MAX 안전 (④ 최후 수단). 반환: LSF 호출 횟수.
+        on_progress(누적_처리_수)는 chunk 완료마다 호출된다(진행 통지)."""
         calls = 0
+        processed = 0
         base = self._prog_len(self.config.bkill_path) + 10
         for chunk in chunk_args(list(targets), self.config.chunk_size,
                                 self.config.arg_max, base):
             self._run_kill(cmd_tokens(self.config.bkill_path) + chunk)
             calls += 1
+            processed += len(chunk)
+            if on_progress:
+                on_progress(processed)
         return calls
 
     def bkill_by_ids(self, job_ids: Sequence[int]) -> int:
         return self.bkill_targets([str(i) for i in job_ids])
 
-    def bkill_targets_confirm(self, targets: Sequence[str]
+    def bkill_targets_confirm(self, targets: Sequence[str],
+                              on_progress: Optional[Callable[[int], None]] = None
                               ) -> Tuple[Set[str], int]:
         """chunked bkill + 출력 확인 파싱 (FR-3.4).
 
         반환: (해소된 target 집합, LSF 호출 횟수).
         '해소'는 더 이상 kill이 필요 없다고 확인된 것 — 'Job <id> is being
         terminated'(신호 수락) 또는 already-finished/no-matching(이미 없음).
-        해소 안 된 target(일시 장애 등)은 호출자가 재시도한다."""
+        해소 안 된 target(일시 장애 등)은 호출자가 재시도한다.
+        on_progress(누적_처리_target수)는 chunk 완료마다 호출된다(진행 통지)."""
         resolved: Set[str] = set()
         calls = 0
+        processed = 0
         base = self._prog_len(self.config.bkill_path) + 10
         for chunk in chunk_args(list(targets), self.config.chunk_size,
                                 self.config.arg_max, base):
@@ -539,9 +548,15 @@ class LsfCommand:
                 # 이 chunk 전부 미확인 — 재시도 대상으로 남긴다
                 log.warning("bkill timeout — 재시도 대상: %s", chunk)
                 calls += 1
+                processed += len(chunk)
+                if on_progress:
+                    on_progress(processed)
                 continue
             calls += 1
+            processed += len(chunk)
             resolved |= _parse_bkill_resolved(res.stdout + "\n" + res.stderr)
+            if on_progress:
+                on_progress(processed)
         return resolved, calls
 
     def _run_kill(self, argv: List[str]) -> bool:

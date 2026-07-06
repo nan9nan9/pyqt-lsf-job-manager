@@ -32,7 +32,7 @@ MANAGER_ONLY_KEYS = frozenset({
 
 #: ① 라이브러리 내장 기본값
 BUILTIN_DEFAULTS: Dict[str, Any] = {
-    "workers": 16,
+    "workers": 32,
     "max_retry": 3,
     "retry_backoff": "fixed:2",
     "rate_limit_per_s": None,
@@ -54,7 +54,7 @@ BUILTIN_DEFAULTS: Dict[str, Any] = {
 @dataclass(frozen=True)
 class Options:
     """1회 호출에 적용될 최종 옵션 (frozen — Signal/스레드 공유 안전)."""
-    workers: int = 16
+    workers: int = 32
     max_retry: int = 3
     retry_backoff: str = "fixed:2"
     rate_limit_per_s: Optional[float] = None

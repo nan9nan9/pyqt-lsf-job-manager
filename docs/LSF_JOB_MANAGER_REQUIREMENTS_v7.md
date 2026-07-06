@@ -88,7 +88,7 @@ js = mgr.submit(jobs, workers=8, max_retry=0, queue="short",
 
 | 옵션 | 내장 기본값 | 적용 계층 | 설명 |
 |---|---|---|---|
-| `workers` | 16 | ②③ | 병렬 submit worker 수 (1~64) |
+| `workers` | 32 | ②③ | 병렬 submit worker 수 (1~64) |
 | `max_retry` | 3 | ②③ | submit 실패 재시도 횟수 (0=재시도 없음) |
 | `retry_backoff` | "fixed:2" | ②③ | "fixed:N초" 또는 "expo:base초" |
 | `rate_limit_per_s` | None(무제한) | ②③ | 초당 bsub 상한 |

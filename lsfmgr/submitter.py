@@ -65,6 +65,9 @@ class _SubmitContext:
     fail_reasons: Dict[str, int] = field(default_factory=dict)
     pending_retries: Dict[str, _PendingRetry] = field(default_factory=dict)
     finished: bool = False
+    # 진행 중 상태 전이분(PEND/SUBMIT_FAILED) 버퍼 — progress와 같은 cadence로
+    # jobs_changed 배치 발행. UI가 완료를 안 기다리고 점진 갱신하게 한다.
+    changed_buffer: list = field(default_factory=list)
 
 
 class _BaseSubmitTask(QRunnable):
@@ -184,6 +187,7 @@ class BulkSubmitter(QObject):
     progress = Signal(str, int, int)          # jobset_id, done, total
     finished = Signal(str, object)            # jobset_id, SubmitReport
     error = Signal(str, str)                  # jobset_id, message
+    jobs_changed = Signal(str, list)          # jobset_id, [JobRecord] 전이 배치
     # 내부용 — worker 스레드에서 emit → submitter 소속 스레드에서 QTimer 스케줄
     _retry_requested = Signal(str, str)       # jobset_id, 원장 키
 
@@ -254,9 +258,10 @@ class BulkSubmitter(QObject):
         # 지우고 새 command 반영. 지우지 않으면 재제출 실패 시 죽은 옛 job_id·
         # 이전 실행의 start/finish/working_dir가 새 커맨드의 것처럼 잔존한다.
         launch = []
+        reset_recs = []
         for key, item in keyed:
             try:
-                self.store.transition(
+                rec = self.store.transition(
                     jobset_id, key, JobState.CREATED,
                     job_id=None, exit_code=None, fail_reason=None,
                     retry_count=0, command=self._item_command(item),
@@ -272,7 +277,12 @@ class BulkSubmitter(QObject):
                               jobset_id, key)
                 self._count(ctx, cancelled=True)
                 continue
+            if rec is not None:
+                reset_recs.append(rec)
             launch.append((key, item))
+        # 리셋된 CREATED를 즉시 발행 — 재제출도 완료를 안 기다리고 점진 갱신
+        if reset_recs:
+            self.jobs_changed.emit(jobset_id, reset_recs)
         for key, item in launch:
             ctx.pool.start(self._make_resubmit_task(ctx, key, item))
         if not launch:
@@ -325,7 +335,7 @@ class BulkSubmitter(QObject):
 
         # CREATED 레코드 선생성 → 요약 불변식(합계==intended) 즉시 성립.
         # 배치 API 필수 — 건당 insert는 Sqlite에서 caller 스레드 블로킹.
-        self.store.add_jobs([
+        created = self.store.add_jobs([
             JobRecord(job_id=None, array_index=None, jobset_id=jobset_id,
                       lsf_job_name=f"{jobset_id}_{idx}",
                       state=JobState.CREATED, command=record_command(item),
@@ -333,6 +343,10 @@ class BulkSubmitter(QObject):
                       spec_json=(spec_to_json(item)
                                  if isinstance(item, JobSpec) else None))
             for idx, item in enumerate(items)])
+        # 초기 CREATED를 즉시 발행 — submit 완료를 안 기다리고 표를 채운다.
+        # (이후 각 job이 PEND/실패로 전이될 때마다 점진 발행)
+        if created:
+            self.jobs_changed.emit(jobset_id, list(created))
         for idx, item in enumerate(items):
             ctx.pool.start(make_task(ctx, f"{jobset_id}_{idx}", item))
         if not items:
@@ -344,13 +358,15 @@ class BulkSubmitter(QObject):
                      options: Options) -> None:
         """[async→Signal] array job submit (FR-1.3) — bsub 1회."""
         n = spec.size
-        self.store.add_jobs([
+        created = self.store.add_jobs([
             JobRecord(job_id=None, array_index=i, jobset_id=jobset_id,
                       lsf_job_name=f"{jobset_id}[{i}]",
                       state=JobState.CREATED,
                       command=(spec.commands[i - 1] if spec.commands
                                else (spec.command or "")))
             for i in range(1, n + 1)])
+        if created:
+            self.jobs_changed.emit(jobset_id, list(created))
         ctx = _SubmitContext(
             jobset_id=jobset_id, total=1,
             max_retry=options.max_retry,
@@ -394,10 +410,10 @@ class BulkSubmitter(QObject):
     # ------------------------------------------------------------------
     def _task_succeeded(self, ctx: _SubmitContext, job_key: str,
                         job_id: int) -> None:
-        self.store.transition(ctx.jobset_id, job_key, JobState.PEND,
-                              job_id=job_id, submit_time=datetime.now(),
-                              fail_reason=None)
-        self._count(ctx, succeeded=True)
+        rec = self.store.transition(ctx.jobset_id, job_key, JobState.PEND,
+                                    job_id=job_id, submit_time=datetime.now(),
+                                    fail_reason=None)
+        self._count(ctx, succeeded=True, changed=rec)
 
     def _task_failed(self, ctx: _SubmitContext, job_key: str, attempt: int,
                      err: SubmitError,
@@ -420,10 +436,11 @@ class BulkSubmitter(QObject):
             return
         log.error("SUBMIT_FAILED 확정 [%s] %s (%d회 시도)",
                   err.fail_reason, job_key, attempt + 1)      # NFR-6 ERROR
-        self.store.transition(ctx.jobset_id, job_key, JobState.SUBMIT_FAILED,
-                              retry_count=attempt,
-                              fail_reason=err.fail_reason)
-        self._count(ctx, failed=True, reason=err.fail_reason)
+        rec = self.store.transition(ctx.jobset_id, job_key,
+                                    JobState.SUBMIT_FAILED,
+                                    retry_count=attempt,
+                                    fail_reason=err.fail_reason)
+        self._count(ctx, failed=True, reason=err.fail_reason, changed=rec)
 
     def _task_cancelled(self, ctx: _SubmitContext, job_key: str) -> None:
         # 아직 submit 전이므로 CREATED로 되돌림 (안전 지점 중단, QT-6)
@@ -485,28 +502,34 @@ class BulkSubmitter(QObject):
                         default_reason: str) -> None:
         """재시도 포기 — RETRY_WAIT 잔류분을 SUBMIT_FAILED로 최종 확정.
         jobset이 이미 삭제됐어도(merge 등) 카운터 확정은 계속한다."""
+        changed = []
         for key in entry.keys:
             try:
                 rec = self.store.get_job(ctx.jobset_id, key)
                 if rec.state is JobState.RETRY_WAIT:
-                    self.store.transition(ctx.jobset_id, key,
-                                          JobState.SUBMIT_FAILED,
-                                          fail_reason=rec.fail_reason
-                                          or default_reason)
+                    new = self.store.transition(ctx.jobset_id, key,
+                                                JobState.SUBMIT_FAILED,
+                                                fail_reason=rec.fail_reason
+                                                or default_reason)
+                    if new is not None:
+                        changed.append(new)
             except Exception:                    # noqa: BLE001 — CS-5
                 # store 장애(sqlite lock 등)여도 _count까지는 반드시 도달해야
                 # 한다 — 여기서 전파되면 done<total 고착 → finished 미발행
                 log.exception("retry 포기 확정 실패(무시): %s/%s",
                               ctx.jobset_id, key)
-        self._count(ctx, failed=True)
+        self._count(ctx, failed=True, changed=changed)
 
     # ------------------------------------------------------------------
     # 진행/완료 통지 — 모든 종료 경로의 단일 출구
     # ------------------------------------------------------------------
     def _count(self, ctx: _SubmitContext, *, succeeded: bool = False,
                failed: bool = False, cancelled: bool = False,
-               reason: Optional[str] = None) -> None:
-        """작업 1단위(bulk job 1개 / array 1회) 완료 계상 + 진행/완료 통지."""
+               reason: Optional[str] = None,
+               changed=None) -> None:
+        """작업 1단위(bulk job 1개 / array 1회) 완료 계상 + 진행/완료 통지.
+        changed(전이된 JobRecord 또는 리스트)는 버퍼에 쌓아 progress와 같은
+        cadence로 jobs_changed 배치 발행한다."""
         with ctx.lock:
             ctx.done += 1
             if succeeded:
@@ -517,20 +540,32 @@ class BulkSubmitter(QObject):
                 ctx.cancelled += 1
             if reason is not None:
                 ctx.fail_reasons[reason] = ctx.fail_reasons.get(reason, 0) + 1
+            if changed is not None:
+                if isinstance(changed, list):
+                    ctx.changed_buffer.extend(changed)
+                else:
+                    ctx.changed_buffer.append(changed)
         self._emit_progress(ctx)
         self._finish_if_done(ctx)
 
     def _emit_progress(self, ctx: _SubmitContext) -> None:
         with ctx.lock:
             done, total = ctx.done, ctx.total
-        if ctx.throttler.should_emit(done, total):      # QT-5 throttle
+            emit = ctx.throttler.should_emit(done, total)   # QT-5 throttle
+            batch = None
+            if emit and ctx.changed_buffer:
+                batch, ctx.changed_buffer = ctx.changed_buffer, []
+        if emit:
             self.progress.emit(ctx.jobset_id, done, total)
+            if batch:
+                self.jobs_changed.emit(ctx.jobset_id, batch)
 
     def _finish_if_done(self, ctx: _SubmitContext, force: bool = False) -> None:
         with ctx.lock:
             if ctx.finished or (ctx.done < ctx.total and not force):
                 return
             ctx.finished = True
+            batch, ctx.changed_buffer = ctx.changed_buffer, []
             report = SubmitReport(
                 jobset_id=ctx.jobset_id, total=ctx.total,
                 succeeded=ctx.succeeded, failed=ctx.failed,
@@ -545,6 +580,8 @@ class BulkSubmitter(QObject):
         with self._ctx_lock:
             if self._contexts.get(ctx.jobset_id) is ctx:
                 del self._contexts[ctx.jobset_id]
+        if batch:                        # 마지막 전이분 flush (throttle 잔여)
+            self.jobs_changed.emit(ctx.jobset_id, batch)
         self.finished.emit(ctx.jobset_id, report)
 
 
@@ -615,11 +652,14 @@ class _ArraySubmitTask(QRunnable):
 
         sub.jobsets.add_array_attachment(jsid, array_id)
         now = datetime.now()
+        recs = []
         for key in keys:
-            sub.store.transition(jsid, key, JobState.PEND,
-                                 job_id=array_id, submit_time=now,
-                                 fail_reason=None)
-        sub._count(ctx, succeeded=True)
+            r = sub.store.transition(jsid, key, JobState.PEND,
+                                     job_id=array_id, submit_time=now,
+                                     fail_reason=None)
+            if r is not None:
+                recs.append(r)
+        sub._count(ctx, succeeded=True, changed=recs)
 
     def _write_dispatch_script(self, jsid: str, commands) -> str:
         """element별 command가 다른 경우 $LSB_JOBINDEX dispatch 스크립트 생성."""

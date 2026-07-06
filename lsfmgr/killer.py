@@ -17,6 +17,7 @@ from .qt import QObject, QRunnable, QThreadPool, Signal
 from .reports import KillReport
 from .states import JobState
 from .store.base import JobSetStore
+from .util import EmitThrottler
 
 log = logging.getLogger("lsfmgr.kill")
 
@@ -25,6 +26,7 @@ class Killer(QObject):
     """kill 진입점 — 실제 실행은 QThreadPool 단발 task (§3.2)."""
 
     finished = Signal(str, object)           # jobset_id, KillReport
+    progress = Signal(str, int, int)         # jobset_id, done, total (chunk 진행)
     error = Signal(str, str)
 
     def __init__(self, store: JobSetStore, command: LsfCommand,
@@ -64,6 +66,7 @@ class _KillTask(QRunnable):
         self.only_state = only_state
         self.job_ids = job_ids
         self.verify = verify
+        self._prog = EmitThrottler()         # chunk progress throttle (submit 대칭)
 
     def run(self):
         try:
@@ -72,7 +75,15 @@ class _KillTask(QRunnable):
             log.exception("kill 실패: %s", self.jobset_id)
             self.killer.error.emit(self.jobset_id, repr(e))
             return
+        # 완료 시 항상 100% 보장 (미확인이 남아도 작업은 끝) — submit과 대칭
+        self.killer.progress.emit(self.jobset_id, report.requested,
+                                  report.requested)
         self.killer.finished.emit(self.jobset_id, report)
+
+    def _emit_progress(self, done: int, total: int) -> None:
+        """chunk 진행 통지 (throttled)."""
+        if total > 0 and self._prog.should_emit(done, total):
+            self.killer.progress.emit(self.jobset_id, done, total)
 
     # ------------------------------------------------------------------
     def _run(self) -> KillReport:
@@ -172,12 +183,16 @@ class _KillTask(QRunnable):
         반환: (LSF 호출 횟수, 최종 미확인 수, 재시도 라운드 수, 해소된 id 집합)."""
         k = self.killer
         cfg = k.command.config
+        total = len(targets)
         pending = set(targets)
         resolved_all: set = set()
         calls = 0
         attempt = 0
         while True:
-            resolved, c = k.command.bkill_targets_confirm(sorted(pending))
+            base = len(resolved_all)         # 이번 라운드 시작 시 확인분
+            resolved, c = k.command.bkill_targets_confirm(
+                sorted(pending),
+                on_progress=lambda done: self._emit_progress(base + done, total))
             calls += c
             resolved_all |= resolved
             pending -= resolved
@@ -235,7 +250,10 @@ class _KillTask(QRunnable):
             targets = sorted({str(r.job_id) for r in alive
                               if r.job_id is not None})
             if targets:
-                calls += k.command.bkill_targets(targets)
+                n = len(targets)
+                calls += k.command.bkill_targets(
+                    targets,
+                    on_progress=lambda done: self._emit_progress(done, n))
                 strategies.append("chunk")
         return len(alive), calls, alive
 

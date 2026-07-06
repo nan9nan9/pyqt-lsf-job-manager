@@ -91,6 +91,31 @@ def test_kill_individual_ids(qtbot, manager, fake_lsf, submitted):
     assert len(fake_lsf.alive_jobs()) == 25
 
 
+def test_kill_progress_signal(qtbot, fake_lsf, config):
+    """대량 chunk kill 시 kill_progress(done, total)가 발화되고, 마지막은
+    반드시 (total, total)로 끝난다 (submit_progress와 대칭)."""
+    from dataclasses import replace
+    from lsfmgr import InMemoryStore, LsfJobManager
+    mgr = LsfJobManager(store=InMemoryStore(),
+                        config=replace(config, chunk_size=10),  # 여러 chunk
+                        runner=fake_lsf)
+    try:
+        jobs = [JobSpec(command=f"r {i}") for i in range(60)]
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            jsid = mgr.submit_bulk(jobs)
+        ids = [r.job_id for r in mgr.get_jobs(jsid)]
+        seen = []
+        mgr.kill_progress.connect(
+            lambda j, d, t: seen.append((d, t)) if j == jsid else None)
+        with qtbot.waitSignal(mgr.kill_finished, timeout=10000):
+            mgr.kill_jobs(ids, jobset_id=jsid)
+        assert seen, "kill_progress가 한 번도 오지 않음"
+        assert seen[-1] == (60, 60)                # 마지막은 100%
+        assert all(0 <= d <= t == 60 for d, t in seen)
+    finally:
+        mgr.shutdown()
+
+
 # ----------------------------------------------------------------------
 # kill 확인 + 재시도 (FR-3.4)
 # ----------------------------------------------------------------------

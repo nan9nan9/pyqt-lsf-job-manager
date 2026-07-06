@@ -18,7 +18,7 @@ from lsfmgr.options import (
 # ----------------------------------------------------------------------
 def test_builtin_defaults_only():
     opts = resolve_options({}, {})
-    assert opts.workers == 16
+    assert opts.workers == 32
     assert opts.max_retry == 3
     assert opts.retry_backoff == "fixed:2"
     assert opts.rate_limit_per_s is None
