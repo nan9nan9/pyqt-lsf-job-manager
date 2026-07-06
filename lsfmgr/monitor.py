@@ -46,11 +46,13 @@ class JobsetQuerier:
         # --- 1) 부착물 기반 조회 (FR-4.1 우선순위) ---
         statuses: Dict[Tuple[int, Optional[int]], JobStatus] = {}
         by_name: Dict[str, JobStatus] = {}
+        by_id: Dict[int, List[JobStatus]] = {}
 
         def collect(items: List[JobStatus]):
             for st in items:
                 statuses[(st.job_id, st.array_index)] = st
                 by_name[st.job_name] = st
+                by_id.setdefault(st.job_id, []).append(st)
 
         # 조회 수단 실패("장애")와 "job이 LSF에 없음"은 반드시 구분한다 —
         # 장애를 없음으로 오판하면 LSF 순단 1회에 전원 LOST(terminal) 확정됨.
@@ -72,6 +74,13 @@ class JobsetQuerier:
                 st = statuses.get((rec.job_id, rec.array_index))
                 if st is not None:
                     return st
+                # wrapper가 array job을 제출한 경우: 레코드는 (id, None)인데
+                # bjobs는 element별 (id, idx) 행만 낸다 — 같은 id의 element들을
+                # 집계해 대표 상태를 만든다 (안 하면 RUN 중인데 LOST 오판)
+                if rec.array_index is None:
+                    elems = by_id.get(rec.job_id)
+                    if elems:
+                        return _aggregate_elements(rec, elems)
             st = by_name.get(rec.lsf_job_name)       # name fallback 매칭
             # 동명이지만 다른 인스턴스(id 불일치)면 버린다 — 다른 job의
             # 상태/exit_code가 이 레코드에 혼입되는 것을 막는다
@@ -142,6 +151,12 @@ class JobsetQuerier:
                 if rec.job_id is not None:
                     found = (hist.get((rec.job_id, rec.array_index))
                              or hist.get((rec.job_id, None)))
+                    if found is None and rec.array_index is None:
+                        # wrapper가 제출한 array — element 블록들을 집계
+                        entries = [v for (jid, _i), v in hist.items()
+                                   if jid == rec.job_id]
+                        if entries:
+                            found = _aggregate_hist(entries)
                 if found is not None:
                     state, exit_code = found
                     new = safe_transition(rec, state, exit_code=exit_code,
@@ -164,7 +179,7 @@ class JobsetQuerier:
                     changed.append(new)
                     lost.append(new)
                     log.error("job LOST 확정: %s (job_id=%s)",
-                                rec.job_key, rec.job_id)
+                              rec.job_key, rec.job_id)
 
         return QueryResult(jobset_id, self.store.summary(jobset_id),
                            tuple(changed), tuple(lost), len(targets))
@@ -179,6 +194,49 @@ class JobsetQuerier:
             log.warning("조회 실패(%s): %s", what, e)
             return False
         return True
+
+
+def _aggregate_elements(rec: JobRecord,
+                        elems: List[JobStatus]) -> JobStatus:
+    """wrapper가 제출한 array job의 element 상태들을 레코드 1건(array_index
+    None)의 대표 상태로 집계한다 — 하나라도 LSF에 살아있으면 진행 중,
+    전원 종료면 EXIT(하나라도 실패) / DONE."""
+    on = [e for e in elems if e.state.is_on_lsf]
+    if on:
+        pick = next((e for e in on if e.state is JobState.RUN), on[0])
+        state = pick.state
+        exit_code = None
+    else:
+        bad = [e for e in elems if e.state is JobState.EXIT]
+        if bad:
+            state = JobState.EXIT
+            exit_code = next((e.exit_code for e in bad
+                              if e.exit_code is not None), None)
+        else:
+            state, exit_code = JobState.DONE, None
+    starts = [e.start_time for e in elems if e.start_time is not None]
+    finishes = [e.finish_time for e in elems if e.finish_time is not None]
+    rts = [e.run_time_s for e in elems if e.run_time_s is not None]
+    cwds = [e.working_dir for e in elems if e.working_dir]
+    return JobStatus(
+        job_id=rec.job_id, array_index=None, state=state,
+        exit_code=exit_code, job_name=rec.lsf_job_name,
+        run_time_s=max(rts) if rts else None,
+        start_time=min(starts) if starts else None,
+        # 실행 중 element가 남았으면 종료 시각은 아직 실측이 아니다
+        finish_time=(max(finishes) if finishes and not on else None),
+        working_dir=cwds[0] if cwds else None)
+
+
+def _aggregate_hist(entries: List[Tuple[JobState, Optional[int]]]
+                    ) -> Tuple[JobState, Optional[int]]:
+    """bhist element 블록들의 (state, exit_code) 집계 — bhist는 종료 상태만
+    기록하므로 하나라도 EXIT면 EXIT, 아니면 DONE."""
+    bad = [(s, c) for s, c in entries if s is JobState.EXIT]
+    if bad:
+        return (JobState.EXIT,
+                next((c for _s, c in bad if c is not None), None))
+    return (JobState.DONE, 0)
 
 
 class _PollWorker(QObject):

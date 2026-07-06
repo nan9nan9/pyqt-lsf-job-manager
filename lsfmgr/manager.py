@@ -380,8 +380,13 @@ class LsfJobManager(QObject):
     def start_polling(self, jobset_id: str,
                       interval_s: Optional[float] = None) -> None:
         """[async→Signal] 주기 polling 시작 — 갱신은 jobset_updated."""
-        eff = (interval_s if interval_s is not None
-               else self._defaults["poll_interval_s"])
+        eff = float(interval_s if interval_s is not None
+                    else self._defaults["poll_interval_s"])
+        if eff <= 0:
+            # 0이면 QTimer가 매 이벤트 루프마다 발화 — bjobs 핫루프로
+            # LSF master를 두들긴다 (옵션 경로의 5~60초 검증과 달리
+            # 직접 호출은 무검증이었음)
+            raise ValueError(f"interval_s는 양수여야 합니다 (got {eff})")
         self._poll_intervals[jobset_id] = eff    # resubmit 후 재개용 기억
         self.polling.start_polling(jobset_id, eff)
 
@@ -561,6 +566,15 @@ class LsfJobManager(QObject):
                       sync_lsf: bool = False,
                       keep_originals: bool = False) -> str:
         """[sync] 병합 — 새 jobset_id 반환. 원본 미보존 시 해당 핸들 파괴."""
+        # submit/resubmit 진행 중인 소스는 거부 — 허용하면 소스 삭제로
+        # worker가 크래시하고(존재하지 않는 jobset에 전이 시도), 진행 중
+        # 스냅샷이 복사돼 merged jobset에 SUBMITTING 좀비 레코드가 영구
+        # 잔존한다 (keep_originals=True여도 복사본은 갱신되지 않으므로 동일)
+        for jsid in jobset_ids:
+            if (self.submitter.is_active(jsid)
+                    or self._resubmitter.is_active(jsid)):
+                raise LsfmgrError(
+                    f"{jsid}: submit/resubmit 진행 중에는 merge할 수 없습니다")
         new_id = self.jobsets.merge_jobsets(
             jobset_ids, sync_lsf=sync_lsf,
             keep_originals=keep_originals).jobset_id

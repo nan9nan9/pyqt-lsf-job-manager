@@ -266,10 +266,17 @@ class _KillTask(QRunnable):
                               if r.job_id is not None})
             if targets:
                 n = len(targets)
-                calls += k.command.bkill_targets(
-                    targets,
-                    on_progress=lambda done: self._emit_progress(done, n))
-                strategies.append("chunk")
+                # 장애(LSF 순단 등)는 errors에 담고 계속 — 예외가 여기서
+                # 전파되면 kill_finished가 영영 발행되지 않고, errors가
+                # 남아야 optimistic 오표시(killed_recs=alive)도 막힌다
+                try:
+                    calls += k.command.bkill_targets(
+                        targets,
+                        on_progress=lambda done: self._emit_progress(done, n))
+                    strategies.append("chunk")
+                except LsfmgrError as e:
+                    errors.append(f"chunk: {e}")
+                    log.warning("kill 전략 실패 chunk: %s", e)
         return len(alive), calls, alive
 
     @staticmethod

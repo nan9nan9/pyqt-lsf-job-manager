@@ -52,6 +52,10 @@ BUILTIN_DEFAULTS: Dict[str, Any] = {
 }
 
 
+#: 재시도 대기 상한(1일) — QTimer int32(ms) 한도(~24.8일) 안쪽으로 clamp
+MAX_RETRY_DELAY_S = 86400.0
+
+
 @dataclass(frozen=True)
 class Options:
     """1회 호출에 적용될 최종 옵션 (frozen — Signal/스레드 공유 안전)."""
@@ -73,11 +77,17 @@ class Options:
     description: str = ""
 
     def retry_delay_s(self, attempt: int) -> float:
-        """attempt번째(0부터) 실패 후 재시도 대기 시간 (FR-2.2)."""
+        """attempt번째(0부터) 실패 후 재시도 대기 시간 (FR-2.2).
+
+        MAX_RETRY_DELAY_S로 clamp — QTimer.singleShot의 ms 인자는 int32라
+        약 24.8일을 넘으면 OverflowError가 나고, slot 안 예외는 PyQt에서
+        abort로 이어진다 (expo:2는 attempt 21부터 한도 초과)."""
         kind, base = parse_retry_backoff(self.retry_backoff)
         if kind == "fixed":
-            return base
-        return base * (2.0 ** attempt)          # expo
+            return min(base, MAX_RETRY_DELAY_S)
+        if attempt > 62:                        # 2.0**attempt float 오버플로 방지
+            return MAX_RETRY_DELAY_S if base > 0 else 0.0
+        return min(base * (2.0 ** attempt), MAX_RETRY_DELAY_S)   # expo
 
 
 def parse_retry_backoff(value: str) -> Tuple[str, float]:

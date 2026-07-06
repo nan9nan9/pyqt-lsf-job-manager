@@ -16,7 +16,7 @@ from typing import Iterable, List, Optional, Sequence
 
 from .command import LsfCommand
 from .config import LsfConfig
-from .errors import LsfmgrError
+from .errors import JobNotFoundError, LsfmgrError
 from .states import JobRecord, JobSetRecord, JobState
 from .store.base import JobSetStore
 
@@ -83,6 +83,16 @@ class JobSetManager:
             record = replace(record, jobset_id=jobset_id)
         with self._meta_lock:
             js = self.store.get_jobset(jobset_id)
+            # 동일 job_key 중복 거부 — store.add_job은 upsert라 조용히
+            # 기존 레코드를 덮어쓴다(merge의 충돌 선검사와 동일 이유)
+            try:
+                self.store.get_job(jobset_id, record.job_key)
+            except JobNotFoundError:
+                pass
+            else:
+                raise ValueError(
+                    f"job 이름 중복: {jobset_id}/{record.job_key} — "
+                    f"기존 레코드를 덮어쓸 수 없습니다 (먼저 remove_job)")
             rec = self.store.add_job(record)
             # 수동 추가는 intended_count도 증가 (불변식 유지, FR-5.2)
             jobs_n = len(self.store.get_jobs(jobset_id))
