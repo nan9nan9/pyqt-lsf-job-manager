@@ -427,11 +427,16 @@ class SqliteStore(JobSetStore):
             new = replace(old, state=new_state, updated_at=datetime.now(),
                           **fields)
             self._put_job(con, new)
-            con.execute(
-                "INSERT INTO events (jobset_id, job_key, old_state, "
-                "new_state, at) VALUES (?,?,?,?,?)",
-                (jobset_id, job_key, old.state.value, new_state.value,
-                 new.updated_at.isoformat()))
+            # events는 '상태 전이' 이력이다 — 상태 불변(같은 state 재설정,
+            # 예: worker의 SUBMITTING 재설정, RUN 중 working_dir/exit_code
+            # 갱신)일 때 기록하면 이력이 오염되고 stats()의 PEND→RUN 대기시간
+            # 이 이중 집계된다. 실제 전이일 때만 남긴다.
+            if old.state is not new_state:
+                con.execute(
+                    "INSERT INTO events (jobset_id, job_key, old_state, "
+                    "new_state, at) VALUES (?,?,?,?,?)",
+                    (jobset_id, job_key, old.state.value, new_state.value,
+                     new.updated_at.isoformat()))
         return new
 
     # ------------------------------------------------------------------
