@@ -30,12 +30,11 @@ python examples/handler_example.py    # JobSet handler 예제 (콘솔)
 
 ## handler 예제 (`handler_example.py`)
 
-JobSet 에 **이름 있는 handler** 를 붙여, job 이 RUN 인 동안 2초마다 worker
-스레드에서 job 출력 파일을 파싱하고(중간 수집), DONE/EXIT 시 최종 수집을 한 번 더
-수행하는 콘솔 예제입니다. `js.add_handler(name, fn, interval_s=, start_states=,
+JobSet 에 **이름 있는 handler** 를 붙여, job 이 RUN 인 동안 **폴링 사이클마다**
+worker 스레드에서 job 출력 파일을 파싱하고(중간 수집), DONE/EXIT 시 최종 수집을 한
+번 더 수행하는 콘솔 예제입니다. `js.add_handler(name, fn, start_states=,
 end_states=)` 등록 → `handler_finished(jsid, name, HandlerResult)` 로 결과 수신 →
-모든 job 최종 수집 후 handler 휴면(재실행 시 자동 재가동)까지의 전체 흐름을
-보여줍니다.
+모든 job 최종 수집까지의 전체 흐름을 보여줍니다.
 `ctx.working_dir`(LSF exec_cwd)/`run_time_s` 같은 LSF 유래 필드 활용도 포함합니다.
 자세한 동작 규칙은 [`../docs/lsfmgr.md`](../docs/lsfmgr.md) §2.5 참고.
 

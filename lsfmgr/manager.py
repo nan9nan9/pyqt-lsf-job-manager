@@ -519,22 +519,23 @@ class LsfJobManager(QObject):
     # ------------------------------------------------------------------
     def add_handler(self, jobset_id: str, name: str,
                     fn: "Callable[[HandlerContext], Any]", *,
-                    interval_s: float = 10.0,
                     start_states: StateSpec = None,
                     end_states: StateSpec = None) -> None:
-        """[main→Signal] jobset에 이름 있는 handler 등록 — 주기 실행 시작.
+        """[main→Signal] jobset에 이름 있는 handler 등록.
 
-        interval_s초마다 각 job을 검사해서 start_states에 든 job은 handler(fn)를
-        worker 스레드에서 실행하고, end_states 도달 시 마지막으로 한 번 더 실행한다.
-        결과(fn 반환값)는 `handler_finished(jobset_id, name, HandlerResult)` 로 온다.
-        polling이 돌고 있어야 state 전이를 본다."""
+        **폴링 사이클마다**(bjobs 갱신 직후) 각 job을 검사해서 start_states
+        (기본 {RUN})에 든 job은 handler(fn)를 worker 스레드에서 실행하고,
+        end_states(기본 {DONE, EXIT}) 도달 시 마지막으로 한 번 더 실행한다.
+        결과(fn 반환값)는 `handler_finished(jobset_id, name, HandlerResult)` 로
+        온다. 별도 주기 없이 `poll_interval_s`에 tie되며, **폴링이 돌고 있어야
+        동작**한다."""
         self.store.get_jobset(jobset_id)          # 존재 검증
         self.handlers.add_handler(
-            jobset_id, name, fn, interval_s=interval_s,
+            jobset_id, name, fn,
             start_states=start_states, end_states=end_states)
 
     def remove_handler(self, jobset_id: str, name: str) -> None:
-        """[main] handler 해제 — 타이머 중지."""
+        """[main] handler 해제."""
         self.handlers.remove_handler(jobset_id, name)
 
     def merge_jobsets(self, jobset_ids: Sequence[str], *,
@@ -653,10 +654,13 @@ class LsfJobManager(QObject):
     # ------------------------------------------------------------------
     def _on_poll_updated(self, jobset_id: str, summary: dict,
                          changed: list) -> None:
-        """polling 결과 relay — 요약 + 변경분 batch (QT-4)."""
+        """polling 결과 relay — 요약 + 변경분 batch (QT-4). 이어서 등록된
+        handler를 평가한다 — Store가 방금 갱신됐으므로 handler는 최신 상태를
+        본다 (handler는 폴링 사이클에 tie돼 있음, FR-7)."""
         self.jobset_updated.emit(jobset_id, summary)
         if changed:
             self.jobs_updated.emit(jobset_id, changed)
+        self.handlers.tick(jobset_id)
 
     def _emit_summary_after_submit(self, jsid: str, report) -> None:
         """submit 완료 시 요약(jobset_updated) + 개별 job(jobs_updated)을 1회

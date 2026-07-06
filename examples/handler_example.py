@@ -6,7 +6,7 @@
 수행한다. 이 "주기 파싱" 작업을 lsfmgr 의 JobSet handler 로 붙인다.
 
 핵심 API:
-  - js.add_handler(name, fn, interval_s=…, start_states=…, end_states=…)
+  - js.add_handler(name, fn, start_states=…, end_states=…)  # 폴링 사이클 구동
       · fn 은 **worker 스레드**에서 실행된다 (GUI/이벤트 루프 안 막음)
       · fn(ctx) 의 ctx 는 job 참조 포인트 — ctx.job_id / ctx.working_dir /
         ctx.record(JobRecord: run_time_s, state, …) / ctx.final
@@ -105,12 +105,12 @@ def main():
     js.start_polling(interval_s=1)     # 데모: 상태 전이를 촘촘히 관찰
     print(f"제출: {N_JOBS} jobs → jobset {js.id}")
 
-    # RUN 이 되면 2초마다 출력 파싱, DONE/EXIT 시 최종 파싱 1회 후 휴면.
+    # RUN 이 되면 폴링 사이클마다 출력 파싱, DONE/EXIT 시 최종 파싱 1회.
+    # (별도 주기 없이 poll_interval_s 에 tie — 여기선 polling 1초)
     js.add_handler(HANDLER, parse_job_output,
-                   interval_s=2.0,
                    start_states={JobState.RUN},
                    end_states={JobState.DONE, JobState.EXIT})
-    print(f"handler '{HANDLER}' 등록 — RUN 중 2초마다, 종료 시 최종 1회\n")
+    print(f"handler '{HANDLER}' 등록 — 폴링마다(RUN 중), 종료 시 최종 1회\n")
 
     # 안전망: 최대 90초 후 강제 종료 (mocklsf 지연 대비).
     QTimer.singleShot(90_000, app.quit)

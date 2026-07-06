@@ -137,15 +137,14 @@ class JobSet(QObject):
                                     commands=commands, verify=verify, **opts)
 
     def add_handler(self, name: str, fn: "Callable[..., object]", *,
-                    interval_s: float = 10.0,
                     start_states: object = None,
                     end_states: object = None) -> None:
-        """[main→Signal] 이름 있는 handler를 이 JobSet에 등록 — 주기 실행 시작.
+        """[main→Signal] 이름 있는 handler를 이 JobSet에 등록 — 폴링 사이클 구동.
         결과는 handler_finished(name, HandlerResult) Signal. 상세는
         LsfJobManager.add_handler 참고."""
         self._check_open()
         self._manager.add_handler(
-            self._jobset_id, name, fn, interval_s=interval_s,
+            self._jobset_id, name, fn,
             start_states=start_states, end_states=end_states)
 
     def remove_handler(self, name: str) -> None:

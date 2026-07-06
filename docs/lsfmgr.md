@@ -167,11 +167,14 @@ js.resubmit_jobs([f"{js.id}_0"], commands={f"{js.id}_0": "primesim_sub -q long a
 > 단계라 `KillReport`/`kill_finished` 를 발행하지 않는다. 관측 지점은 상태 갱신
 > (`jobset_updated`/`jobs_updated`, polling)과 최종 `submit_finished` 다.
 
-### 2.5 JobSet handler — 주기 실행 (`add_handler`)
+### 2.5 JobSet handler — 폴링 사이클 실행 (`add_handler`)
 
-JobSet 에 **이름 있는 handler** 를 붙여, 지정한 state 구간 동안 몇 초마다 **worker
-스레드에서** 실행한다. 예: job 이 도는 동안 출력 디렉토리를 주기적으로 파싱해 중간
-결과를 수집하고, 완료 시 최종 수집을 한 번 더 하는 용도.
+JobSet 에 **이름 있는 handler** 를 붙여, 지정한 state 구간 동안 **폴링 사이클마다**
+(= `bjobs` 로 상태를 갱신한 직후) **worker 스레드에서** 실행한다. 예: job 이 도는
+동안 출력 디렉토리를 파싱해 중간 결과를 수집하고, 완료 시 최종 수집을 한 번 더.
+
+**별도 주기가 없다** — handler 는 `poll_interval_s` 에 tie 된다. 그래서 `ctx.record`
+는 항상 방금 폴링된 **최신 상태**이고, 주기 설정도 하나로 통일된다.
 
 ```python
 def collect(ctx):                        # worker 스레드에서 실행됨 (GUI freeze 없음)
@@ -183,25 +186,27 @@ mgr.handler_finished.connect(
     lambda jsid, name, res: print(name, res.job_key, res.data, res.final))
 
 js.add_handler("collect", collect,
-               interval_s=5,                       # 5초마다
-               start_states={JobState.RUN},        # RUN 되면 시작
-               end_states={JobState.DONE, JobState.EXIT})  # 종료 시 최종 1회
-# 필요 시 해제
-js.remove_handler("collect")
+               start_states={JobState.RUN},        # RUN 되면 시작 (기본)
+               end_states={JobState.DONE, JobState.EXIT})  # 종료 시 최종 1회 (기본)
+# start/end 미지정 시 기본값 = 시작 {RUN}, 종료 {DONE, EXIT}
+js.remove_handler("collect")             # 해제
 ```
 
 동작 규칙 — job 별로 상태 기계처럼 움직인다:
 
-- `start_states` 에 들어간 job 부터 `interval_s` 초마다 handler 를 실행한다.
-  (`handler_finished` 는 **1회 실행이 끝날 때마다** job 별로 발행된다 — "handler
-  전체 종료" Signal 이 아니다. 최종 실행 여부는 `res.final` 로 구분한다.)
-- `end_states` 에 도달하면 **`final=True` 로 마지막에 한 번 더** 실행하고 그 job 은
-  종료한다. 모든 job 이 최종 실행까지 끝나면 handler 는 **휴면**한다(타이머 정지,
-  등록은 유지) — 완전 해제는 `remove_handler` 로 한다.
-- `end_states` 에 없는 terminal 상태로 죽으면(예: `end_states={DONE}` 인데 EXIT)
-  최종 실행 **없이** 그 job 은 조용히 종결된다 — 죽은 job 에 무한 발화하지 않는다.
-- `resubmit_jobs` 로 재실행되는 job 은 진행 상태가 **자동 재무장**되고, 휴면 중이던
-  handler 도 자동 재가동된다(§2.4).
+- `start_states`(기본 `{RUN}`) 에 들어간 job 부터 **폴링 사이클마다** handler 를
+  실행한다. (`handler_finished` 는 **1회 실행이 끝날 때마다** job 별로 발행된다 —
+  "handler 전체 종료" Signal 이 아니다. 최종 실행 여부는 `res.final` 로 구분한다.)
+- `end_states`(기본 `{DONE, EXIT}`) 에 도달하면 **`final=True` 로 마지막에 한 번 더**
+  실행하고 그 job 은 종료한다. 등록은 유지되며(resubmit 재무장 대비), 완전 해제는
+  `remove_handler` 로 한다.
+- `end_states` 에 없는 terminal 상태로 죽으면(예: `end_states={DONE}` 인데 EXIT/
+  LOST/SUBMIT_FAILED) 최종 실행 **없이** 그 job 은 조용히 종결된다.
+- **폴링이 돌고 있어야 동작한다** — handler 는 폴링 사이클에 tie 돼 있고, 첫 실행은
+  다음 폴링 사이클이다(`js.refresh()` 로 즉시 1회 유도 가능). `auto_poll`(기본)이면
+  자동으로 돈다.
+- `resubmit_jobs` 로 재실행되는 job 은 진행 상태가 **자동 재무장**되어 새 실행에서
+  다시 돈다(§2.4).
 - `remove_handler` 는 worker 스레드(handler fn 안 포함)에서 불러도 안전하다
   (main 으로 위임). `add_handler` 는 main 스레드 전용.
 - handler 인자 `ctx`(`HandlerContext`)는 job 참조 포인트다 — `ctx.record`(JobRecord:

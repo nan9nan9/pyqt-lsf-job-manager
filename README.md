@@ -186,11 +186,11 @@ js2 = mgr.jobset(jobset_id)            # ID로 JobSet 재획득
 js.add_job(record); js.remove_job(key) # job 편입 / 편입 취소 (intended 유지)
 ```
 
-### 3.5 job별 주기 handler — 실행 중 파싱 + 최종 수집
+### 3.5 job별 handler — 폴링 사이클마다 실행 (파싱 + 최종 수집)
 
 JobSet에 **이름 있는 handler**를 붙이면, 각 job이 지정한 state 구간에 있는
-동안 몇 초마다 **worker 스레드에서** 실행됩니다. 시뮬레이션이 도는 동안 출력
-디렉토리를 주기적으로 파싱하고, 끝나면 최종 수집을 한 번 더 하는 용도입니다.
+동안 **폴링 사이클마다**(= bjobs 갱신 직후) **worker 스레드에서** 실행됩니다.
+별도 주기가 없어 `poll_interval_s`에 tie되고, `ctx.record`는 항상 최신 상태입니다.
 
 ```python
 def collect(ctx):                          # worker 스레드 — GUI 안 막음
@@ -201,17 +201,17 @@ js.handler_finished.connect(
     lambda name, res: print(name, res.job_key, res.data, res.final))
 
 js.add_handler("collect", collect,
-               interval_s=5,                            # 5초마다
-               start_states={JobState.RUN},             # RUN이 되면 시작
-               end_states={JobState.DONE, JobState.EXIT})  # 종료 시 최종 1회
-js.remove_handler("collect")               # 완전 해제
+               start_states={JobState.RUN},             # RUN이 되면 시작 (기본)
+               end_states={JobState.DONE, JobState.EXIT})  # 종료 시 최종 1회 (기본)
+# start/end 미지정 시 기본값 = 시작 {RUN}, 종료 {DONE, EXIT}
+js.remove_handler("collect")               # 해제
 ```
 
 - `handler_finished`는 **1회 실행이 끝날 때마다** job별로 옵니다 — 최종 실행은
   `res.final`로 구분. 예외는 `res.error`에 담겨 옵니다(다른 job에 영향 없음).
-- 모든 job이 최종 실행까지 끝나면 handler는 **휴면**(타이머 정지, 등록 유지)
-  하고, `resubmit_jobs`로 재실행하면 자동 재무장/재가동됩니다.
-- polling이 돌고 있어야 state 전이를 봅니다(§AUTO-1 기본 동작이면 자동).
+- **폴링이 돌고 있어야 동작**합니다(auto_poll 기본이면 자동). 첫 실행은 다음 폴링
+  사이클이며, `js.refresh()`로 즉시 1회 유도 가능합니다.
+- `resubmit_jobs`로 재실행하면 진행 상태가 자동 재무장되어 새 실행에서 다시 돕니다.
 - 실행 예제: `examples/handler_example.py`, 상세 규칙:
   [`docs/lsfmgr.md`](docs/lsfmgr.md) §2.5.
 

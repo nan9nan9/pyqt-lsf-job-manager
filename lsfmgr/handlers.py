@@ -1,15 +1,17 @@
-"""JobSetHandlerService — JobSet별 사용자 handler 주기 실행 (FR-7).
+"""JobSetHandlerService — JobSet별 사용자 handler (FR-7).
 
-JobSet 하나에 이름 있는 handler를 붙여, 지정한 state 구간 동안 몇 초마다
-worker 스레드에서 실행한다. 각 job이 시작 state에 들어가면 주기 실행을 켜고,
-종료 state에 도달하면 **마지막으로 한 번 더** 실행한 뒤 끈다.
+JobSet 하나에 이름 있는 handler를 붙여, 지정한 state 구간 동안 **폴링 사이클마다**
+worker 스레드에서 실행한다. 각 job이 시작 state(기본 RUN)에 들어가면 실행을 켜고,
+종료 state(기본 DONE/EXIT)에 도달하면 **마지막으로 한 번 더** 실행한 뒤 끝낸다.
 
-- tick(QTimer)은 main 스레드에서 돌며 Store 스냅샷으로 실행 여부만 판단하고,
-  실제 handler 호출은 QThreadPool worker에서 수행한다 (GUI freeze 방지).
-- handler 반환값(처리한 데이터)은 `finished(jobset_id, name, HandlerResult)`
-  Signal로 전달된다 — 이름으로 필터링해서 구독한다.
-- handler는 상태 갱신을 Store에서 읽으므로 **polling이 돌고 있어야** state 전이를
-  본다(폴링이 멈춰 있으면 handler도 진행하지 않는다).
+- handler는 별도 타이머를 갖지 않는다 — LsfJobManager의 **폴링이 bjobs로 Store를
+  갱신한 직후** 평가된다(`tick`). 그래서 handler가 보는 상태는 항상 방금 폴링된
+  최신값이고, 주기도 `poll_interval_s` 하나로 통일된다.
+- tick은 main 스레드에서 실행 여부만 판단하고, 실제 handler 호출은 QThreadPool
+  worker에서 수행한다 (GUI freeze 방지).
+- 반환값(처리한 데이터)은 `finished(jobset_id, name, HandlerResult)` Signal로
+  전달된다 — 이름으로 필터링해 구독한다.
+- **폴링이 돌고 있어야** 동작한다 (handler는 폴링 사이클에 tie돼 있음).
 """
 from __future__ import annotations
 
@@ -19,17 +21,16 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, FrozenSet, Iterable, Optional, Tuple, Union
 
 from .errors import LsfmgrError
-from .qt import QObject, QRunnable, QThread, QThreadPool, QTimer, Signal
+from .qt import QObject, QRunnable, QThread, QThreadPool, Signal
 from .states import JobRecord, JobState
-from .store.base import JobSetStore
 
 log = logging.getLogger("lsfmgr.handler")
 
 #: 기본 시작 state — job이 실제로 돌기 시작한 시점
 DEFAULT_START_STATES: FrozenSet[JobState] = frozenset({JobState.RUN})
-#: 기본 종료 state — terminal 전부 (여기 도달하면 최종 실행 후 종료)
+#: 기본 종료 state — DONE/EXIT (여기 도달하면 최종 실행 후 종료)
 DEFAULT_END_STATES: FrozenSet[JobState] = frozenset({
-    JobState.DONE, JobState.EXIT, JobState.SUBMIT_FAILED, JobState.LOST})
+    JobState.DONE, JobState.EXIT})
 
 StateSpec = Union[JobState, Iterable[JobState], None]
 
@@ -84,23 +85,21 @@ class _Handler:
     jobset_id: str
     name: str
     fn: Callable[[HandlerContext], Any]
-    interval_s: float
     start_states: FrozenSet[JobState]
     end_states: FrozenSet[JobState]
-    timer: QTimer
     status: Dict[str, str] = field(default_factory=dict)   # job_key → 진행 상태
     inflight: set = field(default_factory=set)             # 실행 중인 job_key
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 class JobSetHandlerService(QObject):
-    """JobSet별 handler 등록/주기 실행 관리. manager(Facade)가 소유."""
+    """JobSet별 handler 등록/실행 관리 — 폴링 사이클 구동. manager가 소유."""
 
     finished = Signal(str, str, object)      # jobset_id, handler_name, HandlerResult
     # worker 스레드에서의 remove_handler 요청을 main으로 위임 (queued)
     _remove_requested = Signal(str, str)     # jobset_id, handler_name
 
-    def __init__(self, store: JobSetStore, parent: Optional[QObject] = None):
+    def __init__(self, store, parent: Optional[QObject] = None):
         super().__init__(parent)
         self.store = store
         self._pool = QThreadPool()
@@ -113,55 +112,41 @@ class JobSetHandlerService(QObject):
     # ------------------------------------------------------------------
     def add_handler(self, jobset_id: str, name: str,
                     fn: Callable[[HandlerContext], Any], *,
-                    interval_s: float = 10.0,
                     start_states: StateSpec = None,
                     end_states: StateSpec = None) -> None:
-        """[main] jobset_id에 이름 있는 handler 등록 — 즉시 주기 실행 시작.
+        """[main] jobset_id에 이름 있는 handler 등록.
 
-        interval_s초마다 각 job을 검사해서, start_states에 들어간 job에 대해
-        handler(fn)를 worker에서 실행하고, end_states 도달 시 마지막으로 한 번
-        더 실행한다. fn(ctx)의 반환값은 finished Signal로 전달된다.
-        모든 job이 최종 실행까지 끝나면 **휴면**(타이머 정지, 등록 유지) —
-        resubmit_jobs 재실행 시 자동 재가동되고, 완전 해제는 remove_handler.
+        폴링 사이클마다(= bjobs 갱신 직후) 각 job을 검사해서, start_states(기본
+        {RUN})에 들어간 job에 대해 handler(fn)를 worker에서 실행하고, end_states
+        (기본 {DONE, EXIT}) 도달 시 마지막으로 한 번 더 실행한다(final=True).
+        fn(ctx)의 반환값은 finished Signal로 전달된다.
+        **폴링이 돌고 있어야 동작**하며, 첫 실행은 다음 폴링 사이클이다.
         """
-        if interval_s <= 0:
-            raise ValueError("interval_s는 0보다 커야 합니다")
         if QThread.currentThread() is not self.thread():
-            # worker 스레드(예: handler fn 안)에서 부르면 QTimer가 cross-thread
-            # 로 생성돼 조용히 발화하지 않는다 — 명시적으로 거부한다
+            # _handlers/status는 main(tick)과 공유돼 worker에서 등록하면
+            # 순회 중 변경 경합이 난다 — main 전용으로 강제한다
             raise LsfmgrError(
                 "add_handler는 main 스레드에서만 호출할 수 있습니다")
         key = (jobset_id, name)
         if key in self._handlers:
             raise ValueError(f"handler 이름 중복: {jobset_id}/{name}")
-        timer = QTimer(self)
-        h = _Handler(
-            jobset_id=jobset_id, name=name, fn=fn, interval_s=interval_s,
+        self._handlers[key] = _Handler(
+            jobset_id=jobset_id, name=name, fn=fn,
             start_states=_as_states(start_states, DEFAULT_START_STATES),
-            end_states=_as_states(end_states, DEFAULT_END_STATES),
-            timer=timer)
-        self._handlers[key] = h
-        timer.timeout.connect(lambda h=h: self._tick(h))
-        timer.start(int(interval_s * 1000))
+            end_states=_as_states(end_states, DEFAULT_END_STATES))
 
     def remove_handler(self, jobset_id: str, name: str) -> None:
-        """handler 완전 해제 — 타이머 중지. 실행 중 task는 자연 종료된다.
-        worker 스레드(handler fn 안 포함)에서 불러도 안전하다 — main으로
-        위임된다 (QTimer는 소속 스레드 밖에서 멈출 수 없다)."""
+        """handler 해제. worker 스레드(handler fn 안 포함)에서 불러도 안전하다
+        — main으로 위임된다."""
         if QThread.currentThread() is not self.thread():
             self._remove_requested.emit(jobset_id, name)   # → main 스레드
             return
-        h = self._handlers.pop((jobset_id, name), None)
-        if h is not None:
-            h.timer.stop()
+        self._handlers.pop((jobset_id, name), None)
 
     def rearm(self, jobset_id: str, job_keys: Iterable[str]) -> None:
         """[main] 지정 job들의 handler 진행 상태를 리셋 (resubmit_jobs 용).
-
-        재실행되는 job은 _FINISHED로 남아 있으면 새 실행에서 handler가 영영
-        침묵하고, _RUNNING으로 남아 있으면 아직 안 뜬 레코드에 발화한다 —
-        _PENDING으로 되돌려 새 실행의 start/end 주기를 다시 돌게 한다.
-        전원 완료로 휴면(타이머 정지)된 handler는 다시 가동한다."""
+        _FINISHED로 남으면 재실행에서 handler가 영영 침묵하므로 _PENDING으로
+        되돌려 새 실행의 start/end 주기를 다시 돌게 한다."""
         keys = set(job_keys)
         for (jsid, _name), h in self._handlers.items():
             if jsid != jobset_id:
@@ -169,8 +154,6 @@ class JobSetHandlerService(QObject):
             with h.lock:
                 for key in keys:
                     h.status.pop(key, None)     # → _PENDING (기본값)
-            if not h.timer.isActive():          # 휴면 해제 (자동 재가동)
-                h.timer.start(int(h.interval_s * 1000))
 
     def remove_all(self, jobset_id: str) -> None:
         """[main] jobset의 모든 handler 해제 (close/merge 시)."""
@@ -178,28 +161,33 @@ class JobSetHandlerService(QObject):
             self.remove_handler(jobset_id, name)
 
     def shutdown(self) -> None:
-        for h in list(self._handlers.values()):
-            h.timer.stop()
         self._handlers.clear()
         self._pool.waitForDone(-1)
 
     # ------------------------------------------------------------------
-    # tick (main 스레드) — 실행 여부 판단만, 실제 호출은 worker
+    # tick (main 스레드) — 폴링 갱신 직후 호출됨. 실행 여부만 판단, 호출은 worker
     # ------------------------------------------------------------------
-    def _tick(self, h: _Handler) -> None:
+    def tick(self, jobset_id: str) -> None:
+        """[main] 이 jobset의 모든 handler를 1회 평가 — 폴링 사이클마다 호출한다.
+        Store는 방금 폴링으로 갱신됐으므로 handler가 보는 상태는 최신값이다."""
+        hs = [h for (jsid, _n), h in self._handlers.items()
+              if jsid == jobset_id]
+        if not hs:
+            return
         try:
-            recs = self.store.get_jobs(h.jobset_id)
+            recs = self.store.get_jobs(jobset_id)
         except LsfmgrError:
-            # jobset이 사라짐(삭제/merge) — handler 정리
-            self.remove_handler(h.jobset_id, h.name)
+            self.remove_all(jobset_id)          # jobset 사라짐(삭제/merge)
             return
         except Exception:                        # noqa: BLE001 — CS-5
-            # store 일시 장애(sqlite lock 등) — 이 tick만 건너뛰고 다음
-            # tick에 재시도. QTimer slot 밖으로 전파되면 PyQt는 abort한다
-            log.exception("handler tick 조회 실패: %s/%s",
-                          h.jobset_id, h.name)
+            # store 일시 장애 — 이번 사이클만 건너뛴다 (다음 폴링에 재시도).
+            # slot 밖으로 전파되면 PyQt는 abort한다
+            log.exception("handler tick 조회 실패: %s", jobset_id)
             return
+        for h in hs:
+            self._run_cycle(h, recs)
 
+    def _run_cycle(self, h: _Handler, recs) -> None:
         with h.lock:
             for rec in recs:
                 st = h.status.get(rec.job_key, _PENDING)
@@ -207,9 +195,8 @@ class JobSetHandlerService(QObject):
                     continue
                 in_end = rec.state in h.end_states
                 in_start = rec.state in h.start_states
-                # end_states에 없는 terminal(예: end={DONE}인데 EXIT) —
-                # 더 진행할 수 없으니 최종 실행 없이 종결한다. 안 하면 죽은
-                # job에 매 tick 발화하고 타이머가 영원히 안 멈춘다
+                # end_states에 없는 terminal(예: end={DONE}인데 EXIT/LOST/
+                # SUBMIT_FAILED) — 더 진행할 수 없으니 최종 실행 없이 종결.
                 if rec.state.is_terminal and not in_end:
                     h.status[rec.job_key] = _FINISHED
                     continue
@@ -223,18 +210,6 @@ class JobSetHandlerService(QObject):
                 h.status[rec.job_key] = _FINISHED if final else _RUNNING
                 h.inflight.add(rec.job_key)
                 self._pool.start(_HandlerTask(self, h, rec, final))
-
-            # 모든 job이 최종 실행까지 끝났으면 **휴면**(타이머만 정지, 등록
-            # 유지). 완전 해제하면 "전부 끝난 job을 재실행"(resubmit의 대표
-            # 사용례)에서 rearm이 no-op이 되어 handler가 조용히 사라진다 —
-            # 휴면이면 rearm이 타이머를 재가동한다. 빈 jobset도 휴면 처리
-            # (빈 tick이 영원히 도는 것 방지).
-            done = (all(h.status.get(r.job_key) == _FINISHED for r in recs)
-                    and not h.inflight)
-        if done:
-            h.timer.stop()
-            log.debug("handler 휴면: %s/%s (전원 최종 실행 완료)",
-                      h.jobset_id, h.name)
 
     # worker 스레드에서 호출
     def _run(self, h: _Handler, rec: JobRecord, final: bool) -> None:
