@@ -731,12 +731,15 @@ class LsfJobManager(QObject):
             pass
         # 각 컴포넌트를 best-effort로 종료 — 하나가 예외를 던져도 나머지 스레드는
         # 반드시 join해야 좀비/core dump가 안 남는다.
+        # misc_pool(reconcile 등)은 polling보다 먼저 drain — reconcile 태스크가
+        # start_polling을 호출하므로, 진행 중인 태스크가 폴링에 새 작업을 거는
+        # 것을 막고 종료한다.
         for name, fn in (("handlers", self.handlers.shutdown),
                          ("resubmitter", self._resubmitter.shutdown),
                          ("submitter", self.submitter.shutdown),
+                         ("misc_pool", lambda: self._misc_pool.waitForDone(-1)),
                          ("polling", self.polling.shutdown),
                          ("killer", self.killer.shutdown),
-                         ("misc_pool", lambda: self._misc_pool.waitForDone(-1)),
                          ("store", self.store.close)):
             try:
                 fn()

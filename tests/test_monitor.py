@@ -185,3 +185,28 @@ def test_graceful_degradation_without_attachments(qtbot, manager, fake_lsf,
     assert summary["RUN"] == 20
     assert all("-g" not in c and "-J" not in c
                for c in fake_lsf.calls_of("bjobs"))
+
+
+# ----------------------------------------------------------------------
+# shutdown: polling 타이머는 폴링 스레드에서 정리돼야 한다 (cross-thread
+# killTimer 위반 금지). start_polling 직후 즉시 shutdown 하는 경합에서도
+# stop_all이 quit 전에 완료돼 타이머가 그 스레드에서 파괴된다.
+# ----------------------------------------------------------------------
+def test_polling_shutdown_cleans_timers_in_thread(qtbot, manager, fake_lsf,
+                                                  capfd):
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
+    fake_lsf.set_all("RUN")
+    js.start_polling(interval_s=5.0)          # 여유 없이 바로 shutdown
+    worker = manager.polling._worker
+    manager.shutdown()
+
+    # stop_all이 실행돼 타이머를 폴링 스레드에서 정지·삭제했어야 한다
+    assert worker.stopped_event.is_set()
+    assert worker._timers == {}
+    assert not manager.polling._thread.isRunning()
+    # C 레벨(qWarning) stderr에 cross-thread 위반이 없어야 한다
+    import gc
+    gc.collect()
+    err = capfd.readouterr().err
+    assert "Timers cannot be stopped from another thread" not in err, err

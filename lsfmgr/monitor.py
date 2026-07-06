@@ -8,12 +8,15 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from .command import JobStatus, LsfCommand
 from .errors import JobSetNotFoundError, LsfmgrError
-from .qt import QObject, QThread, QTimer, Signal, Slot
+from .qt import (
+    DEFERRED_DELETE, QCoreApplication, QObject, QThread, QTimer, Signal, Slot,
+)
 from .states import _ON_LSF, JobRecord, JobState
 from .store.base import JobSetStore
 
@@ -245,6 +248,8 @@ class _PollWorker(QObject):
         self._in_progress: set = set()       # CS-4 중복 polling 방지
         self._auto_stop = True
         self._idle_counts: Dict[str, int] = {}   # 활동 없음 연속 사이클 수
+        #: stop_all 완료(타이머 정리)를 shutdown이 quit 전에 확인하는 신호
+        self.stopped_event = threading.Event()
 
     @Slot(str, float)
     def start_polling(self, jobset_id: str, interval_s: float) -> None:
@@ -268,6 +273,12 @@ class _PollWorker(QObject):
     def stop_all(self) -> None:
         for jsid in list(self._timers):
             self.stop_polling(jsid)
+        # 타이머 deleteLater를 폴링 스레드에서 즉시 처리한다 — 이 슬롯이
+        # 이 스레드에서 실행되므로 여기서 flush하지 않으면, 이벤트 루프가
+        # quit된 뒤 타이머가 다른 스레드에서 파괴돼 Qt 위반(killTimer from
+        # another thread)이 난다. DeferredDelete만 골라 보내 재진입은 없다.
+        QCoreApplication.sendPostedEvents(None, DEFERRED_DELETE)
+        self.stopped_event.set()             # shutdown이 quit 전에 대기
 
     @Slot(str)
     def _poll(self, jobset_id: str) -> None:
@@ -373,7 +384,14 @@ class PollingService(QObject):
         """timer 정지 + 스레드 graceful 종료 (좀비 스레드 금지, §3.2)."""
         if not self._thread.isRunning():
             return
+        # stop_all이 폴링 스레드에서 타이머를 정지·삭제한 뒤에 quit해야
+        # 타이머가 그 스레드에서 파괴된다. quit을 먼저 하면 stop_all이
+        # 루프 종료로 실행되지 못해 타이머가 main 스레드에서 파괴된다.
+        # (mid-query 등으로 stop_all이 안 돌면 타임아웃 후 그대로 진행 —
+        # requestInterruption+quit+wait의 기존 안전망으로 폴백, 행 없음)
+        self._worker.stopped_event.clear()
         self._req_stop_all.emit()
+        self._worker.stopped_event.wait(5.0)
         self._thread.requestInterruption()
         self._thread.quit()
         if not self._thread.wait(10000):
