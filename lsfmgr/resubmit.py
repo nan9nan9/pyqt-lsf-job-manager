@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Dict, List
 from .options import Options
 from .qt import QObject, QRunnable, QThreadPool, Signal
 from .reports import SubmitReport
+from .states import JobState
 
 if TYPE_CHECKING:
     from .manager import LsfJobManager
@@ -28,6 +29,7 @@ class ResubmitPlan:
     keyed: list                 # [(job_key, JobSpec|argv)] — 타입이 곧 제출 경로
     opts: Options
     live_ids: list              # kill 대상 job_id (비어 있으면 kill 생략)
+    live_keys: list             # kill 대상 job_key (EXIT 전이·발행용)
     verify: bool
 
 
@@ -35,6 +37,7 @@ class ResubmitCoordinator(QObject):
     """resubmit_jobs 오케스트레이터. manager가 소유."""
 
     _killed = Signal(str)       # jobset_id: kill-phase 완료 → main에서 resubmit
+    jobs_changed = Signal(str, list)   # jobset_id, [JobRecord] — kill 단계 EXIT 발행
 
     def __init__(self, manager: "LsfJobManager"):
         super().__init__(manager)
@@ -112,12 +115,36 @@ class _KillPhaseTask(QRunnable):
                 self._coord.mgr.command.bkill_by_ids(plan.live_ids)
                 if plan.verify:
                     self._await_dead(plan.live_ids)
+                # 파이프라인 stage 1 가시화 — 죽인 job을 EXIT로 전이·발행한다.
+                # (이어지는 재제출이 CREATED로 리셋하기 전에 kill 결과를 표에
+                # 드러낸다: 살아있던 것만 EXIT, 이미 terminal/미제출은 안 건드림)
+                self._mark_killed()
         except Exception as e:                   # noqa: BLE001 — CS-5
             # kill 실패해도 재제출은 진행 — 좀비가 남을 수 있으나 새 job은 뜬다.
             # (좀비 회피가 더 중요하면 여기서 중단하도록 정책 변경 가능)
             log.warning("resubmit_jobs kill-phase 경고 %s: %r",
                         plan.jobset_id, e)
         self._coord._killed.emit(plan.jobset_id)
+
+    def _mark_killed(self) -> None:
+        """kill한 job(살아있던 것)을 EXIT로 전이하고 jobs_changed로 발행 —
+        재제출 전 kill 단계를 UI에 드러낸다. 이미 terminal이 된(경합) 것은
+        guard가 건너뛴다."""
+        store = self._coord.mgr.store
+        jsid = self.plan.jobset_id
+        changed = []
+        for key in self.plan.live_keys:
+            try:
+                rec = store.transition(
+                    jsid, key, JobState.EXIT, fail_reason="KILLED",
+                    guard=lambda cur: cur.state.is_on_lsf)
+                if rec is not None:
+                    changed.append(rec)
+            except Exception:                    # noqa: BLE001 — CS-5
+                log.exception("resubmit kill EXIT 전이 실패(무시): %s/%s",
+                              jsid, key)
+        if changed:
+            self._coord.jobs_changed.emit(jsid, changed)
 
     def _await_dead(self, ids: List[int]) -> None:
         """bjobs 재조회로 종료 확인 — 유한 대기(best-effort). 못 죽어도 진행."""

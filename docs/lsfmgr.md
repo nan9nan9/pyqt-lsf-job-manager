@@ -152,9 +152,15 @@ js.resubmit_jobs([f"{js.id}_0"], commands={f"{js.id}_0": "primesim_sub -q long a
 (`JobRecord.via_wrapper`)으로 판별한다 — merge 로 wrapper/bsub job 이 한 JobSet 에
 섞여 있어도 각 job 이 자기 제출 경로로 정확히 재실행된다.
 
+- **파이프라인처럼 단계별 `jobs_updated`가 발행된다** — 표가 각 단계를 드러낸다:
+  1. **kill 단계** — 살아있던 job(`is_on_lsf`)만 `bkill` 후 **EXIT**로 전이·발행
+     (이미 terminal/미제출 job은 안 건드림, 조건별 kill)
+  2. **리셋** — 대상 전체를 **CREATED**로 되돌려 발행
+  3. **재제출** — bsub 완료되는 대로 **PEND**로 점진 발행
+  즉 살아있던 job은 `EXIT → CREATED → PEND` 순으로 표에 나타난다.
 - **결과 Signal 은 submit 계열과 동일** — `submit_started` → (`submit_progress`) →
   `submit_finished`(= `js.submit_finished`). 즉 재실행 결과는 `submit_finished` 로 받는다.
-- `verify=True`(기본)면 kill 후 실제 종료를 확인한 뒤 재제출한다.
+- `verify=True`(기본)면 kill 후 실제 종료를 확인한 뒤 EXIT 전이·재제출한다.
 - `commands={job_key: 새 커맨드}` 로 job 별 커맨드 교체 가능(생략 시 기존 커맨드 재사용).
 - **polling 자동 재개** — 전원 terminal 로 polling 이 자동 중지(AUTO-2)된 JobSet 을
   재실행하면, polling 을 쓰던 JobSet 에 한해 마지막 interval 로 다시 켠다.
@@ -164,10 +170,10 @@ js.resubmit_jobs([f"{js.id}_0"], commands={f"{js.id}_0": "primesim_sub -q long a
 - 등록된 handler(§2.5)는 재실행되는 job 에 대해 **자동 재무장**된다 — 새 실행이
   start state 에 들면 주기 실행이 다시 돌고 종료 시 최종 실행도 다시 온다.
 
-> ⚠️ **재실행의 내부 kill 은 `kill_finished` 로 오지 않는다.** `resubmit_jobs` 는
-> 살아있는 job 을 `bkill` 로 직접 죽이는데(Killer 미경유), 이는 재제출을 위한 내부
-> 단계라 `KillReport`/`kill_finished` 를 발행하지 않는다. 관측 지점은 상태 갱신
-> (`jobset_updated`/`jobs_updated`, polling)과 최종 `submit_finished` 다.
+> ⚠️ **재실행의 내부 kill 은 `kill_finished`/`KillReport` 로 오지 않는다.**
+> `resubmit_jobs` 는 살아있는 job 을 `bkill` 로 직접 죽이는데(Killer 미경유),
+> 이는 재제출을 위한 내부 단계라 `kill_finished` 를 발행하지 않는다. 대신 위처럼
+> 죽인 job이 **`jobs_updated`(EXIT)** 로 드러나고, 최종은 `submit_finished` 다.
 
 ### 2.5 JobSet handler — 폴링 사이클 실행 (`add_handler`)
 
