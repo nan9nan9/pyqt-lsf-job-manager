@@ -383,4 +383,6 @@ primesim_sub -q normal run1.sp   # == bsub -q normal run1.sp → "Job <id> ..."
 파싱해 job_id 기반으로 관리합니다. job 마다 다른 wrapper를 섞어 쓸 수 있습니다.
 
 실제 환경에서 wrapper를 작성·지정하는 방법은 **[`docs/lsfmgr.md`](docs/lsfmgr.md)**,
-mocklsf 자체는 [`docs/mocklsf.md`](docs/mocklsf.md)를 참고하세요.
+대량 job 명령(submit/kill/resubmit)을 GUI에 **바로바로 반영**하는 Signal 사용법은
+**[`docs/signal_usage.md`](docs/signal_usage.md)**, mocklsf 자체는
+[`docs/mocklsf.md`](docs/mocklsf.md)를 참고하세요.
