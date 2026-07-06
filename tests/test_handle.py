@@ -97,12 +97,14 @@ def test_detect_array_template():
 # 수용 기준 16 — 핸들 Signal 격리 + Facade 이중 발행 일치
 # ----------------------------------------------------------------------
 def test_handle_signal_isolation(qtbot, manager, fake_lsf):
+    # submit 완료 시 jobset_updated가 발화되므로(초기 PEND), 리스너 연결 전에
+    # 두 submit의 완료 Signal을 모두 소진해야 격리 카운트가 어긋나지 않는다
+    finished = []
+    manager.submit_finished.connect(lambda j, r: finished.append(j))
     a = manager.submit([f"a {i}" for i in range(3)], auto_poll=False,
                        mode="bulk")
     b = manager.submit(["b x", "b y"], auto_poll=False, mode="bulk")
-    # 두 submit이 동시 진행되므로 Signal 순서 대신 상태로 완료 대기
-    qtbot.waitUntil(lambda: a.summary.get("PEND", 0) == 3
-                    and b.summary.get("PEND", 0) == 2, timeout=10000)
+    qtbot.waitUntil(lambda: {a.id, b.id} <= set(finished), timeout=10000)
 
     a_updates, b_updates, facade = [], [], []
     a.updated.connect(a_updates.append)

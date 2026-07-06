@@ -71,8 +71,8 @@ Signal 은 두 계층이다.
 | `submit_started` | `(jobset_id)` | `submit` · `submit_wrapper` · `submit_bulk` · `submit_array` · `resubmit_jobs` — 제출 시작 즉시 |
 | `submit_progress` | `(jobset_id, done, total)` | 위 submit 계열 · `resubmit_jobs` — 제출 진행 중(throttled) |
 | `submit_finished` | `(jobset_id, SubmitReport)` | 위 submit 계열 · `resubmit_jobs` 완료 · `cancel_submit`(중단 마무리) |
-| `jobset_updated` | `(jobset_id, summary)` | `start_polling`(주기) · `query_once`(1회) · `reconcile` — 상태 갱신 |
-| `jobs_updated` | `(jobset_id, [JobRecord])` | 위와 동일 — **변경분이 있을 때만** |
+| `jobset_updated` | `(jobset_id, summary)` | **submit 완료(초기 PEND)** · `start_polling`(주기) · `query_once`(1회) · `reconcile` — 상태 갱신 |
+| `jobs_updated` | `(jobset_id, [JobRecord])` | **submit 완료(전체 초기 레코드)** · polling **변경분이 있을 때만** |
 | `job_lost` | `(jobset_id, JobRecord)` | `start_polling` · `query_once` · `detect_lost` — LSF 에서 소실 확정 |
 | `kill_finished` | `(jobset_id, KillReport)` | `kill_jobset` · `kill_jobs` |
 | `handler_finished` | `(jobset_id, handler_name, HandlerResult)` | `add_handler` 로 등록한 handler 1회 실행 완료 시 |
@@ -84,7 +84,7 @@ Signal 은 두 계층이다.
 |---|---|---|---|
 | `js.progress` | `(done, total)` | `submit_progress` | submit 계열 · `js.resubmit_jobs` |
 | `js.finished` | `(SubmitReport)` | `submit_finished` | submit 계열 · `js.resubmit_jobs` · `js.cancel_submit` |
-| `js.updated` | `(summary)` | `jobset_updated` | `js.start_polling` · `js.refresh` · `js.reconcile` |
+| `js.updated` | `(summary)` | `jobset_updated` | submit 완료(초기 PEND) · `js.start_polling` · `js.refresh` · `js.reconcile` |
 | `js.failed` | `([JobRecord])` | (파생) | submit 완료 시 `SUBMIT_FAILED` + polling 중 실패 상태 전이분 |
 | `js.killed` | `(KillReport)` | `kill_finished` | `js.kill` |
 | `js.handler_finished` | `(handler_name, HandlerResult)` | `handler_finished` | `js.add_handler` 로 등록한 handler |

@@ -42,6 +42,62 @@ def test_bulk_submit_sequential(qtbot, manager, fake_lsf):
     assert manager.summary(jsid)["PEND"] == 10
 
 
+def test_submit_emits_jobset_updated_with_initial_pend(qtbot, manager,
+                                                       fake_lsf):
+    """submit 완료 시 초기 PEND 상태가 jobset_updated로 즉시 발화된다 —
+    폴링(첫 조회)이나 상태 변화 없이도 js.updated가 PEND를 받아야 한다.
+    (submit_bulk는 auto_poll도 안 하므로 이 발화가 없으면 갱신이 영영 안 옴)"""
+    updates = []
+    manager.jobset_updated.connect(lambda jsid, s: updates.append(s))
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        jsid = manager.submit_bulk([JobSpec(command=f"r {i}")
+                                    for i in range(5)])
+    assert updates, "submit 완료 후 jobset_updated 미발화"
+    assert updates[-1]["PEND"] == 5 and updates[-1]["total"] == 5
+
+
+def test_submit_emits_jobs_updated_with_records(qtbot, manager, fake_lsf):
+    """submit 완료 시 개별 job 리스트(jobs_updated)도 발화된다 — 개별 job
+    테이블이 폴링 없이도 각 job_id/PEND로 즉시 채워지게."""
+    per_job = []
+    manager.jobs_updated.connect(lambda jsid, recs: per_job.append(recs))
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        jsid = manager.submit_bulk([JobSpec(command=f"r {i}")
+                                    for i in range(4)])
+    assert per_job, "submit 완료 후 jobs_updated 미발화"
+    recs = per_job[-1]
+    assert len(recs) == 4
+    assert all(r.job_id is not None and r.state is JobState.PEND
+               for r in recs)
+
+
+def test_submit_failure_emits_failed_once(qtbot, manager, fake_lsf):
+    """제출 실패 시 js.failed가 정확히 1회만 발화 (완료 emit과 _h_finished의
+    이중 발행 제거 확인)."""
+    fake_lsf.fail_next_bsub = 99
+    js = manager.submit(["x"], max_retry=0, auto_poll=False, mode="bulk")
+    failed_batches = []
+    js.failed.connect(failed_batches.append)
+    with qtbot.waitSignal(js.finished, timeout=10000):
+        pass
+    qtbot.wait(50)                       # 후속 큐 신호 소진
+    assert len(failed_batches) == 1      # 이중 아님
+    assert failed_batches[0][0].state is JobState.SUBMIT_FAILED
+
+
+def test_submit_updated_relayed_to_handle(qtbot, manager, fake_lsf):
+    """핸들 js.updated로도 초기 PEND 요약이 온다 (사용자 예제 경로)."""
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        jsid = manager.submit_bulk([JobSpec(command="x")])
+    js = manager.jobset(jsid)
+    got = []
+    js.updated.connect(lambda s: got.append(s))
+    # 완료 후 재조회 없이도 이미 발화됐으므로, refresh로 한 번 더 확인
+    with qtbot.waitSignal(js.updated, timeout=10000):
+        js.refresh()
+    assert got and got[-1]["total"] == 1
+
+
 def test_submit_started_signal(qtbot, manager):
     with qtbot.waitSignal(manager.submit_started, timeout=5000) as blocker:
         jsid = manager.submit_bulk([JobSpec(command="x")])

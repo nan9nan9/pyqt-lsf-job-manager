@@ -118,7 +118,7 @@ js = mgr.submit_wrapper([
 
 | Signal | 인자 | 시점 |
 |---|---|---|
-| `updated` | `dict` 요약 | polling/refresh 후 |
+| `updated` | `dict` 요약 | **submit 완료 시(초기 PEND)** + polling/refresh 후 |
 | `progress` | `(done, total)` | submit/resubmit 진행 (throttled) |
 | `finished` | `SubmitReport` | submit/resubmit 완료 (retry 포함 최종) |
 | `failed` | `list[JobRecord]` | SUBMIT_FAILED/EXIT/LOST 변경분 |

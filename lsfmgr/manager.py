@@ -162,6 +162,7 @@ class LsfJobManager(QObject):
         self.error_occurred.connect(self._handle_relay("error"))
         self.handler_finished.connect(self._handle_relay("handler_finished"))
         self.submit_finished.connect(self._h_finished)
+        self.submit_finished.connect(self._emit_summary_after_submit)
         self.jobs_updated.connect(self._h_jobs_updated)
 
         # AUTO-3: 앱 종료 시 shutdown 자동 연결 (명시 호출과 중복 안전)
@@ -649,6 +650,22 @@ class LsfJobManager(QObject):
         if changed:
             self.jobs_updated.emit(jobset_id, changed)
 
+    def _emit_summary_after_submit(self, jsid: str, report) -> None:
+        """submit 완료 시 요약(jobset_updated) + 개별 job(jobs_updated)을 1회
+        발화 — job이 이미 PEND(제출 성공분)/SUBMIT_FAILED로 전이됐는데도 그
+        상태 변화가 update Signal로 안 나가는 공백을 메운다. polling(첫 폴링)
+        전에도, polling을 안 켠 submit_bulk에서도 요약 표(js.updated)와 개별
+        job 테이블(jobs_updated)이 초기 상태를 즉시 받게 된다.
+        (jobs_updated의 실패분 → _h_jobs_updated가 js.failed까지 담당)"""
+        try:
+            summary = self.store.summary(jsid)
+            records = self.store.get_jobs(jsid)
+        except LsfmgrError:
+            return                       # jobset이 이미 사라짐(merge/close 등)
+        self.jobset_updated.emit(jsid, summary)
+        if records:
+            self.jobs_updated.emit(jsid, records)
+
     def _handle_of(self, jobset_id: str) -> Optional[JobSet]:
         h = self._handles.get(jobset_id)
         return h if (h is not None and not h._closed) else None
@@ -671,11 +688,8 @@ class LsfJobManager(QObject):
         if h is None:
             return
         h.finished.emit(report)
-        if getattr(report, "failed", 0):
-            failed = self.store.get_jobs(jsid,
-                                         states={JobState.SUBMIT_FAILED})
-            if failed:
-                h.failed.emit(failed)
+        # js.failed는 submit 완료 시 발화되는 jobs_updated →
+        # _h_jobs_updated가 담당한다 (SUBMIT_FAILED 포함) — 여기서 또 쏘면 이중.
 
     def _h_jobs_updated(self, jsid: str, changed: list) -> None:
         h = self._handle_of(jsid)
