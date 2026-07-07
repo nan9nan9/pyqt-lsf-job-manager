@@ -232,6 +232,12 @@ js.remove_handler("collect")             # 해제
 > 참고 — `working_dir`/`run_time_s`/`start_time`/`finish_time` 은 **LSF bjobs 에서
 > 폴링으로 채워지는** `JobRecord` 필드다(사용자 입력 아님). 실행 시작 후 값이 생기며,
 > `mgr.get_jobs()` 로도 조회할 수 있다.
+>
+> `run_time_s`(경과 실행시간)는 RUN 중 매 폴링마다 갱신돼 **`jobs_updated`
+> Signal 로 live 발행**된다 — UI 가 받은 `JobRecord.run_time_s` 로 경과시간을
+> 실시간 표시하면 된다. 수만 개 규모에서 RUN job 전원이 매 폴링 재전이되는
+> 부하가 부담되면 `LsfJobManager(poll_runtime_updates=False)` 로 끈다(그때
+> `run_time_s` 는 상태 전이 시점에만 반영).
 
 > 참고 — **실패 원인 확인 (2경로)**:
 > - **`JobRecord.fail_message`** — `SUBMIT_FAILED`/`RETRY_WAIT` 에서

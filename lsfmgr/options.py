@@ -29,6 +29,7 @@ MANAGER_ONLY_KEYS = frozenset({
     "bgdel_path",
     "kill_status_policy", "kill_max_retry", "kill_retry_delay_s",
     "progress_min_interval_s", "progress_min_step_ratio",
+    "poll_runtime_updates",
 })
 
 #: ① 라이브러리 내장 기본값
@@ -170,7 +171,7 @@ def _validate(key: str, value: Any) -> Any:
         if not (0.0 <= v <= 1.0):
             raise ValueError(f"progress_min_step_ratio는 0~1 (got {value})")
         return v
-    if key in ("auto_poll", "verify_kill"):
+    if key in ("auto_poll", "verify_kill", "poll_runtime_updates"):
         return bool(value)
     if key == "tags":
         if isinstance(value, str):

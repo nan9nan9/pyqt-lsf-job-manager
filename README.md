@@ -64,6 +64,7 @@ js = mgr.submit(jobs, workers=8, max_retry=0, queue="short",
 | `retry_backoff` | `"fixed:2"` | 생성자, submit | `"fixed:N"`(N초 고정) / `"expo:N"`(지수) |
 | `rate_limit_per_s` | 없음 | 생성자, submit | 초당 bsub 상한 (LSF 부하 보호) |
 | `poll_interval_s` | 10 | 생성자, submit | polling 주기 (5~60) |
+| `poll_runtime_updates` | True | 생성자 | RUN 중 `run_time_s`(경과시간) 변화도 `jobs_updated`로 live 발행. 수만 개 규모 부하 시 False로 끔 |
 | `progress_min_interval_s` | 0.1 | 생성자 | progress/jobs_updated 최소 발화 간격(초). 키우면 부하↓·반응성↓ |
 | `progress_min_step_ratio` | 0.01 | 생성자 | progress 최소 진행 비율(0~1). 키우면 발화↓ |
 | `auto_poll` | True | 생성자, submit | submit 후 polling 자동 시작 |

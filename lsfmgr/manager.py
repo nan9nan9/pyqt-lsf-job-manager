@@ -47,7 +47,8 @@ _CONFIG_KEYS = ("bsub_path", "bjobs_path", "bkill_path", "bhist_path",
                 "bmod_path", "bgdel_path", "script_dir", "lsf_group_root",
                 "arg_max", "default_queue", "chunk_size",
                 "kill_status_policy", "kill_max_retry", "kill_retry_delay_s",
-                "progress_min_interval_s", "progress_min_step_ratio")
+                "progress_min_interval_s", "progress_min_step_ratio",
+                "poll_runtime_updates")
 
 
 class LsfJobManager(QObject):

@@ -56,6 +56,12 @@ class LsfConfig:
 
     poll_interval_s: float = 10.0        # FR-4.4 기본 polling 주기
 
+    #: RUN 중 run_time_s(경과 실행시간) 변화도 폴링 갱신·jobs_updated 발행 대상에
+    #: 포함할지. True면 UI가 매 폴링마다 살아있는 job의 runtime을 갱신받는다.
+    #: 대신 RUN job 전원이 매 폴링 재전이돼(수만 개 규모에선 폴링 부하↑) 부담되면
+    #: False로 끈다 — 그때 run_time_s는 상태 전이(RUN→DONE 등) 시점에만 반영된다.
+    poll_runtime_updates: bool = True
+
     #: progress/jobs_updated 발화 빈도 제한 (QT-5) — 이 간격 경과 OR 이 비율만큼
     #: 진행했을 때만 발화(배치). 값이 클수록 시그널이 성겨져 부하↓·반응성↓.
     #: submit progress·jobs_updated 점진 발행·kill progress에 공통 적용.

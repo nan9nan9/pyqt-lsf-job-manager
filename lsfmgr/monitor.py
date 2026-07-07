@@ -115,17 +115,23 @@ class JobsetQuerier:
         update_specs = []       # bjobs/bhist 기반 일반 전이 [(key,state,guard,fields)]
         lost_specs = []         # LOST 전이 (반환분을 lost로도 분류)
         missing: List[JobRecord] = []
+        runtime_updates = self.command.config.poll_runtime_updates
         for rec in targets:
             st = lookup(rec)
             if st is None:
                 missing.append(rec)
                 continue
-            # 상태·exit_code 외에 실행시간 창(start/finish)·실행 디렉토리가 새로
-            # 채워질 때도 반영 — set-once라 매 폴링 반복 갱신(이벤트 스팸) 없음.
+            # 상태·exit_code 외에 실행시간 창(start/finish)·실행 디렉토리 변화도
+            # 반영(start/finish/cwd는 set-once). run_time_s(경과 실행시간)은
+            # RUN 중 매 폴링 증가하므로, poll_runtime_updates=True일 때만 갱신
+            # 대상에 넣어 jobs_updated로 live runtime을 발행한다(끄면 상태 전이
+            # 시점에만 반영 — 대량 job 폴링 부하 절감).
             if (st.state is not rec.state or st.exit_code != rec.exit_code
                     or st.start_time != rec.start_time
                     or st.finish_time != rec.finish_time
-                    or st.working_dir != rec.working_dir):
+                    or st.working_dir != rec.working_dir
+                    or (runtime_updates
+                        and st.run_time_s != rec.run_time_s)):
                 update_specs.append((rec.job_key, st.state, unchanged(rec), {
                     "exit_code": st.exit_code, "run_time_s": st.run_time_s,
                     "start_time": st.start_time, "finish_time": st.finish_time,
