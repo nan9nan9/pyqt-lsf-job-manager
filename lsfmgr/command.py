@@ -561,17 +561,37 @@ class LsfCommand:
                   if index_range else str(array_job_id))
         return self._run_kill(cmd_tokens(self.config.bkill_path) + [target])
 
+    def _bkill_argv(self, chunk: Sequence[str], envpath: str) -> List[str]:
+        """bkill 실행 argv. envpath가 있으면 그 LSF env를 source한 뒤 bkill —
+        MC forward job은 로컬 bkill로 안 죽고 그 클러스터 env를 source해야
+        죽는 환경을 지원한다. `set noglob`을 bkill 직전에 걸어 array target
+        ("1000[2]"/"1000[1-3]")의 대괄호가 tcsh 파일 globbing으로 뭉개지는 것을
+        막는다(profile source는 globbing 정상 — set noglob이 그 뒤라 안전)."""
+        if not envpath:
+            return cmd_tokens(self.config.bkill_path) + list(chunk)
+        inner = "source {} && set noglob && exec bkill {}".format(
+            envpath, " ".join(chunk))
+        return ["tcsh", "-c", inner]
+
+    def _bkill_base_len(self, envpath: str) -> int:
+        if not envpath:
+            return self._prog_len(self.config.bkill_path) + 10
+        return len("tcsh -c source  && set noglob && exec bkill ") \
+            + len(envpath) + 10
+
     def bkill_targets(self, targets: Sequence[str],
-                      on_progress: Optional[Callable[[int], None]] = None) -> int:
+                      on_progress: Optional[Callable[[int], None]] = None,
+                      envpath: str = "") -> int:
         """chunked bkill — "id" 또는 "id[idx]"(array element) 형태 허용.
         ARG_MAX 안전 (④ 최후 수단). 반환: LSF 호출 횟수.
+        envpath 지정 시 그 LSF env를 source한 bkill (MC forward job).
         on_progress(누적_처리_수)는 chunk 완료마다 호출된다(진행 통지)."""
         calls = 0
         processed = 0
-        base = self._prog_len(self.config.bkill_path) + 10
+        base = self._bkill_base_len(envpath)
         for chunk in chunk_args(list(targets), self.config.chunk_size,
                                 self.config.arg_max, base):
-            self._run_kill(cmd_tokens(self.config.bkill_path) + chunk)
+            self._run_kill(self._bkill_argv(chunk, envpath))
             calls += 1
             processed += len(chunk)
             if on_progress:
@@ -582,7 +602,8 @@ class LsfCommand:
         return self.bkill_targets([str(i) for i in job_ids])
 
     def bkill_targets_confirm(self, targets: Sequence[str],
-                              on_progress: Optional[Callable[[int], None]] = None
+                              on_progress: Optional[Callable[[int], None]] = None,
+                              envpath: str = ""
                               ) -> Tuple[Set[str], int]:
         """chunked bkill + 출력 확인 파싱 (FR-3.4).
 
@@ -590,14 +611,15 @@ class LsfCommand:
         '해소'는 더 이상 kill이 필요 없다고 확인된 것 — 'Job <id> is being
         terminated'(신호 수락) 또는 already-finished/no-matching(이미 없음).
         해소 안 된 target(일시 장애 등)은 호출자가 재시도한다.
+        envpath 지정 시 그 LSF env를 source한 bkill (MC forward job).
         on_progress(누적_처리_target수)는 chunk 완료마다 호출된다(진행 통지)."""
         resolved: Set[str] = set()
         calls = 0
         processed = 0
-        base = self._prog_len(self.config.bkill_path) + 10
+        base = self._bkill_base_len(envpath)
         for chunk in chunk_args(list(targets), self.config.chunk_size,
                                 self.config.arg_max, base):
-            argv = cmd_tokens(self.config.bkill_path) + chunk
+            argv = self._bkill_argv(chunk, envpath)
             try:
                 res = self._run(argv, self.config.kill_timeout_s)
             except subprocess.TimeoutExpired:

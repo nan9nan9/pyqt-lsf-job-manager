@@ -57,17 +57,21 @@ class JobSet(QObject):
     # 제어 — 전부 [async→Signal]: 즉시 반환, 결과는 Signal
     # ------------------------------------------------------------------
     def kill(self, only_state: Optional[JobState] = None,
-             verify: Optional[bool] = None) -> None:
-        """[async→Signal] JobSet kill — 결과는 kill_finished Signal (FR-3)."""
+             verify: Optional[bool] = None, envpath: str = "") -> None:
+        """[async→Signal] JobSet kill — 결과는 kill_finished Signal (FR-3).
+        envpath 지정 시 그 LSF env를 source한 bkill (MC forward job)."""
         self._check_open()
         self._manager.kill_jobset(self._jobset_id, only_state=only_state,
-                                  verify=verify)
+                                  verify=verify, envpath=envpath)
 
     def kill_jobs(self, job_keys: "Sequence[str]",
-                  verify: Optional[bool] = None) -> None:
+                  verify: Optional[bool] = None, envpath: str = "") -> None:
         """[async→Signal] 이 JobSet의 특정 job만 kill (job_key 지정).
         jobset 컨텍스트가 있어 optimistic EXIT 전이·verify가 켜지고 결과가
-        kill_finished Signal로 온다 — 테이블의 선택 행만 죽일 때 쓴다."""
+        kill_finished Signal로 온다 — 테이블의 선택 행만 죽일 때 쓴다.
+        envpath 지정 시 그 LSF env를 source한 bkill (MC forward job). job마다
+        클러스터가 다르면 forward_cluster로 분류해 클러스터별로 각 envpath로
+        나눠 호출한다."""
         self._check_open()
         recs = {r.job_key: r
                 for r in self._manager.get_jobs(self._jobset_id)}
@@ -80,7 +84,8 @@ class JobSet(QObject):
                 continue
             ids.append(f"{r.job_id}[{r.array_index}]"
                        if r.array_index is not None else r.job_id)
-        self._manager.kill_jobs(ids, jobset_id=self._jobset_id, verify=verify)
+        self._manager.kill_jobs(ids, jobset_id=self._jobset_id, verify=verify,
+                                envpath=envpath)
 
     def cancel(self) -> None:
         """[async→Signal] 진행 중 submit 중단 (QT-6) — 결과는 submit_finished."""

@@ -41,15 +41,19 @@ class Killer(QObject):
     # ------------------------------------------------------------------
     def kill_jobset(self, jobset_id: str, *,
                     only_state: Optional[JobState] = None,
-                    verify: bool = False) -> None:
+                    verify: bool = False, envpath: str = "") -> None:
         self._pool.start(_KillTask(
-            self, jobset_id=jobset_id, only_state=only_state, verify=verify))
+            self, jobset_id=jobset_id, only_state=only_state, verify=verify,
+            envpath=envpath))
 
     def kill_jobs(self, job_ids: Sequence, *, verify: bool = False,
-                  jobset_id: str = "") -> None:
-        """job_ids: int(job 전체) 또는 "id[idx]" 문자열(array element 1개)."""
+                  jobset_id: str = "", envpath: str = "") -> None:
+        """job_ids: int(job 전체) 또는 "id[idx]" 문자열(array element 1개).
+        envpath 지정 시 그 LSF env를 source한 bkill (MC forward job — 클러스터별로
+        나눠 각 envpath로 호출)."""
         self._pool.start(_KillTask(
-            self, jobset_id=jobset_id, job_ids=list(job_ids), verify=verify))
+            self, jobset_id=jobset_id, job_ids=list(job_ids), verify=verify,
+            envpath=envpath))
 
     def shutdown(self) -> None:
         self._pool.waitForDone(-1)
@@ -59,7 +63,8 @@ class _KillTask(QRunnable):
 
     def __init__(self, killer: Killer, *, jobset_id: str,
                  only_state: Optional[JobState] = None,
-                 job_ids: Optional[List] = None, verify: bool = False):
+                 job_ids: Optional[List] = None, verify: bool = False,
+                 envpath: str = ""):
         super().__init__()
         self.setAutoDelete(True)
         self.killer = killer
@@ -67,6 +72,7 @@ class _KillTask(QRunnable):
         self.only_state = only_state
         self.job_ids = job_ids
         self.verify = verify
+        self.envpath = envpath
         cfg = killer.command.config          # chunk progress throttle (submit 대칭)
         self._prog = EmitThrottler(cfg.progress_min_interval_s,
                                    cfg.progress_min_step_ratio)
@@ -202,7 +208,7 @@ class _KillTask(QRunnable):
         while True:
             base = len(resolved_all)         # 이번 라운드 시작 시 확인분
             resolved, c = k.command.bkill_targets_confirm(
-                sorted(pending),
+                sorted(pending), envpath=self.envpath,
                 on_progress=lambda done: self._emit_progress(base + done, total))
             calls += c
             resolved_all |= resolved
@@ -223,13 +229,31 @@ class _KillTask(QRunnable):
 
     def _kill_whole_jobset(self, strategies: List[str],
                            errors: List[str]) -> tuple:
-        """FR-3.1 전략 우선순위. 부착물 성공 시 chunking 생략."""
+        """FR-3.1 전략 우선순위. 부착물 성공 시 chunking 생략.
+        envpath 지정 시(MC forward) group/‏name은 forward job에 안 닿으므로
+        그 env를 source한 id 기반 chunk로만 죽인다."""
         k = self.killer
         js = k.store.get_jobset(self.jobset_id)
         alive = [r for r in k.store.get_jobs(self.jobset_id)
                  if r.state.is_on_lsf]
         if not alive:
             return 0, 0, []
+
+        if self.envpath:
+            ids = sorted({str(r.job_id) for r in alive
+                          if r.job_id is not None})
+            calls = 0
+            if ids:
+                n = len(ids)
+                try:
+                    calls = k.command.bkill_targets(
+                        ids, envpath=self.envpath,
+                        on_progress=lambda done: self._emit_progress(done, n))
+                    strategies.append("chunk(sourced)")
+                except LsfmgrError as e:
+                    errors.append(f"chunk: {e}")
+                    log.warning("kill 전략 실패 chunk(sourced): %s", e)
+            return len(alive), calls, alive
 
         calls = 0
         covered = False

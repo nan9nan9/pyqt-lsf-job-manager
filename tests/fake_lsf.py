@@ -53,6 +53,7 @@ class FakeLsf:
         self.fail_all_queries = False        # bjobs/bhist 장애 (LSF down)
         self.fail_next_bkill = 0             # 앞으로 N회 bkill rc=255 에러
         self.reject_clusters = False         # MC 필드(-o source_cluster) 미지원 흉내
+        self.forward_needs_env = False       # forward job은 env source한 bkill만 죽음
 
     # ------------------------------------------------------------------
     def __call__(self, argv, timeout) -> CommandResult:
@@ -200,7 +201,16 @@ class FakeLsf:
     # ------------------------------------------------------------------
     # bkill
     # ------------------------------------------------------------------
-    def _do_bkill(self, args: List[str]) -> CommandResult:
+    def _do_tcsh(self, args: List[str]) -> CommandResult:
+        """`tcsh -c "source <envpath> && exec bkill <ids>"` 흉내 — env를 source한
+        상태의 bkill로 취급(forward job도 죽음), _do_bkill(sourced=True)로 위임."""
+        if len(args) >= 2 and args[0] == "-c":
+            m = re.search(r"\bbkill\s+(.+)$", args[1])
+            if m:
+                return self._do_bkill(m.group(1).split(), sourced=True)
+        return CommandResult(0, "", "")
+
+    def _do_bkill(self, args: List[str], sourced: bool = False) -> CommandResult:
         if self.fail_next_bkill > 0:
             self.fail_next_bkill -= 1
             return CommandResult(255, "", "LSF error: cannot reach mbatchd\n")
@@ -210,6 +220,10 @@ class FakeLsf:
         if "-stat" in opts:
             targets = [j for j in targets
                        if j.stat.lower() == opts["-stat"].lower()]
+        # MC forward job은 로컬 bkill(비-sourced)로는 안 죽는 환경 흉내 —
+        # env를 source한 bkill(sourced=True)만 죽인다.
+        if self.forward_needs_env and not sourced:
+            targets = [j for j in targets if not j.forward_cluster]
         # array "id[m-n]" 표현 처리
         for a in rest:
             m = re.match(r"^(\d+)\[(\d+)-(\d+)\]$", a)

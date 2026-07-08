@@ -495,26 +495,29 @@ class LsfJobManager(QObject):
     # ------------------------------------------------------------------
     def kill_jobset(self, jobset_id: str, *,
                     only_state: Optional[JobState] = None,
-                    verify: Optional[bool] = None) -> None:
+                    verify: Optional[bool] = None, envpath: str = "") -> None:
         """[async→Signal] JobSet kill — 결과는 kill_finished.
-        verify 미지정 시 verify_kill 옵션(②) 적용."""
+        verify 미지정 시 verify_kill 옵션(②) 적용.
+        envpath 지정 시 그 LSF env를 source한 bkill (MC forward job)."""
         if verify is None:
             verify = bool(self._defaults.get("verify_kill", False))
         self.killer.kill_jobset(jobset_id, only_state=only_state,
-                                verify=verify)
+                                verify=verify, envpath=envpath)
 
     def kill_jobs(self, job_ids: Sequence, *,
                   jobset_id: Optional[str] = None,
-                  verify: Optional[bool] = None) -> None:
+                  verify: Optional[bool] = None, envpath: str = "") -> None:
         """[async→Signal] 개별 ID kill (chunking 자동).
         job_ids 항목은 int(job 전체) 또는 "id[idx]" 문자열(array element 1개).
         jobset_id를 주면 그 JobSet 컨텍스트로 동작 — optimistic EXIT 전이와
         verify가 켜지고 결과가 js.killed로도 중계된다. 생략하면 optimistic
-        전이는 전역 검색으로 처리하되 verify는 스킵된다."""
+        전이는 전역 검색으로 처리하되 verify는 스킵된다.
+        envpath 지정 시 그 LSF env를 source한 bkill (MC forward job) — job마다
+        클러스터가 다르면 클러스터별로 나눠 각 envpath로 호출한다."""
         if verify is None:
             verify = bool(self._defaults.get("verify_kill", False))
         self.killer.kill_jobs(job_ids, verify=verify,
-                              jobset_id=jobset_id or "")
+                              jobset_id=jobset_id or "", envpath=envpath)
 
     # ------------------------------------------------------------------
     # JobSet 관리 (FR-5)
