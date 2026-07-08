@@ -99,6 +99,10 @@ class _KillTask(QRunnable):
         optimistic = (k.command.config.kill_status_policy == "optimistic")
         killed_recs: List = []       # optimistic EXIT 대상 (kill 확인된 레코드)
 
+        # verify=True일 때 "잔존(still_alive)"을 셀 대상 job_id — kill 대상만
+        # 센다(부분/개별 kill에서 대상 아닌 RUN job까지 잔존으로 세지 않도록).
+        verify_ids: set = set()
+
         if self.job_ids is not None:
             # 개별 ID kill — 확인 후 미확인분 재시도 (FR-3.4)
             requested = len(self.job_ids)
@@ -106,6 +110,7 @@ class _KillTask(QRunnable):
             calls, unconfirmed, retries, resolved = self._kill_confirm(
                 targets, errors)
             strategies.append("chunk")
+            verify_ids = {int(str(i).split("[", 1)[0]) for i in self.job_ids}
             if optimistic:
                 killed_recs = self._records_for(resolved)
         elif self.only_state is not None:
@@ -116,6 +121,7 @@ class _KillTask(QRunnable):
             recs = k.store.get_jobs(self.jobset_id, states={self.only_state})
             targets = [self._id_str(r) for r in recs if r.job_id is not None]
             requested = len(targets)
+            verify_ids = {r.job_id for r in recs if r.job_id is not None}
             if targets:
                 calls, unconfirmed, retries, resolved = self._kill_confirm(
                     targets, errors)
@@ -129,6 +135,7 @@ class _KillTask(QRunnable):
             # 전체 kill은 group/name 전략(1명령)이라 per-id 확인이 없다 —
             # 전략이 오류 없이 수행됐으면 살아있던 대상 전부를 확인된 것으로
             # 간주한다(kill 명령이 수락됨).
+            verify_ids = {r.job_id for r in alive if r.job_id is not None}
             if optimistic and not errors:
                 killed_recs = alive
 
@@ -140,7 +147,7 @@ class _KillTask(QRunnable):
 
         still_alive: Optional[int] = None
         if self.verify and self.jobset_id:
-            still_alive = self._verify()
+            still_alive = self._verify(verify_ids)
 
         return KillReport(
             jobset_id=self.jobset_id, requested=requested,
@@ -294,15 +301,19 @@ class _KillTask(QRunnable):
         strategies.append(name if matched else f"{name}(no-match)")
         return matched
 
-    def _verify(self) -> int:
-        """재조회로 실제 종료 확인 (FR-3.3). 잔존(alive) job 수 반환."""
+    def _verify(self, target_ids: set) -> int:
+        """재조회로 실제 종료 확인 (FR-3.3). kill 대상(target_ids) 중 아직
+        LSF에 잔존하는 job 수 반환 — 부분/개별 kill에서 대상 아닌 job은 세지
+        않는다. target_ids가 비면(대상 없음) 0."""
         k = self.killer
+        if not target_ids:
+            return 0
         try:
             k.querier.query(self.jobset_id)      # Store 갱신 목적 (반환값 미사용)
         except LsfmgrError as e:
             log.warning("kill verify 조회 실패: %s", e)
             return -1
         alive = [r for r in k.store.get_jobs(self.jobset_id)
-                 if r.state.is_on_lsf
+                 if r.job_id in target_ids and r.state.is_on_lsf
                  and r.state not in (JobState.UNKWN, JobState.ZOMBI)]
         return len(alive)

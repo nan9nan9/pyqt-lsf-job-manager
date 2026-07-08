@@ -242,3 +242,47 @@ def test_kill_verify(qtbot, manager, fake_lsf, submitted):
     # verify 조회가 store에도 반영됨 (killed → EXIT)
     s = manager.summary(submitted)
     assert s.get("EXIT", 0) == 30
+
+
+# ----------------------------------------------------------------------
+# verify는 kill 대상만 잔존으로 센다 (부분/개별 kill에서 대상 아닌 job 제외)
+# ----------------------------------------------------------------------
+def test_partial_kill_verify_counts_only_targets(qtbot, fake_lsf, config):
+    """PEND만 kill + verify — 남은 RUN job은 still_alive에 세지 않아야 한다
+    (예전엔 jobset 전체 alive를 세 kill이 실패한 것처럼 보였다)."""
+    from lsfmgr import InMemoryStore, LsfJobManager
+    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
+                        kill_status_policy="actual")
+    try:
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            js = mgr.submit([f"echo {i}" for i in range(4)], mode="bulk",
+                           auto_poll=False)
+        recs = sorted(js.jobs(), key=lambda r: r.job_key)
+        fake_lsf.set_job(recs[0].job_id, "RUN")
+        fake_lsf.set_job(recs[1].job_id, "RUN")
+        mgr.querier.query(js.id)                    # 2 RUN, 2 PEND
+        with qtbot.waitSignal(mgr.kill_finished, timeout=10000) as b:
+            js.kill(only_state=JobState.PEND, verify=True)
+        assert b.args[1].still_alive == 0           # RUN 2개는 대상 아님
+    finally:
+        mgr.shutdown()
+
+
+def test_individual_kill_verify_counts_only_targets(qtbot, fake_lsf, config):
+    """kill_jobs(선택 job) + verify — 선택 안 한 RUN job은 제외."""
+    from lsfmgr import InMemoryStore, LsfJobManager
+    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
+                        kill_status_policy="actual")
+    try:
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            js = mgr.submit(["echo a", "echo b", "echo c"], mode="bulk",
+                           auto_poll=False)
+        fake_lsf.set_all("RUN")
+        mgr.querier.query(js.id)
+        keys = sorted(r.job_key for r in js.jobs())
+        with qtbot.waitSignal(mgr.kill_finished, timeout=10000) as b:
+            js.kill_jobs(keys[:1], verify=True)     # 1개만 kill
+        assert b.args[1].still_alive == 0           # 나머지 2개는 대상 아님
+        assert len(fake_lsf.alive_jobs()) == 2      # 실제로 2개 살아있음
+    finally:
+        mgr.shutdown()
