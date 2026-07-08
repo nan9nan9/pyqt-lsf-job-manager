@@ -2,11 +2,9 @@
 + poll_runtime_updates=False로 끌 수 있는지."""
 from __future__ import annotations
 
-import pytest
 
-from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
+from lsfmgr import InMemoryStore, LsfJobManager
 from lsfmgr.states import JobState
-from tests.fake_lsf import FakeLsf
 
 
 def _submit_one_running(qtbot, mgr, fake_lsf):

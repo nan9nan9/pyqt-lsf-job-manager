@@ -11,7 +11,6 @@ import pytest
 from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager, SqliteStore
 from lsfmgr.command import LsfCommand
 from lsfmgr.states import JobState
-from tests.fake_lsf import FakeLsf
 
 
 @pytest.fixture

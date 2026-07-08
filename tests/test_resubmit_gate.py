@@ -6,11 +6,9 @@ submit 게이트와 동일한 신호 순서/옵션. 단 resubmit는 kill-phase�
 """
 from __future__ import annotations
 
-import pytest
 
-from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
+from lsfmgr import InMemoryStore, LsfJobManager
 from lsfmgr.states import JobState
-from tests.fake_lsf import FakeLsf
 
 
 def _running_job(qtbot, mgr, fake_lsf):

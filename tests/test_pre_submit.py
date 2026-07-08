@@ -5,11 +5,9 @@ submit_finished. False/예외 처리와 옵션(submit_finished_on_gate_reject) �
 """
 from __future__ import annotations
 
-import pytest
 
-from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
+from lsfmgr import InMemoryStore, LsfJobManager
 from lsfmgr.states import JobState
-from tests.fake_lsf import FakeLsf
 
 
 def _record(mgr, log):
