@@ -116,6 +116,7 @@ class JobsetQuerier:
         lost_specs = []         # LOST 전이 (반환분을 lost로도 분류)
         missing: List[JobRecord] = []
         runtime_updates = self.command.config.poll_runtime_updates
+        collect_clusters = self.command.config.collect_clusters
         for rec in targets:
             st = lookup(rec)
             if st is None:
@@ -125,23 +126,30 @@ class JobsetQuerier:
             # 반영(start/finish/cwd는 set-once). run_time_s(경과 실행시간)은
             # RUN 중 매 폴링 증가하므로, poll_runtime_updates=True일 때만 갱신
             # 대상에 넣어 jobs_updated로 live runtime을 발행한다(끄면 상태 전이
-            # 시점에만 반영 — 대량 job 폴링 부하 절감).
+            # 시점에만 반영 — 대량 job 폴링 부하 절감). 클러스터 필드는
+            # collect_clusters일 때만 비교·기록한다 — 안 그러면 이전 세션이
+            # 채운 forward_cluster를 (수집 안 하는) 이번 세션 폴링이 st의 None으로
+            # 덮어 데이터가 소실된다(persistent+recover 시).
             if (st.state is not rec.state or st.exit_code != rec.exit_code
                     or st.start_time != rec.start_time
                     or st.finish_time != rec.finish_time
                     or st.working_dir != rec.working_dir
-                    or st.source_cluster != rec.source_cluster
-                    or st.forward_cluster != rec.forward_cluster
+                    or (collect_clusters
+                        and (st.source_cluster != rec.source_cluster
+                             or st.forward_cluster != rec.forward_cluster))
                     or (runtime_updates
                         and st.run_time_s != rec.run_time_s)):
-                update_specs.append((rec.job_key, st.state, unchanged(rec), {
+                fields = {
                     "exit_code": st.exit_code, "run_time_s": st.run_time_s,
                     "start_time": st.start_time, "finish_time": st.finish_time,
                     "working_dir": st.working_dir,
-                    "source_cluster": st.source_cluster,
-                    "forward_cluster": st.forward_cluster,
                     "job_id": rec.job_id if rec.job_id is not None
-                    else st.job_id}))
+                    else st.job_id}
+                if collect_clusters:     # 끄면 저장값 보존(덮지 않음)
+                    fields["source_cluster"] = st.source_cluster
+                    fields["forward_cluster"] = st.forward_cluster
+                update_specs.append(
+                    (rec.job_key, st.state, unchanged(rec), fields))
 
         if missing:
             hist: Dict = {}
@@ -223,6 +231,8 @@ def _aggregate_elements(rec: JobRecord,
     finishes = [e.finish_time for e in elems if e.finish_time is not None]
     rts = [e.run_time_s for e in elems if e.run_time_s is not None]
     cwds = [e.working_dir for e in elems if e.working_dir]
+    srcs = [e.source_cluster for e in elems if e.source_cluster]
+    fwds = [e.forward_cluster for e in elems if e.forward_cluster]
     return JobStatus(
         job_id=rec.job_id, array_index=None, state=state,
         exit_code=exit_code, job_name=rec.lsf_job_name,
@@ -230,7 +240,10 @@ def _aggregate_elements(rec: JobRecord,
         start_time=min(starts) if starts else None,
         # 실행 중 element가 남았으면 종료 시각은 아직 실측이 아니다
         finish_time=(max(finishes) if finishes and not on else None),
-        working_dir=cwds[0] if cwds else None)
+        working_dir=cwds[0] if cwds else None,
+        # MC — 한 array의 element들은 같은 클러스터로 forward된다(대표값)
+        source_cluster=srcs[0] if srcs else None,
+        forward_cluster=fwds[0] if fwds else None)
 
 
 def _aggregate_hist(entries: List[Tuple[JobState, Optional[int]]]

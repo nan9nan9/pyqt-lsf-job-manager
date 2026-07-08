@@ -188,3 +188,55 @@ def test_double_field_error_degrades_to_core():
     out = cmd.bjobs_by_group("/g")           # 한 호출에서 CORE까지 강등
     assert cmd._bjobs_fmt is cmd._BJOBS_CORE_FMT
     assert out[0].job_id == 111
+
+
+# ----------------------------------------------------------------------
+# wrapper가 제출한 array가 forward되면 집계 레코드에 클러스터가 실린다
+# (예전엔 _aggregate_elements가 cluster 필드를 안 넣어 소실됐다)
+# ----------------------------------------------------------------------
+def test_wrapper_array_aggregate_carries_cluster(qtbot, mc_manager, fake_lsf):
+    with qtbot.waitSignal(mc_manager.submit_finished, timeout=10000):
+        js = mc_manager.submit_wrapper(
+            [["primesim_sub", "-J", "arr[1-3]", "echo", "hi"]], auto_poll=False)
+    rec = js.jobs()[0]
+    aid = rec.job_id
+    for i in (1, 2, 3):
+        fj = fake_lsf.jobs[f"{aid}[{i}]"]
+        fj.stat = "RUN"
+        fj.source_cluster, fj.forward_cluster = "seoul", "busan"
+    mc_manager.querier.query(js.id)
+    rec = js.jobs()[0]
+    assert rec.state is JobState.RUN
+    assert rec.source_cluster == "seoul"
+    assert rec.forward_cluster == "busan"
+
+
+# ----------------------------------------------------------------------
+# collect_clusters=False 폴링이 저장된 클러스터 필드를 덮어 소실시키지 않음
+# (persistent+recover: 이전 세션이 채운 forward_cluster를 보존)
+# ----------------------------------------------------------------------
+def test_off_polling_preserves_stored_cluster(qtbot, fake_lsf, tmp_path):
+    store = InMemoryStore()
+    # collect off 매니저지만 store엔 이미 forward_cluster가 채워진 job이 있다
+    mgr = LsfJobManager(store=store, config=LsfConfig(), runner=fake_lsf)  # off
+    try:
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            js = mgr.submit(["echo a"], mode="bulk", auto_poll=False)
+        rec = js.jobs()[0]
+        # 이전 세션이 채운 것처럼 store에 직접 클러스터 주입 + LSF도 RUN
+        store.transition(js.id, rec.job_key, JobState.RUN,
+                         forward_cluster="busan", source_cluster="seoul")
+        fake_lsf.jobs[str(rec.job_id)].stat = "RUN"
+        fake_lsf.jobs[str(rec.job_id)].run_time_s = 33   # 다른 필드 변화 유발
+        # collect off 폴링 — 클러스터 필드를 건드리면 안 됨
+        mgr.querier.query(js.id)
+        r = js.jobs()[0]
+        assert r.forward_cluster == "busan"      # 보존
+        assert r.source_cluster == "seoul"
+        # 상태 전이(RUN→DONE) 시에도 보존
+        fake_lsf.set_job(rec.job_id, "DONE")
+        mgr.querier.query(js.id)
+        r = js.jobs()[0]
+        assert r.state is JobState.DONE and r.forward_cluster == "busan"
+    finally:
+        mgr.shutdown()
