@@ -1,0 +1,154 @@
+"""LSF MultiCluster forwarding 정보 수집 (collect_clusters).
+
+켜면 bjobs -o에 source_cluster·forward_cluster 필드를 추가해 JobRecord에
+채운다. 기본은 꺼짐(opt-in). MC 미지원 사이트에선 3단 강등(FULL+MC → FULL →
+CORE)으로 그 필드만 포기하고 run_time 등은 유지한다.
+"""
+from __future__ import annotations
+
+import pytest
+
+from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager, SqliteStore
+from lsfmgr.command import LsfCommand
+from lsfmgr.states import JobState
+from tests.fake_lsf import FakeLsf
+
+
+@pytest.fixture
+def mc_manager(qtbot, fake_lsf, config):
+    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
+                        collect_clusters=True)
+    yield mgr
+    mgr.shutdown()
+
+
+def _submit_running(qtbot, mgr, fake_lsf, src=None, fwd=None):
+    with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+        js = mgr.submit(["echo a"], mode="bulk", auto_poll=False)
+    rec = js.jobs()[0]
+    fj = fake_lsf.jobs[str(rec.job_id)]
+    fj.stat = "RUN"
+    fj.source_cluster, fj.forward_cluster = src, fwd
+    return js
+
+
+# ----------------------------------------------------------------------
+# ON — source/forward_cluster가 JobRecord에 채워지고 jobs_updated로 발행
+# ----------------------------------------------------------------------
+def test_collect_clusters_populates_record(qtbot, mc_manager, fake_lsf):
+    js = _submit_running(qtbot, mc_manager, fake_lsf, src="seoul", fwd="busan")
+    seen = []
+    mc_manager.jobs_updated.connect(lambda j, rs: seen.extend(rs))
+    # query_once는 폴링 워커 경유 → jobs_updated 발화
+    with qtbot.waitSignal(mc_manager.jobs_updated, timeout=10000):
+        mc_manager.query_once(js.id)
+    rec = js.jobs()[0]
+    assert rec.source_cluster == "seoul"
+    assert rec.forward_cluster == "busan"
+    assert any(r.forward_cluster == "busan" for r in seen)   # 신호로도 발행
+
+
+def test_collect_clusters_forward_only(qtbot, mc_manager, fake_lsf):
+    """포워딩 안 된 job('-')은 None으로."""
+    js = _submit_running(qtbot, mc_manager, fake_lsf, src="seoul", fwd=None)
+    mc_manager.querier.query(js.id)
+    rec = js.jobs()[0]
+    assert rec.source_cluster == "seoul"
+    assert rec.forward_cluster is None
+
+
+# ----------------------------------------------------------------------
+# OFF (기본) — 필드 요청도 안 하고 레코드도 안 채워짐
+# ----------------------------------------------------------------------
+def test_default_off_no_cluster_fields(qtbot, manager, fake_lsf):
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
+    rec = js.jobs()[0]
+    fj = fake_lsf.jobs[str(rec.job_id)]
+    fj.stat = "RUN"; fj.source_cluster = "seoul"
+    fake_lsf.calls.clear()
+    manager.querier.query(js.id)
+    assert js.jobs()[0].source_cluster is None
+    # bjobs -o 포맷에 cluster 필드가 없어야
+    for call in fake_lsf.calls_of("bjobs"):
+        assert "source_cluster" not in " ".join(call)
+
+
+# ----------------------------------------------------------------------
+# 3단 강등 — MC 필드 미지원이면 FULL로만 내려가 run_time 유지
+# ----------------------------------------------------------------------
+def test_cluster_field_unsupported_degrades_to_full(qtbot, fake_lsf, config):
+    fake_lsf.reject_clusters = True          # MC 필드 요청 시 rc=255
+    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
+                        collect_clusters=True)
+    try:
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            js = mgr.submit(["echo a"], mode="bulk", auto_poll=False)
+        rec = js.jobs()[0]
+        fj = fake_lsf.jobs[str(rec.job_id)]
+        fj.stat = "RUN"; fj.run_time_s = 42; fj.source_cluster = "seoul"
+        mgr.querier.query(js.id)
+        rec = js.jobs()[0]
+        assert rec.run_time_s == 42          # FULL 확장 필드는 유지
+        assert rec.source_cluster is None    # MC 필드만 포기
+        # 포맷이 FULL(인덱스 1)로 강등됐고 MC 필드는 빠졌다
+        assert "source_cluster" not in mgr.command._bjobs_fmt
+    finally:
+        mgr.shutdown()
+
+
+def test_cluster_degradation_is_permanent(qtbot, fake_lsf, config):
+    """한 번 강등되면 이후 사이클엔 MC 필드를 다시 요청하지 않는다."""
+    fake_lsf.reject_clusters = True
+    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
+                        collect_clusters=True)
+    try:
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            js = mgr.submit(["echo a"], mode="bulk", auto_poll=False)
+        fake_lsf.set_all("RUN")
+        mgr.querier.query(js.id)             # 여기서 강등
+        fake_lsf.calls.clear()
+        mgr.querier.query(js.id)             # 이후 사이클
+        for call in fake_lsf.calls_of("bjobs"):
+            assert "source_cluster" not in " ".join(call)
+    finally:
+        mgr.shutdown()
+
+
+# ----------------------------------------------------------------------
+# sqlite 영속 — 클러스터 필드 저장/복원
+# ----------------------------------------------------------------------
+def test_cluster_persisted_sqlite(qtbot, fake_lsf, config, tmp_path):
+    mgr = LsfJobManager(store=SqliteStore(str(tmp_path / "db.sqlite")),
+                        config=config, runner=fake_lsf, collect_clusters=True)
+    try:
+        js = _submit_running(qtbot, mgr, fake_lsf, src="seoul", fwd="busan")
+        mgr.querier.query(js.id)
+        jsid = js.id
+    finally:
+        mgr.shutdown()
+    reopened = SqliteStore(str(tmp_path / "db.sqlite"))
+    try:
+        rec = reopened.get_jobs(jsid)[0]
+        assert rec.source_cluster == "seoul"
+        assert rec.forward_cluster == "busan"
+    finally:
+        reopened.close()
+
+
+# ----------------------------------------------------------------------
+# 파서 단위 — 10필드(FULL+MC) / 8필드(FULL) / 4필드(CORE)
+# ----------------------------------------------------------------------
+def test_parse_bjobs_cluster_fields():
+    line10 = "1000;RUN;-;js_0;120 second(s);-;-;/work;seoul;busan"
+    (st,) = LsfCommand._parse_bjobs(line10 + "\n")
+    assert st.source_cluster == "seoul" and st.forward_cluster == "busan"
+    assert st.run_time_s == 120 and st.working_dir == "/work"
+
+    line8 = "1000;RUN;-;js_0;120 second(s);-;-;/work"
+    (st8,) = LsfCommand._parse_bjobs(line8 + "\n")
+    assert st8.source_cluster is None and st8.run_time_s == 120
+
+    line4 = "1000;RUN;-;js_0"
+    (st4,) = LsfCommand._parse_bjobs(line4 + "\n")
+    assert st4.source_cluster is None and st4.run_time_s is None

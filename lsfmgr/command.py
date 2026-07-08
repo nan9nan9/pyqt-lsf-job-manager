@@ -51,6 +51,8 @@ class JobStatus:
     start_time: Optional[datetime] = None  # LSF start_time
     finish_time: Optional[datetime] = None # LSF finish_time
     working_dir: Optional[str] = None      # LSF exec_cwd (실행 디렉토리)
+    source_cluster: Optional[str] = None   # MC: 제출(로컬) 클러스터
+    forward_cluster: Optional[str] = None  # MC: 포워딩된 실행(원격) 클러스터
 
 
 _JOB_ID_RE = re.compile(r"Job <(\d+)>")
@@ -71,9 +73,16 @@ _LSF_TIME_FORMATS = ("%Y-%m-%d %H:%M:%S", "%b %d %H:%M:%S %Y",
 # 특정 문구를 보조로 쓴다. "unknown host"/"invalid ..." 같은 일시장애 문구가
 # 오판되지 않도록 광범위 단독 단어("unknown"/"invalid"/"no such")는 제외한다.
 _BJOBS_FIELD_ERR = ("run_time", "start_time", "finish_time", "exec_cwd",
+                    "source_cluster", "forward_cluster",
                     "unknown field", "bad field", "field name", "illegal",
                     "not a valid", "unrecognized", "output format",
                     "format specification", "invalid format", "illegal option")
+
+
+def _clean_field(s: str) -> Optional[str]:
+    """bjobs -o 문자열 필드 정규화 — 빈값/'-'는 None (미해당)."""
+    s = (s or "").strip()
+    return s if s and s != "-" else None
 
 
 def _looks_like_field_error(err_text: str) -> bool:
@@ -180,8 +189,18 @@ class LsfCommand:
                  runner: Optional[Runner] = None):
         self.config = config or LsfConfig()
         self.runner = runner or default_runner
-        # 확장 필드로 시작 — 필드 오류 감지 시 CORE로 강등 (인스턴스 수명 동안 유지)
-        self._bjobs_fmt = self._BJOBS_FULL_FMT
+        # 확장 필드로 시작 — 필드 오류 감지 시 한 단계씩 강등 (인스턴스 수명 유지).
+        # collect_clusters면 FULL+MC를 맨 앞에 둬, 미지원 시 FULL로만 내려가
+        # run_time 등은 유지된다(MC 필드만 포기).
+        self._bjobs_formats = (
+            [self._BJOBS_FULL_MC_FMT, self._BJOBS_FULL_FMT, self._BJOBS_CORE_FMT]
+            if self.config.collect_clusters
+            else [self._BJOBS_FULL_FMT, self._BJOBS_CORE_FMT])
+        self._bjobs_fmt_idx = 0
+
+    @property
+    def _bjobs_fmt(self) -> str:
+        return self._bjobs_formats[self._bjobs_fmt_idx]
 
     @staticmethod
     def _prog_len(path) -> int:
@@ -327,11 +346,16 @@ class LsfCommand:
     # FULL: CORE + 실행시간/위치 확장 필드. 구형 LSF(9.x 등)나 특정 사이트에서는
     #       run_time/exec_cwd 같은 필드를 -o가 거부해 bjobs 전체가 rc≠0로 죽는다 —
     #       그러면 폴링이 아무 상태도 못 걷어 job이 PEND(제출 직후 상태)에 고착된다.
-    #       그래서 FULL이 필드 오류로 실패하면 CORE로 자동 강등한다(확장 필드만 포기).
-    _BJOBS_CORE_FMT = "jobid:20 stat:12 exit_code:12 job_name:512 delimiter=';'"
-    _BJOBS_FULL_FMT = ("jobid:20 stat:12 exit_code:12 job_name:512 "
-                       "run_time:25 start_time:30 finish_time:30 exec_cwd:2048 "
-                       "delimiter=';'")
+    #       그래서 필드 오류로 실패하면 한 단계씩 자동 강등한다(그 필드만 포기).
+    # FULL_MC: FULL + MultiCluster forwarding 필드. collect_clusters=True일 때만
+    #       맨 앞 단계로 쓰고, 미지원 사이트면 FULL로 강등돼 run_time 등은 유지된다.
+    _CORE_FIELDS = "jobid:20 stat:12 exit_code:12 job_name:512"
+    _FULL_EXTRA = "run_time:25 start_time:30 finish_time:30 exec_cwd:2048"
+    _CLUSTER_EXTRA = "source_cluster:60 forward_cluster:60"
+    _DELIM = "delimiter=';'"
+    _BJOBS_CORE_FMT = f"{_CORE_FIELDS} {_DELIM}"
+    _BJOBS_FULL_FMT = f"{_CORE_FIELDS} {_FULL_EXTRA} {_DELIM}"
+    _BJOBS_FULL_MC_FMT = f"{_CORE_FIELDS} {_FULL_EXTRA} {_CLUSTER_EXTRA} {_DELIM}"
 
     def _bjobs(self, selector: List[str]) -> List[JobStatus]:
         def run(fmt: str) -> Optional[CommandResult]:
@@ -342,14 +366,16 @@ class LsfCommand:
         try:
             res = run(self._bjobs_fmt)
         except LsfCommandError as e:
-            # FULL 포맷 사용 중 필드/옵션 오류로 보이면 CORE로 영구 강등 후 재시도.
+            # 확장 필드/옵션 오류로 보이면 다음 포맷 단계로 영구 강등 후 재시도.
             # (일시 장애는 강등하지 않고 그대로 전파 — 다음 사이클에 복구)
-            if (self._bjobs_fmt is self._BJOBS_FULL_FMT
+            # 3단(FULL+MC → FULL → CORE): MC 필드만 미지원이면 FULL로 한 단계만
+            # 내려가 run_time 등은 유지된다.
+            if (self._bjobs_fmt_idx < len(self._bjobs_formats) - 1
                     and _looks_like_field_error(e.stderr or str(e))):
-                log.warning("bjobs -o 확장 필드 미지원으로 판단 — CORE 포맷으로 "
-                            "강등합니다(run_time/start_time/finish_time/exec_cwd "
-                            "미수집). 원인: %s", (e.stderr or str(e)).strip()[:200])
-                self._bjobs_fmt = self._BJOBS_CORE_FMT
+                self._bjobs_fmt_idx += 1
+                log.warning("bjobs -o 확장 필드 미지원으로 판단 — 포맷 강등합니다"
+                            " (→ %s). 원인: %s", self._bjobs_fmt,
+                            (e.stderr or str(e)).strip()[:200])
                 res = run(self._bjobs_fmt)
             else:
                 raise
@@ -419,11 +445,12 @@ class LsfCommand:
                     exit_code = int(exit_s)
                 except ValueError:
                     pass
-            # 시간/위치 필드 — 정확히 8필드일 때만 신뢰한다. 8이 아니면
-            # (구형 LSF 열 누락, 또는 job name에 ';'가 들어가 필드가 밀림)
-            # 오염된 값을 저장하느니 버리는 게 안전하다 (id/stat 매칭은 생존).
+            # 확장 필드 — 필드 수가 정확히 포맷과 맞을 때만 신뢰한다. 8=FULL,
+            # 10=FULL+MC(source/forward_cluster 2필드 추가). 그 외(구형 LSF 열
+            # 누락, 또는 job name에 ';'가 들어가 필드가 밀림)는 오염을 피해 버린다.
             run_time_s = start_time = finish_time = working_dir = None
-            if len(parts) == 8:
+            source_cluster = forward_cluster = None
+            if len(parts) in (8, 10):
                 run_time_s = _parse_run_time(parts[4])
                 start_time = _parse_lsf_time(parts[5])
                 # RUN 중 finish_time은 예상치(estimated)일 수 있다 —
@@ -432,15 +459,19 @@ class LsfCommand:
                     finish_time = _parse_lsf_time(parts[6])
                 cwd = parts[7].strip()
                 working_dir = cwd if cwd and cwd != "-" else None
+                if len(parts) == 10:      # MultiCluster forwarding
+                    source_cluster = _clean_field(parts[8])
+                    forward_cluster = _clean_field(parts[9])
             elif len(parts) != 4:
-                log.debug("bjobs 필드 수 이상(%d) — 시간/cwd 필드 무시: %r",
+                log.debug("bjobs 필드 수 이상(%d) — 확장 필드 무시: %r",
                           len(parts), line)
             out.append(JobStatus(
                 job_id=int(m.group(1)),
                 array_index=int(m.group(2)) if m.group(2) else None,
                 state=state, exit_code=exit_code, job_name=name,
                 run_time_s=run_time_s, start_time=start_time,
-                finish_time=finish_time, working_dir=working_dir))
+                finish_time=finish_time, working_dir=working_dir,
+                source_cluster=source_cluster, forward_cluster=forward_cluster))
         return out
 
     # ------------------------------------------------------------------

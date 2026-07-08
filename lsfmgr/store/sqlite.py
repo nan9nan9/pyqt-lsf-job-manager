@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     working_dir  TEXT,
     via_wrapper  INTEGER NOT NULL DEFAULT 0,
     spec_json    TEXT,
+    source_cluster  TEXT,
+    forward_cluster TEXT,
     PRIMARY KEY (jobset_id, lsf_job_name)
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs (jobset_id, state);
@@ -131,7 +133,9 @@ class SqliteStore(JobSetStore):
                            ("working_dir", "TEXT"),
                            ("via_wrapper", "INTEGER NOT NULL DEFAULT 0"),
                            ("spec_json", "TEXT"),
-                           ("fail_message", "TEXT")):
+                           ("fail_message", "TEXT"),
+                           ("source_cluster", "TEXT"),
+                           ("forward_cluster", "TEXT")):
             if name not in cols:
                 try:
                     con.execute(f"ALTER TABLE jobs ADD COLUMN {name} {decl}")
@@ -234,7 +238,9 @@ class SqliteStore(JobSetStore):
             updated_at=_dt(r["updated_at"]),
             run_time_s=r["run_time_s"], start_time=_dt(r["start_time"]),
             finish_time=_dt(r["finish_time"]), working_dir=r["working_dir"],
-            via_wrapper=bool(r["via_wrapper"]), spec_json=r["spec_json"])
+            via_wrapper=bool(r["via_wrapper"]), spec_json=r["spec_json"],
+            source_cluster=r["source_cluster"],
+            forward_cluster=r["forward_cluster"])
 
     # INSERT는 반드시 컬럼명을 명시한다 — 위치 바인딩은 마이그레이션(ALTER는
     # 항상 끝에 추가)으로 구/신 DB의 물리 컬럼 순서가 갈라지는 순간, 에러
@@ -247,7 +253,8 @@ class SqliteStore(JobSetStore):
                  "state", "fail_reason", "fail_message", "retry_count",
                  "exit_code", "submit_time", "command", "updated_at",
                  "run_time_s", "start_time", "finish_time", "working_dir",
-                 "via_wrapper", "spec_json")
+                 "via_wrapper", "spec_json", "source_cluster",
+                 "forward_cluster")
 
     def _put_jobset(self, con: sqlite3.Connection, js: JobSetRecord) -> None:
         con.execute(
@@ -268,7 +275,8 @@ class SqliteStore(JobSetStore):
              j.state.value, j.fail_reason, j.fail_message, j.retry_count,
              j.exit_code, _iso(j.submit_time), j.command, _iso(j.updated_at),
              j.run_time_s, _iso(j.start_time), _iso(j.finish_time),
-             j.working_dir, int(j.via_wrapper), j.spec_json))
+             j.working_dir, int(j.via_wrapper), j.spec_json,
+             j.source_cluster, j.forward_cluster))
 
     # ------------------------------------------------------------------
     # JobSet CRUD
@@ -635,6 +643,8 @@ class SqliteStore(JobSetStore):
                 "start_time": _iso(j.start_time),
                 "finish_time": _iso(j.finish_time),
                 "working_dir": j.working_dir,
+                "source_cluster": j.source_cluster,
+                "forward_cluster": j.forward_cluster,
             } for j in jobs],
             "history": self.get_history(jobset_id),
         }

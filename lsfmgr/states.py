@@ -87,6 +87,9 @@ class JobRecord:
     start_time: Optional[datetime] = None    # LSF start_time (실행 시작)
     finish_time: Optional[datetime] = None   # LSF finish_time (종료)
     working_dir: Optional[str] = None    # LSF exec_cwd (실제 실행 디렉토리)
+    # LSF MultiCluster(job forwarding) — collect_clusters=True일 때 폴링이 채운다
+    source_cluster: Optional[str] = None     # 제출(로컬) 클러스터
+    forward_cluster: Optional[str] = None    # 포워딩된 실행(원격) 클러스터
     # 제출 경로 — wrapper(커맨드 그대로 실행) vs bsub(lsfmgr 인자 조립).
     # job 단위 속성이다: merge로 wrapper/bsub jobset이 섞여도 재제출 경로를
     # 레코드만 보고 정확히 고를 수 있어야 한다 (resubmit_jobs)

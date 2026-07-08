@@ -241,6 +241,13 @@ js.remove_handler("collect")             # 해제
 > 부하가 부담되면 `LsfJobManager(poll_runtime_updates=False)` 로 끈다(그때
 > `run_time_s` 는 상태 전이 시점에만 반영).
 
+> 참고 — **LSF MultiCluster forwarding**: `LsfJobManager(collect_clusters=True)`
+> 면 폴링이 `bjobs -o` 에 `source_cluster`·`forward_cluster` 필드를 추가해
+> `JobRecord.source_cluster`(제출 클러스터)·`forward_cluster`(포워딩된 실행
+> 클러스터)를 채운다. 기본은 꺼짐(MC 환경 opt-in). MC 필드를 모르는 사이트면
+> 3단 강등(FULL+MC → FULL → CORE)으로 그 필드만 포기하고 `run_time` 등은
+> 유지된다. `jobs_updated` 로 온 레코드에서 바로 읽어 테이블에 표시하면 된다.
+
 > 참고 — **실패 원인 확인 (2경로)**:
 > - **`JobRecord.fail_message`** — `SUBMIT_FAILED`/`RETRY_WAIT` 에서
 >   bsub/wrapper 를 터미널에서 실행했을 때 나왔을 stderr/stdout 원문이

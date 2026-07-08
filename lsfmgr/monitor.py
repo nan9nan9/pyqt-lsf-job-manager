@@ -130,12 +130,16 @@ class JobsetQuerier:
                     or st.start_time != rec.start_time
                     or st.finish_time != rec.finish_time
                     or st.working_dir != rec.working_dir
+                    or st.source_cluster != rec.source_cluster
+                    or st.forward_cluster != rec.forward_cluster
                     or (runtime_updates
                         and st.run_time_s != rec.run_time_s)):
                 update_specs.append((rec.job_key, st.state, unchanged(rec), {
                     "exit_code": st.exit_code, "run_time_s": st.run_time_s,
                     "start_time": st.start_time, "finish_time": st.finish_time,
                     "working_dir": st.working_dir,
+                    "source_cluster": st.source_cluster,
+                    "forward_cluster": st.forward_cluster,
                     "job_id": rec.job_id if rec.job_id is not None
                     else st.job_id}))
 

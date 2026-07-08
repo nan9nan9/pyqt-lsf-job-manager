@@ -56,6 +56,12 @@ class LsfConfig:
 
     poll_interval_s: float = 10.0        # FR-4.4 기본 polling 주기
 
+    #: LSF MultiCluster(job forwarding) 정보 수집 — bjobs -o 에 source_cluster·
+    #: forward_cluster 필드를 추가해 JobRecord.source_cluster/forward_cluster 로
+    #: 채운다. MC 환경에서만 켠다(기본 꺼짐) — 미지원 LSF면 그 필드만 자동
+    #: 강등(FULL+cluster → FULL)돼 run_time 등 다른 확장 필드는 유지된다.
+    collect_clusters: bool = False
+
     #: RUN 중 run_time_s(경과 실행시간) 변화도 폴링 갱신·jobs_updated 발행 대상에
     #: 포함할지. True면 UI가 매 폴링마다 살아있는 job의 runtime을 갱신받는다.
     #: 대신 RUN job 전원이 매 폴링 재전이돼(수만 개 규모에선 폴링 부하↑) 부담되면

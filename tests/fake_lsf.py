@@ -31,6 +31,8 @@ class FakeJob:
     start_time: Optional[str] = None     # bjobs -o 시각 원문
     finish_time: Optional[str] = None
     working_dir: Optional[str] = None    # LSF exec_cwd
+    source_cluster: Optional[str] = None   # MC 제출 클러스터
+    forward_cluster: Optional[str] = None  # MC 포워딩된 실행 클러스터
 
 
 _ARRAY_NAME_RE = re.compile(r"^(.*)\[(\d+)-(\d+)\]$")
@@ -50,6 +52,7 @@ class FakeLsf:
         self.reject_group = False            # -g 지정 시 거부
         self.fail_all_queries = False        # bjobs/bhist 장애 (LSF down)
         self.fail_next_bkill = 0             # 앞으로 N회 bkill rc=255 에러
+        self.reject_clusters = False         # MC 필드(-o source_cluster) 미지원 흉내
 
     # ------------------------------------------------------------------
     def __call__(self, argv, timeout) -> CommandResult:
@@ -145,6 +148,12 @@ class FakeLsf:
         matched = self._select(opts, rest, include_done="-a" in opts)
         if not matched:
             return CommandResult(255, "", "No matching job found\n")
+        fmt = opts.get("-o", "")
+        # MC 필드 미지원 사이트 흉내 — reject_clusters면 그 필드 요청 시 rc=255
+        if self.reject_clusters and "source_cluster" in fmt:
+            return CommandResult(
+                255, "", "bad field name: source_cluster\n")
+        want_cluster = "source_cluster" in fmt          # 포맷이 요청할 때만 추가
         lines = []
         for j in matched:
             jid = (f"{j.job_id}[{j.array_index}]" if j.array_index
@@ -154,8 +163,10 @@ class FakeLsf:
             st_ = j.start_time or "-"
             ft = j.finish_time or "-"
             cwd = j.working_dir or "-"
-            lines.append(
-                f"{jid};{j.stat};{ec};{j.name};{rt};{st_};{ft};{cwd}")
+            row = f"{jid};{j.stat};{ec};{j.name};{rt};{st_};{ft};{cwd}"
+            if want_cluster:
+                row += f";{j.source_cluster or '-'};{j.forward_cluster or '-'}"
+            lines.append(row)
         return CommandResult(0, "\n".join(lines) + "\n", "")
 
     def _select(self, opts, id_args: List[str],
