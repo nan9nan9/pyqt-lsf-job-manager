@@ -85,6 +85,19 @@ class LsfConfig:
         self.workers = max(1, min(64, int(self.workers)))
         if self.chunk_size < 1:
             self.chunk_size = 200
+        # retry_backoff는 여기선 숫자다(>1.0이면 지수 backoff). 같은 이름의
+        # submit()/LsfJobManager() kwarg는 'fixed:N'/'expo:N' 문자열이라 헷갈려
+        # LsfConfig에 문자열을 넘기면, 예전엔 조용히 통과하다 manager 생성 시
+        # str<=float 크래시가 났다 — 이른 시점에 명확한 에러로 잡는다.
+        try:
+            self.retry_backoff = float(self.retry_backoff)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"LsfConfig.retry_backoff는 숫자여야 합니다 "
+                f"(>1.0이면 지수 backoff) — got {self.retry_backoff!r}. "
+                f"'fixed:N'/'expo:N' 문자열 형식은 submit()/LsfJobManager() "
+                f"kwargs 전용입니다 (예: LsfJobManager(retry_backoff='fixed:2'))"
+            ) from None
         if self.kill_status_policy not in ("optimistic", "actual"):
             raise ValueError(
                 "kill_status_policy는 'optimistic' 또는 'actual' "

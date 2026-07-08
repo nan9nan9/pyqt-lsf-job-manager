@@ -95,6 +95,18 @@ def test_progress_throttle_option_validation():
         LsfConfig(progress_min_step_ratio=2.0)      # 0~1 초과
     with pytest.raises(ValueError):
         LsfConfig(progress_min_interval_s=-0.1)      # 음수
+
+
+def test_config_retry_backoff_string_rejected():
+    """LsfConfig.retry_backoff는 숫자 — 'fixed:N' 문자열(Options/kwarg 형식)을
+    잘못 넣으면 예전엔 통과 후 manager 생성 시 str<=float 크래시였다. 이제
+    생성 시점에 명확한 ValueError."""
+    from lsfmgr import LsfConfig
+    with pytest.raises(ValueError):
+        LsfConfig(retry_backoff="fixed:2")
+    # 숫자는 float로 정규화
+    assert LsfConfig(retry_backoff=2).retry_backoff == 2.0
+    assert isinstance(LsfConfig(retry_backoff=1).retry_backoff, float)
     cfg = LsfConfig(progress_min_interval_s=0.5, progress_min_step_ratio=0.1)
     assert cfg.progress_min_interval_s == 0.5
     assert cfg.progress_min_step_ratio == 0.1
