@@ -50,19 +50,19 @@ resubmit `EXIT→SUBMITTING→PEND` ~175ms.
 이를 지배하는 노브는 딱 둘:
 
 ```python
-progress_min_interval_s = 0.1   # ① 진행 시그널 최소 발화 간격(초)
+progress_min_interval_s = 0.5   # ① 진행 시그널 최소 발화 간격(초)
 progress_min_step_ratio = 0.01  # ① 최소 진행 비율(전체의 1%)
 poll_interval_s         = 10    # ② 폴링 주기(5~60)
 ```
 
 **throttle 규칙** — 다음 중 하나라도 만족하면 발화한다:
-`done == total`(**마지막은 항상**) **또는** 마지막 발화 후 `0.1초` 경과 **또는**
-`max(1, total의 1%)` 만큼 진행. → 즉 진행 시그널은 **초당 최대 ~10회 또는 1%
-단위**(먼저 오는 것) + **마지막 100% 1회 보장**. job 수와 무관하게 총 ~100회.
+`done == total`(**마지막은 항상**) **또는** 마지막 발화 후 `0.5초` 경과 **또는**
+`max(1, total의 1%)` 만큼 진행. → 즉 진행 시그널은 **초당 최대 ~2회 또는 1%
+단위**(먼저 오는 것) + **마지막 100% 1회 보장**.
 
 | Signal | 발화 주기 | 지배 |
 |---|---|---|
-| `submit_progress` | **throttled** (≤10/s, 1%씩) + 마지막 `(total,total)` | ① |
+| `submit_progress` | **throttled** (≤2/s, 1%씩) + 마지막 `(total,total)` | ① |
 | `jobs_updated` (제출 중) | submit_progress와 **동일 cadence** (changed 배치) | ① |
 | `jobset_updated` (제출 중) | 위 배치와 함께 | ① |
 | `jobset_updated` (제출 완료) | **1회** (초기 전원 PEND) | 이벤트 |
@@ -159,7 +159,7 @@ class Dashboard(QMainWindow):
 mgr.submit_started.connect(lambda jsid: (
     bar.setValue(0), bar.setVisible(True)))
 
-# 2) 진행 → 값 갱신  (done, total 그대로 옴, 0.1초/1% throttle이라 스팸 없음)
+# 2) 진행 → 값 갱신  (done, total 그대로 옴, 0.5초/1% throttle이라 스팸 없음)
 mgr.submit_progress.connect(lambda jsid, done, total: (
     bar.setMaximum(total), bar.setValue(done)))
 
@@ -169,7 +169,7 @@ mgr.submit_finished.connect(lambda jsid, rpt: bar.setVisible(False))
 
 - `submit_progress(jsid, done, total)`: **done = bsub 완료된 job 수**(성공+실패+취소
   합산), total = 전체. `setMaximum(total)` + `setValue(done)` 이면 끝.
-- **throttle**: 0.1초 또는 1% 변화마다만 발화 → 5000개여도 GUI 안 막힘.
+- **throttle**: 0.5초 또는 1% 변화마다만 발화 → 5000개여도 GUI 안 막힘.
 - **마지막 통지는 반드시 `(total, total)`** → 바가 항상 100%로 끝남.
 
 단일 JobSet이면 (jsid 필터 불필요):
@@ -359,11 +359,11 @@ def _on_jobs(self, jsid, records):
 
 ## 8. 발화 빈도(부하) 조절
 
-모든 progress/`jobs_updated`는 이미 throttle된다(기본 0.1초 OR 1% 진행마다 배치 →
-job 수와 무관하게 ~100회). 더 성기게(부하↓) 하려면 생성 시:
+모든 progress/`jobs_updated`는 이미 throttle된다(기본 0.5초 OR 1% 진행마다 배치).
+더 성기게(부하↓) 하려면 생성 시:
 
 ```python
-mgr = LsfJobManager(progress_min_interval_s=0.25,   # 기본 0.1
+mgr = LsfJobManager(progress_min_interval_s=1.0,    # 기본 0.5
                     progress_min_step_ratio=0.02)   # 기본 0.01
 ```
 

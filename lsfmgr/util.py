@@ -47,7 +47,7 @@ class EmitThrottler:
     마지막(done == total) 통지는 항상 True.
     """
 
-    def __init__(self, min_interval_s: float = 0.1,
+    def __init__(self, min_interval_s: float = 0.5,
                  min_step_ratio: float = 0.01):
         self.min_interval_s = min_interval_s
         self.min_step_ratio = min_step_ratio

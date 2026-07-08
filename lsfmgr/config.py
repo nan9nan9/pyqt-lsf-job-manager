@@ -78,7 +78,7 @@ class LsfConfig:
     #: progress/jobs_updated 발화 빈도 제한 (QT-5) — 이 간격 경과 OR 이 비율만큼
     #: 진행했을 때만 발화(배치). 값이 클수록 시그널이 성겨져 부하↓·반응성↓.
     #: submit progress·jobs_updated 점진 발행·kill progress에 공통 적용.
-    progress_min_interval_s: float = 0.1   # 최소 발화 간격(초), 0이면 시간 제한 없음
+    progress_min_interval_s: float = 0.5   # 최소 발화 간격(초), 0이면 시간 제한 없음
     progress_min_step_ratio: float = 0.01  # 최소 진행 비율(0~1), 0이면 매번
 
     def __post_init__(self):

@@ -67,7 +67,7 @@ js = mgr.submit(jobs, workers=8, max_retry=0, queue="short",
 | `poll_runtime_updates` | True | 생성자 | RUN 중 `run_time_s`(경과시간) 변화도 `jobs_updated`로 live 발행. 수만 개 규모 부하 시 False로 끔 |
 | `submit_finished_on_gate_reject` | True | 생성자 | `pre_submit` 게이트가 False면 `submit_finished`(cancelled=N)도 발화. False면 종료는 `ready_finished(False)`만 |
 | `collect_clusters` | False | 생성자 | LSF MultiCluster forwarding 정보 수집. 켜면 `JobRecord.source_cluster`/`forward_cluster`를 폴링으로 채움(MC 환경 opt-in) |
-| `progress_min_interval_s` | 0.1 | 생성자 | progress/jobs_updated 최소 발화 간격(초). 키우면 부하↓·반응성↓ |
+| `progress_min_interval_s` | 0.5 | 생성자 | progress/jobs_updated 최소 발화 간격(초). 키우면 부하↓·반응성↓ |
 | `progress_min_step_ratio` | 0.01 | 생성자 | progress 최소 진행 비율(0~1). 키우면 발화↓ |
 | `auto_poll` | True | 생성자, submit | submit 후 polling 자동 시작 |
 | `mode` | `"auto"` | submit | `"auto"`/`"array"`/`"bulk"` |
