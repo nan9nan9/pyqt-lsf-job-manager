@@ -363,21 +363,22 @@ class LsfCommand:
                 "-a", "-noheader", "-o", fmt] + selector
             return self._run_query(argv)
 
-        try:
-            res = run(self._bjobs_fmt)
-        except LsfCommandError as e:
-            # 확장 필드/옵션 오류로 보이면 다음 포맷 단계로 영구 강등 후 재시도.
-            # (일시 장애는 강등하지 않고 그대로 전파 — 다음 사이클에 복구)
-            # 3단(FULL+MC → FULL → CORE): MC 필드만 미지원이면 FULL로 한 단계만
-            # 내려가 run_time 등은 유지된다.
-            if (self._bjobs_fmt_idx < len(self._bjobs_formats) - 1
-                    and _looks_like_field_error(e.stderr or str(e))):
-                self._bjobs_fmt_idx += 1
-                log.warning("bjobs -o 확장 필드 미지원으로 판단 — 포맷 강등합니다"
-                            " (→ %s). 원인: %s", self._bjobs_fmt,
-                            (e.stderr or str(e)).strip()[:200])
+        # 확장 필드/옵션 오류로 보이면 다음 포맷 단계로 영구 강등 후 재시도한다.
+        # 강등 후 재시도가 또 필드 오류면 계속 내려간다(FULL+MC → FULL → CORE) —
+        # 한 호출에서 지원 가능한 단계까지 도달해, MC·run_time을 둘 다 거부하는
+        # 사이트도 즉시 살아난다. 일시 장애(필드 오류 아님)는 강등 없이 전파.
+        while True:
+            try:
                 res = run(self._bjobs_fmt)
-            else:
+                break
+            except LsfCommandError as e:
+                if (self._bjobs_fmt_idx < len(self._bjobs_formats) - 1
+                        and _looks_like_field_error(e.stderr or str(e))):
+                    self._bjobs_fmt_idx += 1
+                    log.warning("bjobs -o 확장 필드 미지원 — 포맷 강등 (→ %s). "
+                                "원인: %s", self._bjobs_fmt,
+                                (e.stderr or str(e)).strip()[:200])
+                    continue
                 raise
         if res is None:
             return []

@@ -277,6 +277,7 @@ class BulkSubmitter(QObject):
                     retry_count=0, command=self._item_command(item),
                     submit_time=None, run_time_s=None, start_time=None,
                     finish_time=None, working_dir=None,
+                    source_cluster=None, forward_cluster=None,
                     spec_json=(spec_to_json(item)
                                if isinstance(item, JobSpec) else None))
             except Exception:                    # noqa: BLE001 — CS-5

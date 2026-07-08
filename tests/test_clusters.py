@@ -152,3 +152,40 @@ def test_parse_bjobs_cluster_fields():
     line4 = "1000;RUN;-;js_0"
     (st4,) = LsfCommand._parse_bjobs(line4 + "\n")
     assert st4.source_cluster is None and st4.run_time_s is None
+
+
+# ----------------------------------------------------------------------
+# resubmit — 재제출 시 이전 실행의 클러스터 정보가 초기화된다
+# ----------------------------------------------------------------------
+def test_resubmit_clears_cluster(qtbot, mc_manager, fake_lsf):
+    js = _submit_running(qtbot, mc_manager, fake_lsf, src="seoul", fwd="busan")
+    mc_manager.querier.query(js.id)
+    rec = js.jobs()[0]
+    assert rec.forward_cluster == "busan"
+    # 재제출(살아있으니 kill 후) — 이전 클러스터 흔적이 지워져야
+    with qtbot.waitSignal(mc_manager.submit_finished, timeout=10000):
+        js.resubmit_jobs([rec.job_key])
+    rec = js.jobs()[0]
+    assert rec.state is JobState.PEND
+    assert rec.source_cluster is None
+    assert rec.forward_cluster is None
+
+
+# ----------------------------------------------------------------------
+# 2단 강등 — MC + run_time 둘 다 미지원이면 한 호출에서 CORE까지 (개선)
+# ----------------------------------------------------------------------
+def test_double_field_error_degrades_to_core():
+    from lsfmgr.command import LsfCommand, CommandResult
+
+    def runner(argv, timeout):
+        fmt = argv[argv.index("-o") + 1]
+        if "source_cluster" in fmt:
+            return CommandResult(255, "", "bad field name: source_cluster\n")
+        if "exec_cwd" in fmt:
+            return CommandResult(255, "", "Unknown field: exec_cwd\n")
+        return CommandResult(0, "111;RUN;-;j0\n", "")
+
+    cmd = LsfCommand(LsfConfig(collect_clusters=True), runner)
+    out = cmd.bjobs_by_group("/g")           # 한 호출에서 CORE까지 강등
+    assert cmd._bjobs_fmt is cmd._BJOBS_CORE_FMT
+    assert out[0].job_id == 111
