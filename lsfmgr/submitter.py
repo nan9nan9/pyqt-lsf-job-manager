@@ -188,6 +188,9 @@ class BulkSubmitter(QObject):
     finished = Signal(str, object)            # jobset_id, SubmitReport
     error = Signal(str, str)                  # jobset_id, message
     jobs_changed = Signal(str, list)          # jobset_id, [JobRecord] 전이 배치
+    started = Signal(str)                     # jobset_id — 게이트 통과 후 제출 착수
+    ready_started = Signal(str)               # jobset_id — pre_submit 게이트 시작
+    ready_finished = Signal(str, bool)        # jobset_id, ok — 게이트 종료(True=통과)
     # 내부용 — worker 스레드에서 emit → submitter 소속 스레드에서 QTimer 스케줄
     _retry_requested = Signal(str, str)       # jobset_id, 원장 키
 
@@ -209,33 +212,36 @@ class BulkSubmitter(QObject):
     # public API
     # ------------------------------------------------------------------
     def submit_bulk(self, jobset_id: str, specs: Sequence[JobSpec],
-                    options: Options) -> None:
+                    options: Options, pre_submit=None) -> None:
         """[async→Signal] 대량 submit. CREATED 레코드 생성 후 즉시 반환,
         실제 bsub는 QThreadPool worker에서 수행 (QT-1). 결과는 finished.
 
         lsfmgr 가 bsub 인자(-q/-J/-g …)를 조립하는 경로.
+        pre_submit(commands)->bool: 지정 시 제출 전 게이트 (FR-9).
         """
         self._launch(
             jobset_id, specs, options,
             record_command=lambda spec: spec.command,
             make_task=lambda ctx, key, spec: _SubmitTask(self, ctx, key,
-                                                         spec, 0))
+                                                         spec, 0),
+            pre_submit=pre_submit)
 
     def submit_wrappers(self, jobset_id: str, argvs: Sequence[Sequence[str]],
-                        options: Options) -> None:
+                        options: Options, pre_submit=None) -> None:
         """[async→Signal] wrapper 커맨드 대량 실행 (submit_wrapper 용).
 
         각 argv 를 그대로 subprocess 실행하고 'Job <id>' 를 파싱한다. lsfmgr 가
         인자를 조립하지 않고 argv 를 다루는 점만 submit_bulk 와 다르다.
         record_command은 shlex 인용 보존 — resubmit 시 split 왕복으로 원본
         argv가 복원돼야 한다 (공백 포함 인자 손상 방지).
+        pre_submit(commands)->bool: 지정 시 제출 전 게이트 (FR-9).
         """
         self._launch(
             jobset_id, argvs, options,
             record_command=lambda argv: shlex.join(argv),
             make_task=lambda ctx, key, argv: _WrapperSubmitTask(self, ctx, key,
                                                                argv, 0),
-            via_wrapper=True)
+            via_wrapper=True, pre_submit=pre_submit)
 
     def resubmit_existing(self, jobset_id: str,
                           keyed_items: Sequence, options: Options) -> None:
@@ -332,53 +338,65 @@ class BulkSubmitter(QObject):
     def _launch(self, jobset_id: str, items: Sequence, options: Options,
                 record_command: Callable[[object], str],
                 make_task: Callable[..., QRunnable],
-                via_wrapper: bool = False) -> None:
+                via_wrapper: bool = False, pre_submit=None) -> None:
         """단건 submit 공통 골격 — pool/‏ctx 구성 + CREATED 레코드 선생성 + 발화.
 
         item(JobSpec 또는 argv)마다 make_task(ctx, job_key, item) 로 worker 를
         만들어 병렬 실행한다. 재시도·rate limit·취소는 ctx 를 통해 공유된다.
         via_wrapper는 레코드에 제출 경로를 남긴다 — resubmit_jobs가 job 단위로
         재제출 경로를 복원하는 근거 (merge된 혼합 jobset에서도 정확).
+        pre_submit(commands)->bool 지정 시, 실제 제출 전에 게이트 워커 1개로
+        검사한다 (통과해야 do_launch 진행, FR-9).
         """
+        items = list(items)
         ctx = self._new_context(jobset_id, len(items), options)
 
-        # 레코드 선생성 → 요약 불변식(합계==intended) 즉시 성립. 상태는 곧장
-        # SUBMITTING("제출 중") — submit은 즉시 제출 착수라 표에 SUBMITTING →
-        # PEND로 자연스럽게 보인다(resubmit과 통일). 배치 API 필수 — 건당
-        # insert는 Sqlite에서 caller 스레드 블로킹. worker가 다시 SUBMITTING으로
-        # 두는 건 무해한 재설정, 취소 시 _task_cancelled가 CREATED로 되돌린다.
-        created = self.store.add_jobs([
-            JobRecord(job_id=None, array_index=None, jobset_id=jobset_id,
-                      lsf_job_name=f"{jobset_id}_{idx}",
-                      state=JobState.SUBMITTING, command=record_command(item),
-                      via_wrapper=via_wrapper,
-                      spec_json=(spec_to_json(item)
-                                 if isinstance(item, JobSpec) else None))
-            for idx, item in enumerate(items)])
-        # 초기 SUBMITTING을 즉시 발행 — submit 완료를 안 기다리고 표를 채운다.
-        # (이후 각 job이 PEND/실패로 전이될 때마다 점진 발행)
-        if created:
-            self.jobs_changed.emit(jobset_id, list(created))
-        for idx, item in enumerate(items):
-            ctx.pool.start(make_task(ctx, f"{jobset_id}_{idx}", item))
-        if not items:
-            # 동기 emit 금지 — caller(manager.submit)가 아직 핸들을 만들기
-            # 전이라 finished가 유실된다. 이벤트 루프 한 바퀴 뒤로 지연.
-            QTimer.singleShot(0, lambda: self._finish_if_done(ctx, force=True))
+        def do_launch():
+            # 레코드 선생성 → 요약 불변식(합계==intended). 상태는 곧장
+            # SUBMITTING("제출 중"). 배치 API 필수(Sqlite caller 블로킹 방지).
+            created = self.store.add_jobs([
+                JobRecord(job_id=None, array_index=None, jobset_id=jobset_id,
+                          lsf_job_name=f"{jobset_id}_{idx}",
+                          state=JobState.SUBMITTING,
+                          command=record_command(item), via_wrapper=via_wrapper,
+                          spec_json=(spec_to_json(item)
+                                     if isinstance(item, JobSpec) else None))
+                for idx, item in enumerate(items)])
+            if created:                  # 초기 SUBMITTING 즉시 발행 (표 채움)
+                self.jobs_changed.emit(jobset_id, list(created))
+            for idx, item in enumerate(items):
+                ctx.pool.start(make_task(ctx, f"{jobset_id}_{idx}", item))
+
+        def make_failed(msg):            # 게이트 예외 시 전원 SUBMIT_FAILED 레코드
+            return [
+                JobRecord(job_id=None, array_index=None, jobset_id=jobset_id,
+                          lsf_job_name=f"{jobset_id}_{idx}",
+                          state=JobState.SUBMIT_FAILED,
+                          fail_reason="PRE_SUBMIT_FAILED", fail_message=msg,
+                          command=record_command(item), via_wrapper=via_wrapper,
+                          spec_json=(spec_to_json(item)
+                                     if isinstance(item, JobSpec) else None))
+                for idx, item in enumerate(items)]
+
+        if pre_submit is None:
+            do_launch()
+            if not items:
+                # 동기 emit 금지 — caller(manager.submit)가 아직 핸들을 만들기
+                # 전이라 finished가 유실된다. 이벤트 루프 한 바퀴 뒤로 지연.
+                QTimer.singleShot(0,
+                                  lambda: self._finish_if_done(ctx, force=True))
+            return
+
+        # 게이트 경로 — 워커 1개에서 pre_submit 검사 후 통과 시 do_launch
+        commands = [record_command(item) for item in items]
+        ctx.pool.start(_GateTask(self, ctx, commands, pre_submit,
+                                 do_launch, make_failed))
 
     def submit_array(self, jobset_id: str, spec: ArrayJobSpec,
-                     options: Options) -> None:
-        """[async→Signal] array job submit (FR-1.3) — bsub 1회."""
+                     options: Options, pre_submit=None) -> None:
+        """[async→Signal] array job submit (FR-1.3) — bsub 1회.
+        pre_submit(commands)->bool: 지정 시 제출 전 게이트 (FR-9)."""
         n = spec.size
-        created = self.store.add_jobs([
-            JobRecord(job_id=None, array_index=i, jobset_id=jobset_id,
-                      lsf_job_name=f"{jobset_id}[{i}]",
-                      state=JobState.SUBMITTING,
-                      command=(spec.commands[i - 1] if spec.commands
-                               else (spec.command or "")))
-            for i in range(1, n + 1)])
-        if created:
-            self.jobs_changed.emit(jobset_id, list(created))
         ctx = _SubmitContext(
             jobset_id=jobset_id, total=1,
             max_retry=options.max_retry,
@@ -387,7 +405,36 @@ class BulkSubmitter(QObject):
         ctx.pool.setMaxThreadCount(1)
         with self._ctx_lock:
             self._contexts[jobset_id] = ctx
-        ctx.pool.start(_ArraySubmitTask(self, ctx, spec, 0))
+
+        def do_launch():
+            created = self.store.add_jobs([
+                JobRecord(job_id=None, array_index=i, jobset_id=jobset_id,
+                          lsf_job_name=f"{jobset_id}[{i}]",
+                          state=JobState.SUBMITTING,
+                          command=(spec.commands[i - 1] if spec.commands
+                                   else (spec.command or "")))
+                for i in range(1, n + 1)])
+            if created:
+                self.jobs_changed.emit(jobset_id, list(created))
+            ctx.pool.start(_ArraySubmitTask(self, ctx, spec, 0))
+
+        def make_failed(msg):
+            return [
+                JobRecord(job_id=None, array_index=i, jobset_id=jobset_id,
+                          lsf_job_name=f"{jobset_id}[{i}]",
+                          state=JobState.SUBMIT_FAILED,
+                          fail_reason="PRE_SUBMIT_FAILED", fail_message=msg,
+                          command=(spec.commands[i - 1] if spec.commands
+                                   else (spec.command or "")))
+                for i in range(1, n + 1)]
+
+        if pre_submit is None:
+            do_launch()
+            return
+        commands = (list(spec.commands) if spec.commands
+                    else [spec.command or ""])
+        ctx.pool.start(_GateTask(self, ctx, commands, pre_submit,
+                                 do_launch, make_failed))
 
     def cancel_submit(self, jobset_id: str) -> None:
         """진행 중 submit 중단 (QT-6). 이미 submit된 job은 유지."""
@@ -606,9 +653,103 @@ class BulkSubmitter(QObject):
                  report.cancelled, report.total)
         # 완료된 ctx 정리 — 장수 세션에서 jobset 수만큼 누적되는 것 방지.
         # (다른 사이클이 이미 새 ctx로 교체했으면 그대로 둔다)
+        self._drop_ctx(ctx)
+
+    # ------------------------------------------------------------------
+    # pre_submit 게이트 (FR-9) — 제출 전 단일 워커 검사
+    # ------------------------------------------------------------------
+    def _make_report(self, ctx: _SubmitContext) -> SubmitReport:
+        return SubmitReport(
+            jobset_id=ctx.jobset_id, total=ctx.total,
+            succeeded=ctx.succeeded, failed=ctx.failed,
+            cancelled=ctx.cancelled, retried=len(ctx.retried_keys),
+            duration_s=time.monotonic() - ctx.started_at,
+            fail_reasons=dict(ctx.fail_reasons))
+
+    def _drop_ctx(self, ctx: _SubmitContext) -> None:
         with self._ctx_lock:
             if self._contexts.get(ctx.jobset_id) is ctx:
                 del self._contexts[ctx.jobset_id]
+
+    def _gate_reject(self, ctx: _SubmitContext, finish: bool) -> None:
+        """게이트 False/취소 — 제출하지 않음(레코드 미생성 → 요약은 N CREATED
+        유지). finish=True일 때만 submit_finished(cancelled=N)를 발화한다
+        (False 반환은 config.submit_finished_on_gate_reject, 취소는 항상 True)."""
+        with ctx.lock:
+            if ctx.finished:
+                return
+            ctx.finished = True
+            ctx.cancelled = ctx.total
+            report = self._make_report(ctx)
+            if finish:
+                self.finished.emit(ctx.jobset_id, report)
+        log.info("pre_submit 게이트 거부 %s (finished 발화=%s)",
+                 ctx.jobset_id, finish)
+        self._drop_ctx(ctx)
+
+    def _gate_fail(self, ctx: _SubmitContext, failed_records: list,
+                   msg: str) -> None:
+        """게이트 예외 — 전원 SUBMIT_FAILED 레코드 + error + finished(항상)."""
+        try:
+            created = self.store.add_jobs(failed_records)
+            if created:
+                self.jobs_changed.emit(ctx.jobset_id, list(created))
+        except Exception:                    # noqa: BLE001 — CS-5
+            log.exception("게이트 실패 레코드 생성 실패: %s", ctx.jobset_id)
+        self.error.emit(ctx.jobset_id, f"pre_submit: {msg}")
+        with ctx.lock:
+            if ctx.finished:
+                return
+            ctx.finished = True
+            ctx.failed = ctx.total
+            ctx.fail_reasons["PRE_SUBMIT_FAILED"] = ctx.total
+            report = self._make_report(ctx)
+            self.finished.emit(ctx.jobset_id, report)
+        self._drop_ctx(ctx)
+
+
+class _GateTask(QRunnable):
+    """pre_submit 게이트 워커 (FR-9) — 단일 스레드에서 커맨드 리스트 전체를
+    1회 검사. True면 do_launch()로 실제 제출 착수, False/예외면 거부/실패."""
+
+    def __init__(self, submitter: "BulkSubmitter", ctx: _SubmitContext,
+                 commands: list, pre_submit,
+                 do_launch, make_failed):
+        super().__init__()
+        self.setAutoDelete(True)
+        self.submitter = submitter
+        self.ctx = ctx
+        self.commands = commands
+        self.pre_submit = pre_submit
+        self.do_launch = do_launch
+        self.make_failed = make_failed
+
+    def run(self):
+        sub, ctx = self.submitter, self.ctx
+        sub.ready_started.emit(ctx.jobset_id)
+        if sub._shutdown or ctx.cancel_event.is_set():
+            sub.ready_finished.emit(ctx.jobset_id, False)
+            sub._gate_reject(ctx, finish=True)      # 취소 — 항상 finished
+            return
+        try:
+            ok = bool(self.pre_submit(list(self.commands)))
+        except Exception as e:                       # noqa: BLE001 — CS-5
+            log.exception("pre_submit 게이트 예외: %s", ctx.jobset_id)
+            sub.ready_finished.emit(ctx.jobset_id, False)
+            sub._gate_fail(ctx, self.make_failed(repr(e)[:4000]), repr(e))
+            return
+        sub.ready_finished.emit(ctx.jobset_id, ok)
+        if not ok:
+            sub._gate_reject(
+                ctx, finish=sub.config.submit_finished_on_gate_reject)
+            return
+        if ctx.cancel_event.is_set() or sub._shutdown:
+            sub._gate_reject(ctx, finish=True)       # 통과했지만 그새 취소됨
+            return
+        sub.started.emit(ctx.jobset_id)              # 게이트 통과 → 제출 착수
+        self.do_launch()
+        if ctx.total == 0:                           # 빈 제출 — 직접 마무리
+            sub._finish_if_done(ctx, force=True)
 
 
 class _ArraySubmitTask(QRunnable):

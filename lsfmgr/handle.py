@@ -29,6 +29,8 @@ class JobSet(QObject):
     error_occurred = Signal(str)       # worker 예외 등
     handler_finished = Signal(str, object)   # handler_name, HandlerResult
     job_detail_ready = Signal(str, str)      # job_key, 상세 텍스트 (fetch_job_detail)
+    ready_started = Signal()           # pre_submit 게이트 시작
+    ready_finished = Signal(bool)      # 게이트 종료 (True=통과)
 
     def __init__(self, manager: "LsfJobManager", jobset_id: str):
         super().__init__(manager)

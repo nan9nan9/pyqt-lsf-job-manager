@@ -48,14 +48,16 @@ _CONFIG_KEYS = ("bsub_path", "bjobs_path", "bkill_path", "bhist_path",
                 "arg_max", "default_queue", "chunk_size",
                 "kill_status_policy", "kill_max_retry", "kill_retry_delay_s",
                 "progress_min_interval_s", "progress_min_step_ratio",
-                "poll_runtime_updates")
+                "poll_runtime_updates", "submit_finished_on_gate_reject")
 
 
 class LsfJobManager(QObject):
     """Facade — 컴포넌트 조립 + Facade Signal + JobSet 핸들 발급."""
 
     # --- Low-level Facade Signal (v6 유지, 모두 jobset_id 포함) ---
-    submit_started = Signal(str)               # jobset_id
+    submit_started = Signal(str)               # jobset_id (게이트 통과 후)
+    ready_started = Signal(str)                # jobset_id — pre_submit 게이트 시작
+    ready_finished = Signal(str, bool)         # jobset_id, ok — 게이트 종료(True=통과)
     submit_progress = Signal(str, int, int)    # jobset_id, done, total
     submit_finished = Signal(str, object)      # jobset_id, SubmitReport
     jobset_updated = Signal(str, dict)         # jobset_id, summary
@@ -136,6 +138,9 @@ class LsfJobManager(QObject):
         self.submitter.finished.connect(self.submit_finished)
         self.submitter.error.connect(self.error_occurred)
         self.submitter.jobs_changed.connect(self._relay_jobs_changed)
+        self.submitter.started.connect(self.submit_started)     # 게이트 통과 후
+        self.submitter.ready_started.connect(self.ready_started)
+        self.submitter.ready_finished.connect(self.ready_finished)
 
         self.polling = PollingService(self.querier, parent=self)
         self.polling.updated.connect(self._on_poll_updated)
@@ -163,6 +168,11 @@ class LsfJobManager(QObject):
         self._misc_pool.setMaxThreadCount(2)
         self._shutdown_done = False
 
+        # pre_submit 게이트 경로의 AUTO-1 지연 — 게이트 통과(ready_finished True)
+        # 후에야 polling을 켠다. 게이트가 오래 걸리면 레코드가 없어 AUTO-2가
+        # polling을 조기 중지해 실제 job 전이를 놓치기 때문.
+        self._pending_autopoll: Dict[str, float] = {}
+
         # --- JobSet 핸들 계층 (v7) — Facade Signal 위에 이중 발행 ---
         self._handles: Dict[str, JobSet] = {}
         # 핸들 Signal 이름은 Facade와 동일 — relay 대상 attr명도 그대로
@@ -173,6 +183,9 @@ class LsfJobManager(QObject):
         self.error_occurred.connect(self._handle_relay("error_occurred"))
         self.handler_finished.connect(self._handle_relay("handler_finished"))
         self.job_detail_ready.connect(self._handle_relay("job_detail_ready"))
+        self.ready_started.connect(self._handle_relay("ready_started"))
+        self.ready_finished.connect(self._handle_relay("ready_finished"))
+        self.ready_finished.connect(self._on_ready_finished)
         self.submit_finished.connect(self._h_finished)
         self.submit_finished.connect(self._emit_summary_after_submit)
         self.kill_finished.connect(self._emit_updates_after_kill)
@@ -205,7 +218,9 @@ class LsfJobManager(QObject):
     # High-level submit (v7 §1.1) — JobSet 핸들 반환
     # ------------------------------------------------------------------
     def submit(self, jobs: Union[str, Sequence[Union[str, JobSpec]]],
-               count: Optional[int] = None, **kwargs: Any) -> JobSet:
+               count: Optional[int] = None, *,
+               pre_submit: Optional[Callable[[List[str]], bool]] = None,
+               **kwargs: Any) -> JobSet:
         """[async→Signal] 통합 submit 진입점 — JobSet 핸들 반환.
 
         - list[str] 또는 list[JobSpec] 허용 (str은 JobSpec 자동 변환)
@@ -214,6 +229,11 @@ class LsfJobManager(QObject):
           가능 시 array, 아니면 bulk parallel. mode="array"|"bulk"로 강제 가능
         - AUTO-1: 반환 직전 polling 자동 시작 (auto_poll=False로 해제)
         - 결과는 핸들의 progress/finished/updated/failed Signal로 도착
+        - pre_submit(commands)->bool: 지정 시 실제 제출 전에 커맨드 리스트
+          전체를 단일 worker에서 검사(FR-9). True면 제출 진행, False면 제출
+          안 함. 신호 순서: ready_started → ready_finished(ok) →
+          (ok일 때만) submit_started → … → submit_finished.
+          ※ 콜백은 worker 스레드 실행 — GUI 접근 금지.
         """
         opts = self.resolve_options(kwargs, context="submit")
 
@@ -227,8 +247,8 @@ class LsfJobManager(QObject):
                 jobs = [jobs] * count
             else:
                 spec = ArrayJobSpec(command=jobs, count=count)
-                jsid = self._submit_array_impl(spec, opts)
-                return self._post_submit(jsid, opts)
+                jsid = self._submit_array_impl(spec, opts, pre_submit=pre_submit)
+                return self._post_submit(jsid, opts, gated=pre_submit is not None)
         elif count is not None:
             raise ValueError("count는 단일 command 문자열과만 사용 가능")
 
@@ -250,17 +270,19 @@ class LsfJobManager(QObject):
                                     **common)
             else:                                 # 상이 command → dispatch
                 spec = ArrayJobSpec(commands=tuple(commands), **common)
-            jsid = self._submit_array_impl(spec, opts)
+            jsid = self._submit_array_impl(spec, opts, pre_submit=pre_submit)
         else:
-            jsid = self._submit_bulk_impl(specs, opts)
+            jsid = self._submit_bulk_impl(specs, opts, pre_submit=pre_submit)
 
-        return self._post_submit(jsid, opts)
+        return self._post_submit(jsid, opts, gated=pre_submit is not None)
 
     # ------------------------------------------------------------------
     # submit_wrapper (v8) — wrapper 커맨드로 제출, job_id 기반 관리
     # ------------------------------------------------------------------
     def submit_wrapper(self,
                        commands: Union[str, Sequence[Union[str, Sequence[str]]]],
+                       *,
+                       pre_submit: Optional[Callable[[List[str]], bool]] = None,
                        **kwargs: Any) -> JobSet:
         """[async→Signal] wrapper 커맨드로 job 제출 — JobSet 핸들 반환.
 
@@ -287,16 +309,31 @@ class LsfJobManager(QObject):
         js = self.jobsets.create_jobset(
             len(argvs), label=opts.label, tags=opts.tags,
             description=opts.description, with_attachments=False)
-        self.submit_started.emit(js.jobset_id)
-        self.submitter.submit_wrappers(js.jobset_id, argvs, opts)
-        return self._post_submit(js.jobset_id, opts)
+        if pre_submit is None:                    # 게이트면 통과 후 submitter가 발화
+            self.submit_started.emit(js.jobset_id)
+        self.submitter.submit_wrappers(js.jobset_id, argvs, opts,
+                                       pre_submit=pre_submit)
+        return self._post_submit(js.jobset_id, opts,
+                                 gated=pre_submit is not None)
 
-    def _post_submit(self, jsid: str, opts: Options) -> JobSet:
-        """핸들 발급 + AUTO-1 (submit 반환 직전 polling 자동 시작)."""
+    def _post_submit(self, jsid: str, opts: Options,
+                     gated: bool = False) -> JobSet:
+        """핸들 발급 + AUTO-1 (submit 반환 직전 polling 자동 시작).
+        gated=True(pre_submit 게이트)면 polling을 게이트 통과 후로 미룬다 —
+        _on_ready_finished가 통과 시 시작한다."""
         handle = self.jobset(jsid)
         if opts.auto_poll:                        # AUTO-1
-            self.start_polling(jsid, opts.poll_interval_s)
+            if gated:
+                self._pending_autopoll[jsid] = opts.poll_interval_s
+            else:
+                self.start_polling(jsid, opts.poll_interval_s)
         return handle
+
+    def _on_ready_finished(self, jsid: str, ok: bool) -> None:
+        """pre_submit 게이트 종료 — 통과 시 미뤄둔 AUTO-1 polling 시작."""
+        iv = self._pending_autopoll.pop(jsid, None)
+        if ok and iv is not None:
+            self.start_polling(jsid, iv)
 
     def jobset(self, jobset_id: str) -> JobSet:
         """[sync, snapshot] JobSet 핸들 재획득 (복원/검색 결과에서)."""
@@ -356,16 +393,20 @@ class LsfJobManager(QObject):
 
     # --- 내부 submit 구현 (High/Low 공유) ---
     def _submit_bulk_impl(self, specs: List[JobSpec], opts: Options,
-                          jobset_id: Optional[str] = None) -> str:
+                          jobset_id: Optional[str] = None,
+                          pre_submit=None) -> str:
         js = self.jobsets.create_jobset(
             len(specs), label=opts.label, tags=opts.tags,
             description=opts.description, jobset_id=jobset_id)
-        self.submit_started.emit(js.jobset_id)
-        self.submitter.submit_bulk(js.jobset_id, specs, opts)
+        if pre_submit is None:                    # 게이트면 통과 후 submitter가 발화
+            self.submit_started.emit(js.jobset_id)
+        self.submitter.submit_bulk(js.jobset_id, specs, opts,
+                                   pre_submit=pre_submit)
         return js.jobset_id
 
     def _submit_array_impl(self, spec: ArrayJobSpec, opts: Options,
-                           jobset_id: Optional[str] = None) -> str:
+                           jobset_id: Optional[str] = None,
+                           pre_submit=None) -> str:
         js = self.jobsets.create_jobset(
             spec.size, label=opts.label, tags=opts.tags,
             description=opts.description, jobset_id=jobset_id)
@@ -373,8 +414,10 @@ class LsfJobManager(QObject):
         self.store.update_jobset(
             _with_pattern(self.store.get_jobset(js.jobset_id),
                           f"{js.jobset_id}[*]"))
-        self.submit_started.emit(js.jobset_id)
-        self.submitter.submit_array(js.jobset_id, spec, opts)
+        if pre_submit is None:
+            self.submit_started.emit(js.jobset_id)
+        self.submitter.submit_array(js.jobset_id, spec, opts,
+                                    pre_submit=pre_submit)
         return js.jobset_id
 
     # ------------------------------------------------------------------

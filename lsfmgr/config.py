@@ -62,6 +62,13 @@ class LsfConfig:
     #: False로 끈다 — 그때 run_time_s는 상태 전이(RUN→DONE 등) 시점에만 반영된다.
     poll_runtime_updates: bool = True
 
+    #: pre_submit 게이트가 False를 반환(제출 거부)했을 때 submit_finished를
+    #: 발화할지. True(기본)면 게이트 거부도 submit_finished(cancelled=N)로
+    #: 마무리해 기존 완료 핸들러 하나로 다 받는다. False면 발화하지 않고
+    #: 종료 통지는 ready_finished(False)만으로 한다. (게이트 예외는 이 옵션과
+    #: 무관하게 항상 error_occurred + submit_finished(failed=N)로 보고한다)
+    submit_finished_on_gate_reject: bool = True
+
     #: progress/jobs_updated 발화 빈도 제한 (QT-5) — 이 간격 경과 OR 이 비율만큼
     #: 진행했을 때만 발화(배치). 값이 클수록 시그널이 성겨져 부하↓·반응성↓.
     #: submit progress·jobs_updated 점진 발행·kill progress에 공통 적용.

@@ -65,6 +65,7 @@ js = mgr.submit(jobs, workers=8, max_retry=0, queue="short",
 | `rate_limit_per_s` | 없음 | 생성자, submit | 초당 bsub 상한 (LSF 부하 보호) |
 | `poll_interval_s` | 10 | 생성자, submit | polling 주기 (5~60) |
 | `poll_runtime_updates` | True | 생성자 | RUN 중 `run_time_s`(경과시간) 변화도 `jobs_updated`로 live 발행. 수만 개 규모 부하 시 False로 끔 |
+| `submit_finished_on_gate_reject` | True | 생성자 | `pre_submit` 게이트가 False면 `submit_finished`(cancelled=N)도 발화. False면 종료는 `ready_finished(False)`만 |
 | `progress_min_interval_s` | 0.1 | 생성자 | progress/jobs_updated 최소 발화 간격(초). 키우면 부하↓·반응성↓ |
 | `progress_min_step_ratio` | 0.01 | 생성자 | progress 최소 진행 비율(0~1). 키우면 발화↓ |
 | `auto_poll` | True | 생성자, submit | submit 후 polling 자동 시작 |
@@ -107,6 +108,31 @@ js = mgr.submit_wrapper([
 - wrapper는 결국 `bsub`를 호출하고 그 `Job <id>` 출력·exit code를 그대로 통과시키면
   됩니다. 재시도는 **비정상 종료(non-zero)만** 대상입니다.
 - 모니터링·kill용 `bjobs`/`bkill`은 실제 LSF면 PATH, mocklsf면 경로를 지정합니다.
+
+#### 제출 전 전처리 게이트 (`pre_submit`)
+
+실제 제출 전에 **커맨드 리스트 전체를 한 번 검사/준비**하고 통과할 때만
+제출을 진행하려면 `submit`/`submit_wrapper`에 `pre_submit` 콜백을 넘깁니다.
+콜백은 **단일 worker 스레드**에서 1회 실행되고 `bool`을 반환합니다.
+
+```python
+def prepare(commands: list[str]) -> bool:      # 실행될 커맨드 문자열 목록
+    stage_input_files(commands)                # 일괄 준비 (부수효과)
+    return all_inputs_ready(commands)          # True면 제출, False면 제출 안 함
+
+js = mgr.submit_wrapper([...], pre_submit=prepare)
+```
+
+신호 순서는 **`ready_started` → `ready_finished(ok)` → (ok=True일 때만)
+`submit_started` → … → `submit_finished`**. 게이트가 `False`면 제출하지 않고
+job은 `CREATED`로 남습니다(기본은 `submit_finished(cancelled=N)`도 발화 —
+`LsfJobManager(submit_finished_on_gate_reject=False)`로 끄면 종료 통지는
+`ready_finished(False)`만). 콜백이 **예외**를 던지면 전원 `SUBMIT_FAILED`
+(`fail_reason="PRE_SUBMIT_FAILED"`, `fail_message`에 예외 원문) + `error_occurred`
++ `submit_finished(failed=N)`로 보고합니다.
+
+> ⚠️ 콜백은 **worker 스레드**에서 돕니다 — Qt 위젯 등 **GUI 객체 접근 금지**.
+> 재시도 시 재실행되므로 부수효과는 **멱등**이어야 합니다.
 
 > 작성 규칙·실행 방식(멀티 프로세스)·검증·트러블슈팅, 그리고 lsfmgr가 직접 bsub를
 > 조립하는 저수준 `submit`(+`bsub_path`)은 **[`docs/lsfmgr.md`](docs/lsfmgr.md)**

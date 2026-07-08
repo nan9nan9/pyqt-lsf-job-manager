@@ -68,7 +68,9 @@ Signal 은 두 계층이다.
 
 | Manager Signal | 시그니처(인자) | 이 Signal 을 발생시키는(트리거) 함수 |
 |---|---|---|
-| `submit_started` | `(jobset_id)` | `submit` · `submit_wrapper` · `submit_bulk` · `submit_array` · `resubmit_jobs` — 제출 시작 즉시 |
+| `ready_started` | `(jobset_id)` | `pre_submit` 게이트 시작 (지정 시에만) |
+| `ready_finished` | `(jobset_id, ok)` | `pre_submit` 게이트 종료. `ok=True`면 이어서 `submit_started` |
+| `submit_started` | `(jobset_id)` | `submit` · `submit_wrapper` · `submit_bulk` · `submit_array` · `resubmit_jobs` — 제출 시작 즉시 (`pre_submit` 지정 시엔 게이트 통과 후) |
 | `submit_progress` | `(jobset_id, done, total)` | 위 submit 계열 · `resubmit_jobs` — 제출 진행 중(throttled) |
 | `submit_finished` | `(jobset_id, SubmitReport)` | 위 submit 계열 · `resubmit_jobs` 완료 · `cancel_submit`(중단 마무리) |
 | `jobset_updated` | `(jobset_id, summary)` | **submit 완료(초기 PEND)** · `start_polling`(주기) · `query_once`(1회) · `reconcile` — 상태 갱신 |
