@@ -18,7 +18,7 @@ from .handle import JobSet
 from .handlers import HandlerContext, HandlerResult
 from .manager import LsfJobManager
 from .options import Options
-from .reports import KillReport, ReconcileReport, SubmitReport
+from .reports import KillReport, ReconcileReport, SubmitProgress, SubmitReport
 from .states import JobRecord, JobSetRecord, JobState
 from .store import InMemoryStore, JobSetStore, SqliteStore
 
@@ -39,6 +39,7 @@ __all__ = [
     "InMemoryStore",
     "SqliteStore",
     "SubmitReport",
+    "SubmitProgress",
     "KillReport",
     "ReconcileReport",
     "HandlerContext",

@@ -13,6 +13,7 @@ from .states import JobRecord, JobState
 
 if TYPE_CHECKING:
     from .manager import LsfJobManager
+    from .reports import SubmitProgress
 
 
 class JobSet(QObject):
@@ -231,6 +232,24 @@ class JobSet(QObject):
         True — 더 진행할 것이 없는 상태. is_active의 반대.
         (job이 하나도 없는 빈 JobSet도 '진행 중인 것 없음'이라 inactive=True)"""
         return not self.is_active
+
+    @property
+    def is_submitting(self) -> bool:
+        """[sync] 이 JobSet에 진행 중인 submit/resubmit이 있는지.
+        대량 제출은 백그라운드(worker 스레드)라 submit()은 즉시 반환한다 —
+        진행 dialog를 닫고 딴 작업을 하다가도, 아직 제출 중인지 아무 때나
+        이걸로 확인한다. (jobs의 PEND/RUN이 아니라 '제출 작업 자체'의 진행 여부)"""
+        self._check_open()
+        return self._manager.is_submitting(self._jobset_id)
+
+    @property
+    def submit_state(self) -> "Optional[SubmitProgress]":
+        """[sync] 진행 중 submit의 실시간 스냅샷(done/total/성공/실패/취소) —
+        진행 중이 아니면 None. submit_progress Signal을 놓친 뒤(백그라운드로
+        돌려놓고 dialog를 닫은 뒤) 상태 패널을 다시 그릴 때 pull로 조회한다.
+        완료 후 최종 결과는 summary / submit_finished(SubmitReport)로 본다."""
+        self._check_open()
+        return self._manager.submit_snapshot(self._jobset_id)
 
     @property
     def failed_jobs(self) -> List[JobRecord]:

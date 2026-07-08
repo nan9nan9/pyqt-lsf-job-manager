@@ -28,7 +28,7 @@ from .errors import SubmitError
 from .jobset_core import JobSetManager
 from .options import Options
 from .qt import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
-from .reports import SubmitReport
+from .reports import SubmitProgress, SubmitReport
 from .states import JobRecord, JobState
 from .store.base import JobSetStore
 from .util import EmitThrottler, TokenBucketLimiter
@@ -316,6 +316,21 @@ class BulkSubmitter(QObject):
         with self._ctx_lock:
             ctx = self._contexts.get(jobset_id)
         return ctx is not None and not ctx.finished
+
+    def progress_snapshot(self, jobset_id: str) -> Optional["SubmitProgress"]:
+        """진행 중 submit의 실시간 스냅샷 — 없거나 이미 끝났으면 None.
+        submit_progress Signal을 못 받은 시점에도 현재 진행을 pull로 조회한다."""
+        with self._ctx_lock:
+            ctx = self._contexts.get(jobset_id)
+        if ctx is None:
+            return None
+        with ctx.lock:                       # 카운터 원자적 읽기
+            if ctx.finished:
+                return None
+            return SubmitProgress(
+                jobset_id=jobset_id, done=ctx.done, total=ctx.total,
+                succeeded=ctx.succeeded, failed=ctx.failed,
+                cancelled=ctx.cancelled)
 
     def _new_context(self, jobset_id: str, total: int,
                      options: Options) -> _SubmitContext:

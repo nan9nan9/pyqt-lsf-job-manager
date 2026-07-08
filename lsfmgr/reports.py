@@ -24,6 +24,32 @@ class SubmitReport:
 
 
 @dataclass(frozen=True)
+class SubmitProgress:
+    """진행 중 submit/resubmit의 실시간 스냅샷 — 아무 때나 조회 가능(pull).
+
+    submit_progress Signal(push)의 조회 버전이다. 대량 제출을 백그라운드로
+    돌려놓고 진행 dialog를 닫은 뒤(딴 작업), 나중에 상태 패널을 다시 열어
+    현재 진행을 그릴 때 쓴다. 제출이 끝나면 스냅샷은 None이 되고(핸들의
+    submit_state가 None 반환) 최종 결과는 summary / SubmitReport로 본다.
+    """
+    jobset_id: str
+    done: int                # 처리 완료 단위 수 (성공+실패+취소)
+    total: int               # 전체 단위 수
+    succeeded: int
+    failed: int
+    cancelled: int
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.total - self.done)
+
+    @property
+    def fraction(self) -> float:
+        """0.0~1.0 진행률 (total=0이면 1.0)."""
+        return (self.done / self.total) if self.total else 1.0
+
+
+@dataclass(frozen=True)
 class KillReport:
     """kill_finished Signal로 전달되는 결과."""
     jobset_id: str

@@ -35,7 +35,7 @@ from .options import (
 )
 from .qt import QCoreApplication, QObject, QRunnable, QThreadPool, QTimer, Signal
 from .resubmit import ResubmitCoordinator, ResubmitPlan
-from .reports import ReconcileReport
+from .reports import ReconcileReport, SubmitProgress
 from .states import JobRecord, JobSetRecord, JobState
 from .store.base import JobSetStore
 from .store.memory import InMemoryStore
@@ -391,6 +391,21 @@ class LsfJobManager(QObject):
         submitter ctx가 없어 cancel이 조용히 증발하는 창이 있었다)."""
         self._resubmitter.cancel(jobset_id)
         self.submitter.cancel_submit(jobset_id)
+
+    def is_submitting(self, jobset_id: str) -> bool:
+        """[sync] 이 jobset에 진행 중인 submit/resubmit이 있는지.
+        대량 제출을 백그라운드로 돌려놓고 진행 dialog를 닫은 뒤에도, 아직
+        도는 중인지 아무 때나 확인한다."""
+        return (self.submitter.is_active(jobset_id)
+                or self._resubmitter.is_active(jobset_id))
+
+    def submit_snapshot(self, jobset_id: str) -> "Optional[SubmitProgress]":
+        """[sync] 진행 중 submit의 실시간 스냅샷 (done/total/성공/실패/취소) —
+        없거나 이미 끝났으면 None. submit_progress Signal을 놓친 시점에도 현재
+        진행을 pull로 조회한다(백그라운드 제출 상태 패널 재구성용).
+        resubmit의 kill 단계처럼 아직 submit ctx가 없는 구간에선 None이지만
+        is_submitting은 True일 수 있다(준비 중)."""
+        return self.submitter.progress_snapshot(jobset_id)
 
     # --- 내부 submit 구현 (High/Low 공유) ---
     def _submit_bulk_impl(self, specs: List[JobSpec], opts: Options,

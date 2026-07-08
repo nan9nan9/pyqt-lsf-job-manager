@@ -253,6 +253,32 @@ js.id                      # jobset_id 문자열 (로그/저장용)
 >     js.resubmit_jobs([r.job_key for r in js.jobs()])
 > ```
 
+> **대량 제출을 백그라운드로 돌리기** (`is_submitting` / `submit_state`) —
+> `submit()`은 **즉시 반환**합니다. 실제 `primesim_sub`→`bsub`→JOBID 캡처는
+> 전부 worker 스레드에서 돌아 **GUI를 막지 않습니다**. 그래서 1000개+ 제출이
+> 오래 걸려도 진행 dialog를 **modeless로 띄우거나 아예 닫고 딴 작업**을 해도
+> 됩니다 — 제출의 소유자는 매니저지 dialog가 아니라서, `js` 핸들만 들고
+> 있으면 계속 진행됩니다. 진행 dialog(`QProgressDialog`)는 `submit_progress`
+> Signal에 연결하되 **`setModal(False)`** 로 두고, 사용자가 닫아도 제출은
+> 계속 두면 됩니다. 나중에 상태 패널을 다시 열 때는 그동안 놓친 Signal 대신
+> **pull로 현재 진행을 조회**합니다:
+> ```python
+> js = mgr.submit(cmds)              # 즉시 반환 — 아래는 언제든 호출 가능
+> if js.is_submitting:               # 아직 제출 중?
+>     s = js.submit_state            # SubmitProgress | None
+>     bar.setValue(int(s.fraction * 100))          # done/total 진행률
+>     label.setText(f"{s.done}/{s.total} "
+>                   f"(성공 {s.succeeded} / 실패 {s.failed})")
+> ```
+> `submit_state`는 진행 중이 아니면 `None`이고, 완료 후 최종 결과는
+> `submit_finished(SubmitReport)` 또는 `js.summary`로 봅니다.
+> `is_submitting`은 제출/재제출이 도는 동안 True입니다(`jobs`의 PEND/RUN이
+> 아니라 **제출 작업 자체**의 진행 여부).
+> > 앱을 닫으면(`shutdown`) 진행 중이던 bsub는 완료까지 기다리되 아직 제출
+> > 안 된 몫은 취소됩니다. 앱 재시작 후에도 이어서 추적하려면
+> > `persistent=True`(SQLite)로 두고 재시작 시 `list_orphan_jobsets()` →
+> > `recover_jobset()`으로 복원하세요 (§6).
+
 > **실패 원인 표시** — 두 경로로 확인합니다.
 > - **SUBMIT_FAILED/RETRY_WAIT**: `rec.fail_message`에 bsub/wrapper 실행의
 >   stderr/stdout(터미널에서 봤을 메시지)이 자동 저장됩니다. 재시도 성공/
