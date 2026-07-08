@@ -22,6 +22,12 @@ def _env_int(name, default):
         return default
 
 
+def _env_list(name):
+    """콤마 구분 환경변수를 리스트로. 없으면 빈 리스트."""
+    raw = os.environ.get(name, "").strip()
+    return [c.strip() for c in raw.split(",") if c.strip()]
+
+
 # MockLSF 상태 파일(DB, PID, job 출력)이 모이는 홈 디렉토리.
 MOCKLSF_HOME = os.environ.get(
     "MOCKLSF_HOME", os.path.join(os.path.expanduser("~"), ".mocklsf")
@@ -39,8 +45,29 @@ JOB_OUT_DIR = os.path.join(MOCKLSF_HOME, "jobout")
 # ---------------------------------------------------------------------------
 
 # 클러스터/마스터 호스트 이름. 실제 LSF 출력의 FROM_HOST 등에 쓰인다.
+# MOCKLSF_CLUSTER 는 "이 프로세스의 클러스터 컨텍스트"이기도 하다 — forward job
+# kill 시 그 클러스터 cshrc 를 source 하면 이 값이 forward_cluster 로 바뀌어
+# bkill 이 그 job 에 닿는다(아래 MultiCluster 절 참고).
 CLUSTER_NAME = os.environ.get("MOCKLSF_CLUSTER", "mockcluster")
 MASTER_HOST = os.environ.get("MOCKLSF_MASTER", "mockmaster")
+
+# ---------------------------------------------------------------------------
+# MultiCluster (job forwarding) 시뮬레이션
+# ---------------------------------------------------------------------------
+# forward 대상 원격 클러스터 이름들 (콤마 구분). 비어 있으면 MC 꺼짐(포워딩 없음).
+#   예: MOCKLSF_FORWARD_CLUSTERS="cluster_b,cluster_c"
+FORWARD_CLUSTERS = _env_list("MOCKLSF_FORWARD_CLUSTERS")
+# job 하나가 forward 될 확률(0~1). MC 켜졌을 때만 의미. 기본 0.5.
+FORWARD_RATE = _env_float("MOCKLSF_FORWARD_RATE",
+                          0.5 if FORWARD_CLUSTERS else 0.0)
+# forward job kill 용 클러스터 env(cshrc) 파일 디렉토리 — source 시 그 프로세스의
+# MOCKLSF_CLUSTER 를 해당 클러스터로 바꾼다(bkill 이 forward job 에 닿게).
+CLUSTER_ENV_DIR = os.path.join(MOCKLSF_HOME, "clusterenv")
+
+
+def cluster_env_path(cluster):
+    """forward 클러스터 <cluster> 의 cshrc 경로 (lsfmgr envpath 로 넘길 값)."""
+    return os.path.join(CLUSTER_ENV_DIR, f"{cluster}.cshrc")
 
 # 실행 호스트와 각 호스트의 슬롯(동시 실행 가능한 job 수).
 # 총 슬롯 수가 동시 실행량을 제한하므로, 수천 개를 던지면 자연스럽게 PEND 가 쌓인다.
@@ -113,6 +140,20 @@ FIRST_JOB_ID = _env_int("MOCKLSF_FIRST_JOB_ID", 1000)
 
 
 def ensure_home():
-    """홈/출력 디렉토리를 만든다 (없으면 생성)."""
+    """홈/출력 디렉토리를 만든다 (없으면 생성). MC 켜져 있으면 각 forward
+    클러스터의 cshrc(env 파일)도 생성한다 — lsfmgr 가 kill 시 source 한다."""
     os.makedirs(MOCKLSF_HOME, exist_ok=True)
     os.makedirs(JOB_OUT_DIR, exist_ok=True)
+    if FORWARD_CLUSTERS:
+        os.makedirs(CLUSTER_ENV_DIR, exist_ok=True)
+        for cluster in FORWARD_CLUSTERS:
+            path = cluster_env_path(cluster)
+            if not os.path.exists(path):
+                # tcsh 로 source 된다 (lsfmgr: tcsh -c "source <path> && bkill").
+                # MOCKLSF_HOME 등은 부모 env 그대로 두고 클러스터 컨텍스트만 바꾼다.
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(
+                        f"# MockLSF {cluster} 클러스터 env — source 하면 이\n"
+                        f"# 프로세스의 bkill 이 {cluster} 로 forward된 job 을\n"
+                        f"# 죽일 수 있다(실제 MC 의 cshrc.lsf 흉내).\n"
+                        f"setenv MOCKLSF_CLUSTER {cluster}\n")

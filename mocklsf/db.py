@@ -44,7 +44,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     num_cpus        INTEGER NOT NULL DEFAULT 1,
     requested_hosts TEXT NOT NULL DEFAULT '',
     proj            TEXT NOT NULL DEFAULT 'default',
-    job_group       TEXT NOT NULL DEFAULT ''
+    job_group       TEXT NOT NULL DEFAULT '',
+    source_cluster  TEXT NOT NULL DEFAULT '',
+    forward_cluster TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_jobid ON jobs(job_id);
@@ -74,6 +76,7 @@ _COLUMNS = [
     "start_time", "finish_time", "pend_secs", "run_secs", "planned_outcome",
     "exit_code", "suspend_at", "suspend_secs", "susp_since", "num_cpus",
     "requested_hosts", "proj", "job_group", "cwd",
+    "source_cluster", "forward_cluster",
 ]
 
 
@@ -95,7 +98,7 @@ class Database:
         self.conn.executescript(_SCHEMA)
         # 이전 버전 DB 마이그레이션: 누락 컬럼이 있으면 추가한다.
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(jobs)")}
-        for name in ("job_group", "cwd"):
+        for name in ("job_group", "cwd", "source_cluster", "forward_cluster"):
             if name not in cols:
                 try:
                     self.conn.execute(
@@ -228,6 +231,8 @@ class Database:
         j.proj = row["proj"]
         j.job_group = row["job_group"]
         j.cwd = row["cwd"]
+        j.source_cluster = row["source_cluster"]
+        j.forward_cluster = row["forward_cluster"]
         j.row_id = row["row_id"]
         return j
 

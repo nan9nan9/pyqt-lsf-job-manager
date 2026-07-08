@@ -181,6 +181,12 @@ def _field_value(job: Job, name: str) -> str:
         return str(job.num_cpus)
     if name == "proj_name":
         return job.proj
+    if name == "source_cluster":
+        # MultiCluster: 제출(로컬) 클러스터. 없으면 '-'.
+        return job.source_cluster or "-"
+    if name == "forward_cluster":
+        # forward 된 실행(원격) 클러스터. 로컬 실행이면 '-' (판별 기준).
+        return job.forward_cluster or "-"
     # 미지원 필드는 '-' (실제 LSF 도 알 수 없는 필드는 빈값 처리).
     return "-"
 

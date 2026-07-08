@@ -106,6 +106,43 @@ bjobs -a -json -o "jobid stat exec_host"
 | `MOCKLSF_SUSPEND_RATE` | 0.05 | 실행 중 시스템 suspend 확률 |
 | `MOCKLSF_SCHED_INTERVAL` | 0.5 | 스케줄러 tick 주기(초) |
 | `MOCKLSF_CLEAN_PERIOD` | 3600 | 완료 job 보존 기간(초). 초과 시 bjobs 에서 purge(→bhist 로만 조회). 작게 주면 bhist fallback 재현 |
+| `MOCKLSF_FORWARD_CLUSTERS` | (없음) | MultiCluster forward 대상 원격 클러스터(콤마 구분). 설정 시 MC 켜짐 |
+| `MOCKLSF_FORWARD_RATE` | 0.5 | job 하나가 forward 될 확률(0~1). MC 켜졌을 때만 |
+
+### MultiCluster (job forwarding) 흉내
+
+`MOCKLSF_FORWARD_CLUSTERS`를 주면 제출된 job 중 일부(`MOCKLSF_FORWARD_RATE`)가
+그 원격 클러스터로 **forward**된 것처럼 동작한다. 실제 LSF MC 환경과 lsfmgr 의
+`envpath` kill 을 실제 LSF 없이 재현·검증할 수 있다.
+
+```bash
+export MOCKLSF_FORWARD_CLUSTERS="cluster_b,cluster_c"
+export MOCKLSF_FORWARD_RATE=1.0          # 전부 forward (데모용)
+```
+
+- **bjobs**: `bjobs -o "source_cluster forward_cluster"` 에 값이 나온다 —
+  forward 된 job 은 `forward_cluster` 가 그 클러스터, 아니면 `-`.
+  `source_cluster` 는 로컬 클러스터명(로컬 job 도 채워짐 → **판별은
+  `forward_cluster` 로**).
+- **bkill (핵심)**: forward 된 job 은 **그냥 `bkill` 로는 안 죽는다**
+  (`... forwarded to cluster <X> — source its cluster env to kill`, exit 255).
+  그 클러스터의 env(cshrc)를 source 해야 죽는다 — 실제 MC 의 문제 그대로다.
+  각 클러스터 cshrc 는 `$MOCKLSF_HOME/clusterenv/<cluster>.cshrc` 에 자동
+  생성되며(`setenv MOCKLSF_CLUSTER <cluster>`), lsfmgr 의 `envpath` 로 넘긴다:
+  ```python
+  # forward_cluster 별로 분류해 각 cshrc 를 source 한 bkill
+  from mocklsf import config as mockcfg
+  by_cluster = {}
+  for r in js.jobs():
+      by_cluster.setdefault(r.forward_cluster, []).append(r.job_key)
+  for cluster, keys in by_cluster.items():
+      if cluster:                                  # forward 된 job
+          js.kill_jobs(keys, envpath=mockcfg.cluster_env_path(cluster))
+      else:                                        # 로컬 job
+          js.kill_jobs(keys)
+  ```
+  lsfmgr 는 이때 `tcsh -c "source <cshrc> && set noglob && exec bkill <ids>"`
+  를 실행하고, 그 컨텍스트에서 mocklsf bkill 이 forward job 에 닿아 죽인다.
 
 ### 완료 job purge (MBD_CLEAN_PERIOD 흉내)
 

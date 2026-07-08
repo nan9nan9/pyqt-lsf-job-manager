@@ -341,6 +341,23 @@ def cmd_bjobs(argv: List[str]) -> int:
 # bkill
 # ===========================================================================
 
+def _kill_reachable(job: Job) -> bool:
+    """이 bkill 프로세스의 클러스터 컨텍스트(MOCKLSF_CLUSTER=config.CLUSTER_NAME)
+    에서 이 job 을 죽일 수 있는지 (MultiCluster 흉내).
+
+    - 클러스터 정보 없는 job(MC 미사용) → 항상 로컬에서 kill 가능(기존 동작).
+    - forward 된 job → 그 클러스터 env(cshrc)를 source 해서 컨텍스트가
+      forward_cluster 와 같아야 죽는다. 안 그러면 닿지 못한다(실제 문제 재현).
+    - 로컬 job → 로컬(source) 클러스터 컨텍스트에서만.
+    """
+    if not job.source_cluster and not job.forward_cluster:
+        return True
+    ctx = config.CLUSTER_NAME
+    if job.forward_cluster:
+        return ctx == job.forward_cluster
+    return ctx == job.source_cluster
+
+
 def cmd_bkill(argv: List[str]) -> int:
     db = Database()
     specs = []
@@ -456,6 +473,15 @@ def cmd_bkill(argv: List[str]) -> int:
             # 알림을 내지만, 이를 '실패'로 취급하면 array/집합 kill 에서 일부
             # element 만 먼저 끝나도 전체가 오류가 된다. 알림만 내고 성공 유지.
             _err(f"Job <{j.display_id}>: Job has already finished")
+            continue
+        if not _kill_reachable(j):
+            # forward 된 job 을 그 클러스터 env 없이 kill 시도 — 닿지 못한다.
+            # lsfmgr 가 '해소됨(resolved)'으로 오인하지 않게 no-match/finished
+            # 계열 문구를 피한 에러를 낸다(그래야 재시도·미확인으로 남는다).
+            # 해법: 그 클러스터 cshrc 를 source 한 뒤(bkill) 다시 시도.
+            _err(f"Job <{j.display_id}>: forwarded to cluster "
+                 f"<{j.forward_cluster}> — source its cluster env to kill")
+            rc = 255
             continue
         j.stat = EXIT
         j.exit_code = 130

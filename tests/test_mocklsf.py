@@ -390,3 +390,95 @@ def test_bkill_name_scoped_zero():
         by_name = {j.job_name: j.stat for j in dbmod.Database().all_jobs()}
         assert by_name["jobB"] == "EXIT"    # 이름 매칭 job 만 종료
         assert by_name["jobA"] == "PEND"    # 다른 이름은 생존
+
+
+# ---------------------------------------------------------------------------
+# MultiCluster (job forwarding) 시뮬레이션
+# ---------------------------------------------------------------------------
+def _pop_mc_env():
+    for k in ("MOCKLSF_FORWARD_CLUSTERS", "MOCKLSF_FORWARD_RATE",
+              "MOCKLSF_CLUSTER"):
+        os.environ.pop(k, None)
+
+
+def test_mc_forward_assignment_and_bjobs_fields():
+    """MC 켜고 FORWARD_RATE=1 → 모든 job에 source/forward_cluster 배정 +
+    bjobs -o 에 노출."""
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["MOCKLSF_FORWARD_CLUSTERS"] = "cluster_b,cluster_c"
+        os.environ["MOCKLSF_FORWARD_RATE"] = "1.0"
+        try:
+            config, submit, scheduler, dbmod = _fresh_env(tmp)
+            from mocklsf import formats
+            database = dbmod.Database()
+            opts, cmd = submit.parse_args(["sleep", "30"])
+            jid = database.next_job_id()
+            jobs, _, _ = submit.build_jobs(jid, opts, cmd)
+            database.insert_jobs(jobs)
+            scheduler.Scheduler(database).tick(time.time())   # → RUN
+            j = database.all_jobs()[0]
+            assert j.source_cluster == config.CLUSTER_NAME     # 로컬
+            assert j.forward_cluster in ("cluster_b", "cluster_c")
+            # bjobs -o 필드
+            line = formats.custom_format(
+                [j], "jobid stat source_cluster forward_cluster",
+                delimiter=";", noheader=True)
+            assert f";{j.source_cluster};{j.forward_cluster}" in line
+        finally:
+            _pop_mc_env()
+
+
+def test_mc_off_no_cluster_fields():
+    """MC 꺼짐(기본) → source/forward_cluster 비어 있고 bjobs 는 '-'."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _pop_mc_env()
+        config, submit, scheduler, dbmod = _fresh_env(tmp)
+        from mocklsf import formats
+        database = dbmod.Database()
+        opts, cmd = submit.parse_args(["sleep", "30"])
+        jobs, _, _ = submit.build_jobs(database.next_job_id(), opts, cmd)
+        database.insert_jobs(jobs)
+        j = database.all_jobs()[0]
+        assert j.source_cluster == "" and j.forward_cluster == ""
+        line = formats.custom_format([j], "forward_cluster source_cluster",
+                                delimiter=";", noheader=True)
+        assert line.strip() == "-;-"
+
+
+def test_mc_bkill_needs_cluster_env():
+    """forward 된 job 은 로컬 bkill 로 안 죽고(rc 255), 그 클러스터 컨텍스트
+    (env source 흉내)에서만 죽는다 — 실제 MC 문제 + lsfmgr envpath 해법 재현."""
+    import importlib
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["MOCKLSF_FORWARD_CLUSTERS"] = "cluster_b"
+        os.environ["MOCKLSF_FORWARD_RATE"] = "1.0"
+        os.environ.pop("MOCKLSF_CLUSTER", None)          # 로컬 컨텍스트
+        try:
+            config, submit, scheduler, dbmod = _fresh_env(tmp)
+            from mocklsf import cli
+            importlib.reload(cli)                        # 재로드된 config/db 반영
+            database = dbmod.Database()
+            opts, cmd = submit.parse_args(["sleep", "30"])
+            jid = database.next_job_id()
+            jobs, _, _ = submit.build_jobs(jid, opts, cmd)
+            database.insert_jobs(jobs)
+            scheduler.Scheduler(database).tick(time.time())   # → RUN
+            assert database.all_jobs()[0].forward_cluster == "cluster_b"
+            database.close()
+
+            # 1) 로컬 컨텍스트 bkill — 못 죽인다 (rc 255, RUN 유지)
+            rc = cli.cmd_bkill([str(jid)])
+            assert rc == 255
+            assert dbmod.Database().all_jobs()[0].stat == "RUN"
+
+            # cshrc(env 파일)가 생성돼 있어야 (lsfmgr envpath 로 넘길 값)
+            assert os.path.exists(config.cluster_env_path("cluster_b"))
+
+            # 2) forward 클러스터 컨텍스트(env source 흉내) → 죽는다
+            os.environ["MOCKLSF_CLUSTER"] = "cluster_b"
+            importlib.reload(config)                     # CLUSTER_NAME=cluster_b
+            rc2 = cli.cmd_bkill([str(jid)])
+            assert rc2 == 0
+            assert dbmod.Database().all_jobs()[0].stat == "EXIT"
+        finally:
+            _pop_mc_env()

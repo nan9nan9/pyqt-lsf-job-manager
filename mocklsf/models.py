@@ -61,6 +61,10 @@ class Job:
     proj: str = "default"
     job_group: str = ""              # bsub -g 로 지정된 job group 경로 (없으면 "")
     cwd: str = ""                    # bsub 실행 디렉토리 (exec_cwd 로 노출)
+    # MultiCluster: 제출(로컬) 클러스터 / forward 된 실행(원격) 클러스터.
+    # forward_cluster 가 "" 이면 로컬 실행(포워딩 안 됨).
+    source_cluster: str = ""
+    forward_cluster: str = ""
     row_id: int = 0                  # DB rowid (내부용)
 
     @property

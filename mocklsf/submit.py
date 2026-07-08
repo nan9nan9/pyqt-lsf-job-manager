@@ -196,6 +196,14 @@ def build_jobs(job_id: int, opts: dict, command: List[str],
     from_host = config.MASTER_HOST
     hosts = " ".join(opts["hosts"])
 
+    # MultiCluster: 한 submit(=한 array 전체)은 같은 클러스터로 forward 된다.
+    # MC 꺼짐(FORWARD_CLUSTERS 비었음)이면 클러스터 정보 없음(로컬).
+    source_cluster = forward_cluster = ""
+    if config.FORWARD_CLUSTERS:
+        source_cluster = config.CLUSTER_NAME
+        if random.random() < config.FORWARD_RATE:
+            forward_cluster = random.choice(config.FORWARD_CLUSTERS)
+
     def _mk(array_index):
         j = Job(
             job_id=job_id,
@@ -213,6 +221,8 @@ def build_jobs(job_id: int, opts: dict, command: List[str],
             proj=opts["proj"],
             job_group=opts.get("group", ""),
             cwd=opts.get("cwd", ""),
+            source_cluster=source_cluster,
+            forward_cluster=forward_cluster,
         )
         for k, v in _plan_timing().items():
             setattr(j, k, v)
