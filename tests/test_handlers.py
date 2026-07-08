@@ -197,3 +197,58 @@ def test_handler_validation(qtbot, manager, submitted):
     with pytest.raises(JobSetNotFoundError):            # 없는 jobset
         manager.add_handler("nope", "x", lambda ctx: None)
     manager.remove_handler(submitted, "dup")
+
+
+# ----------------------------------------------------------------------
+# handler 실행 중 job 종료 + 그 사이클로 폴링 종료 — final 유실 방지
+# ----------------------------------------------------------------------
+def test_final_not_lost_when_job_ends_while_handler_running(
+        qtbot, manager, fake_lsf, submitted):
+    """비-final handler가 도는 사이에 job이 DONE으로 넘어가고 그 tick이
+    inflight 가드로 건너뛰어진 뒤 폴링이 auto-stop하면, 예전엔 final 실행이
+    영영 유실됐다 — 이제 handler 종료 직후 재평가(_recheck)가 보충한다."""
+    import threading
+    jsid = submitted
+    jid = manager.get_jobs(jsid)[0].job_id
+    started = threading.Event()
+    release = threading.Event()
+    results = []
+
+    def handler(ctx):
+        if not ctx.final:
+            started.set()
+            release.wait(5.0)         # 느린 handler — 이 사이 job이 DONE
+        return ctx.final
+
+    manager.add_handler(jsid, "slow", handler)
+    manager.handler_finished.connect(
+        lambda j, n, r: results.append(r.final))
+
+    fake_lsf.set_job(jid, "RUN")
+    _poll(qtbot, manager, jsid)               # tick1 → handler 시작
+    assert started.wait(5.0)
+
+    fake_lsf.set_job(jid, "DONE")
+    _poll(qtbot, manager, jsid)               # tick2 — inflight라 skip
+    qtbot.wait(100)                           # tick2가 inflight 중에 소비되게
+    release.set()                             # handler 종료 (이후 폴링 없음)
+
+    qtbot.waitUntil(lambda: True in results, timeout=5000)
+    assert results == [False, True]           # 비-final 1회 + final 1회 (중복 없음)
+
+
+def test_recheck_does_not_double_run_while_alive(
+        qtbot, manager, fake_lsf, submitted):
+    """job이 계속 RUN이면 handler 종료 직후 재평가는 아무것도 안 한다 —
+    실행 주기는 여전히 폴링 tick당 1회."""
+    jsid = submitted
+    jid = manager.get_jobs(jsid)[0].job_id
+    results = []
+    manager.add_handler(jsid, "h", lambda ctx: ctx.final)
+    manager.handler_finished.connect(
+        lambda j, n, r: results.append(r.final))
+    fake_lsf.set_job(jid, "RUN")
+    _poll(qtbot, manager, jsid)               # tick1 → 실행 1회
+    qtbot.waitUntil(lambda: len(results) == 1, timeout=5000)
+    qtbot.wait(300)                           # recheck가 추가 실행하면 안 됨
+    assert results == [False]                 # 여전히 1회 (RUN 지속)

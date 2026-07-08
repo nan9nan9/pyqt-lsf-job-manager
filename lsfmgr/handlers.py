@@ -98,6 +98,8 @@ class JobSetHandlerService(QObject):
     finished = Signal(str, str, object)      # jobset_id, handler_name, HandlerResult
     # worker 스레드에서의 remove_handler 요청을 main으로 위임 (queued)
     _remove_requested = Signal(str, str)     # jobset_id, handler_name
+    # handler 실행 종료 직후 그 job 1건 재평가 (worker → main, queued)
+    _recheck = Signal(str, str, str)         # jobset_id, handler_name, job_key
 
     def __init__(self, store, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -106,6 +108,7 @@ class JobSetHandlerService(QObject):
         self._pool.setMaxThreadCount(4)
         self._handlers: Dict[Tuple[str, str], _Handler] = {}
         self._remove_requested.connect(self.remove_handler)
+        self._recheck.connect(self._on_recheck)
 
     # ------------------------------------------------------------------
     # 등록/해제
@@ -190,26 +193,48 @@ class JobSetHandlerService(QObject):
     def _run_cycle(self, h: _Handler, recs) -> None:
         with h.lock:
             for rec in recs:
-                st = h.status.get(rec.job_key, _PENDING)
-                if st == _FINISHED or rec.job_key in h.inflight:
-                    continue
-                in_end = rec.state in h.end_states
-                in_start = rec.state in h.start_states
-                # end_states에 없는 terminal(예: end={DONE}인데 EXIT/LOST/
-                # SUBMIT_FAILED) — 더 진행할 수 없으니 최종 실행 없이 종결.
-                if rec.state.is_terminal and not in_end:
-                    h.status[rec.job_key] = _FINISHED
-                    continue
-                # 아직 시작 state에 안 왔고 종료도 아니면 대기.
-                # (_RUNNING은 start를 벗어나도 계속 돈다 — start_states는
-                # "켜는 조건"이지 "도는 구간"이 아니다. resubmit 리셋 레코드는
-                # rearm()이 _PENDING으로 되돌려 이 규칙으로 다시 대기한다)
-                if st == _PENDING and not in_start and not in_end:
-                    continue
-                final = in_end
-                h.status[rec.job_key] = _FINISHED if final else _RUNNING
-                h.inflight.add(rec.job_key)
-                self._pool.start(_HandlerTask(self, h, rec, final))
+                self._eval_record(h, rec)
+
+    def _eval_record(self, h: _Handler, rec) -> None:
+        """레코드 1건 평가 — h.lock 보유 상태에서 호출한다."""
+        st = h.status.get(rec.job_key, _PENDING)
+        if st == _FINISHED or rec.job_key in h.inflight:
+            return
+        in_end = rec.state in h.end_states
+        in_start = rec.state in h.start_states
+        # end_states에 없는 terminal(예: end={DONE}인데 EXIT/LOST/
+        # SUBMIT_FAILED) — 더 진행할 수 없으니 최종 실행 없이 종결.
+        if rec.state.is_terminal and not in_end:
+            h.status[rec.job_key] = _FINISHED
+            return
+        # 아직 시작 state에 안 왔고 종료도 아니면 대기.
+        # (_RUNNING은 start를 벗어나도 계속 돈다 — start_states는
+        # "켜는 조건"이지 "도는 구간"이 아니다. resubmit 리셋 레코드는
+        # rearm()이 _PENDING으로 되돌려 이 규칙으로 다시 대기한다)
+        if st == _PENDING and not in_start and not in_end:
+            return
+        final = in_end
+        h.status[rec.job_key] = _FINISHED if final else _RUNNING
+        h.inflight.add(rec.job_key)
+        self._pool.start(_HandlerTask(self, h, rec, final))
+
+    def _on_recheck(self, jobset_id: str, name: str, job_key: str) -> None:
+        """[main] handler 실행 종료 직후 그 job 1건 재평가 — 실행 중(inflight)에
+        job이 종료 state로 넘어가면 그 사이클 tick은 건너뛰는데, 전원 terminal로
+        폴링이 auto-stop하면 다음 tick이 없어 final 실행이 유실된다. 종료
+        state로 넘어간 경우에만 여기서 final을 보충한다 (아직 진행 중이면
+        아무것도 안 함 — 다음 폴링 tick의 정상 경로 유지)."""
+        h = self._handlers.get((jobset_id, name))
+        if h is None:
+            return
+        try:
+            rec = self.store.get_job(jobset_id, job_key)
+        except Exception:                        # noqa: BLE001 — CS-5
+            return                               # jobset/job 소멸 — 무시
+        if not (rec.state in h.end_states or rec.state.is_terminal):
+            return
+        with h.lock:
+            self._eval_record(h, rec)
 
     # worker 스레드에서 호출
     def _run(self, h: _Handler, rec: JobRecord, final: bool) -> None:
@@ -225,6 +250,9 @@ class JobSetHandlerService(QObject):
             with h.lock:
                 h.inflight.discard(rec.job_key)
         self.finished.emit(h.jobset_id, h.name, result)
+        if not final:
+            # 실행 사이 job이 종료됐을 수 있다 — main에서 재평가해 final 보충
+            self._recheck.emit(h.jobset_id, h.name, rec.job_key)
 
 
 class _HandlerTask(QRunnable):
