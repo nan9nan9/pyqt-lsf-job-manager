@@ -135,6 +135,14 @@ job은 `CREATED`로 남습니다(기본은 `submit_finished(cancelled=N)`도 발
 > ⚠️ 콜백은 **worker 스레드**에서 돕니다 — Qt 위젯 등 **GUI 객체 접근 금지**.
 > 재시도 시 재실행되므로 부수효과는 **멱등**이어야 합니다.
 
+`resubmit_jobs`도 `pre_submit`을 받습니다. 재제출은 살아있는 job을 kill 후
+재실행하는데, 게이트는 **kill 이전**에 돕니다 — 그래서 게이트가 `False`면
+돌던 job을 **죽이지 않고 그대로** 두며 재제출도 안 합니다(레코드 미변경).
+게이트 실행 중 `js.cancel()`을 부르면 kill 착수 전에 멈춥니다.
+```python
+js.resubmit_jobs([job_key, ...], pre_submit=prepare)
+```
+
 > 작성 규칙·실행 방식(멀티 프로세스)·검증·트러블슈팅, 그리고 lsfmgr가 직접 bsub를
 > 조립하는 저수준 `submit`(+`bsub_path`)은 **[`docs/lsfmgr.md`](docs/lsfmgr.md)**
 > 에 정리되어 있습니다.

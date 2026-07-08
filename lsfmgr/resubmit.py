@@ -7,8 +7,9 @@ main). manager(Facade)가 소유하며 killer.py와 대칭 구조다.
 from __future__ import annotations
 
 import logging
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List
 
 from .options import Options
@@ -31,6 +32,10 @@ class ResubmitPlan:
     live_ids: list              # kill 대상 job_id (비어 있으면 kill 생략)
     live_keys: list             # kill 대상 job_key (EXIT 전이·발행용)
     verify: bool
+    pre_submit: object = None   # 재제출 전 게이트 (FR-9) — kill 이전에 검사
+    # 게이트 실행 중 cancel — 게이트 통과 후 kill 착수 전에 확인해, 취소면
+    # 돌던 job을 죽이지 않고 멈춘다 (게이트가 kill 이전이라 완전 취소 가능)
+    cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
 class ResubmitCoordinator(QObject):
@@ -38,6 +43,8 @@ class ResubmitCoordinator(QObject):
 
     _killed = Signal(str)       # jobset_id: kill-phase 완료 → main에서 resubmit
     jobs_changed = Signal(str, list)   # jobset_id, [JobRecord] — kill 단계 EXIT 발행
+    # 게이트 거부/예외 → main에서 정리(_plans pop + submit_finished/error 발화)
+    _gate_aborted = Signal(str, bool, str)   # jobset_id, failed(예외), msg
 
     def __init__(self, manager: "LsfJobManager"):
         super().__init__(manager)
@@ -47,6 +54,7 @@ class ResubmitCoordinator(QObject):
         self._pool = QThreadPool()
         self._pool.setMaxThreadCount(2)
         self._killed.connect(self._resubmit)    # main 스레드 slot (queued)
+        self._gate_aborted.connect(self._on_gate_aborted)
 
     def is_active(self, jobset_id: str) -> bool:
         """kill-phase 진행 중 여부 — 이 구간엔 submitter ctx가 아직 없어
@@ -65,11 +73,30 @@ class ResubmitCoordinator(QObject):
         plan = self._plans.pop(jobset_id, None)
         if plan is None:
             return False
+        plan.cancel_event.set()      # 게이트 통과 후 kill 착수를 막는다
         n = len(plan.keyed)
         self.mgr.submit_finished.emit(jobset_id, SubmitReport(
             jobset_id=jobset_id, total=n, succeeded=0, failed=0,
             cancelled=n, retried=0, duration_s=0.0, fail_reasons={}))
         return True
+
+    def _on_gate_aborted(self, jobset_id: str, failed: bool, msg: str) -> None:
+        """[main] pre_submit 게이트 거부/예외 — kill·재제출 없이 마무리한다.
+        재제출 대상 job 레코드는 건드리지 않는다(돌던 job은 그대로 유지)."""
+        plan = self._plans.pop(jobset_id, None)
+        if plan is None:
+            return
+        n = len(plan.keyed)
+        if failed:
+            self.mgr.error_occurred.emit(jobset_id, f"pre_submit: {msg}")
+            self.mgr.submit_finished.emit(jobset_id, SubmitReport(
+                jobset_id=jobset_id, total=n, succeeded=0, failed=n,
+                cancelled=0, retried=0, duration_s=0.0,
+                fail_reasons={"PRE_SUBMIT_FAILED": n}))
+        elif self.mgr.config.submit_finished_on_gate_reject:
+            self.mgr.submit_finished.emit(jobset_id, SubmitReport(
+                jobset_id=jobset_id, total=n, succeeded=0, failed=0,
+                cancelled=n, retried=0, duration_s=0.0, fail_reasons={}))
 
     def _resubmit(self, jobset_id: str) -> None:
         """[main 스레드] kill 완료 후 재제출 착수."""
@@ -110,6 +137,30 @@ class _KillPhaseTask(QRunnable):
 
     def run(self):
         plan = self.plan
+        mgr = self._coord.mgr
+        # pre_submit 게이트 — kill 이전에 검사한다. 통과해야 kill+재제출 진행.
+        # 거부/예외면 돌던 job을 죽이지 않고 그대로 둔다(레코드 미변경).
+        if plan.pre_submit is not None:
+            mgr.ready_started.emit(plan.jobset_id)
+            try:
+                commands = [mgr.submitter._item_command(it)
+                            for _k, it in plan.keyed]
+                ok = bool(plan.pre_submit(commands))
+            except Exception as e:                   # noqa: BLE001 — CS-5
+                log.exception("resubmit pre_submit 게이트 예외: %s",
+                              plan.jobset_id)
+                mgr.ready_finished.emit(plan.jobset_id, False)
+                self._coord._gate_aborted.emit(plan.jobset_id, True, repr(e))
+                return
+            mgr.ready_finished.emit(plan.jobset_id, ok)
+            if not ok or self._coord._shutdown:
+                self._coord._gate_aborted.emit(plan.jobset_id, False, "")
+                return
+            if plan.cancel_event.is_set():
+                # 게이트 도는 사이 cancel — kill 없이 멈춘다 (cancel이 이미
+                # submit_finished(cancelled)를 발화했으므로 여기선 조용히 종료)
+                return
+            mgr.submit_started.emit(plan.jobset_id)  # 게이트 통과 → 착수
         try:
             if plan.live_ids:
                 self._coord.mgr.command.bkill_by_ids(plan.live_ids)

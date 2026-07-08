@@ -540,7 +540,9 @@ class LsfJobManager(QObject):
                  commands: Optional[Dict[str, str]] = None,
                  verify: bool = True, workers: Optional[int] = None,
                  max_retry: Optional[int] = None,
-                 rate_limit_per_s: Optional[float] = None) -> None:
+                 rate_limit_per_s: Optional[float] = None,
+                 pre_submit: Optional[Callable[[List[str]], bool]] = None
+                 ) -> None:
         """[async→Signal] 지정 job들을 상태에 따라 (재)실행 — 결과는 submit_finished.
 
         submit/resubmit을 호출자가 고르지 않는다. **각 job의 현재 상태**로 매니저가
@@ -553,6 +555,10 @@ class LsfJobManager(QObject):
         job_keys: (재)실행할 job_key(lsf_job_name) 목록.
         commands: {job_key: 새 커맨드} — 생략 시 기존 rec.command 재사용.
         verify=True면 kill 후 실제 종료를 확인한 뒤 재제출한다.
+        pre_submit(commands)->bool: 지정 시 재제출 전 게이트 (FR-9) — **kill
+        이전에** 검사한다. False면 돌던 job을 죽이지 않고 그대로 두며 재제출도
+        안 한다. 신호 순서는 submit과 동일(ready_started → ready_finished(ok)
+        → ok일 때만 submit_started → … → submit_finished).
         """
         recs = {r.job_key: r for r in self.get_jobs(jobset_id)}
         targets: List[JobRecord] = []
@@ -613,10 +619,12 @@ class LsfJobManager(QObject):
 
         keyed = [(r.job_key, to_item(r)) for r in targets]
 
-        self.submit_started.emit(jobset_id)
+        if pre_submit is None:                 # 게이트면 통과 후 코디네이터가 발화
+            self.submit_started.emit(jobset_id)
         self._resubmitter.start(ResubmitPlan(
             jobset_id=jobset_id, keyed=keyed, opts=opts,
-            live_ids=live_ids, live_keys=live_keys, verify=verify))
+            live_ids=live_ids, live_keys=live_keys, verify=verify,
+            pre_submit=pre_submit))
 
     # ------------------------------------------------------------------
     # JobSet handler (FR-7)
