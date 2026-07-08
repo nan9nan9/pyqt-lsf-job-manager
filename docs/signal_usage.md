@@ -44,6 +44,67 @@ resubmit `EXIT→SUBMITTING→PEND` ~175ms.
 
 ---
 
+## 1.1 발화 주기 (cadence) — 언제/얼마나 자주 오나
+
+발화 주기는 크게 **①throttle(고빈도 진행) · ②폴링 주기 · ③일회성** 세 종류다.
+이를 지배하는 노브는 딱 둘:
+
+```python
+progress_min_interval_s = 0.1   # ① 진행 시그널 최소 발화 간격(초)
+progress_min_step_ratio = 0.01  # ① 최소 진행 비율(전체의 1%)
+poll_interval_s         = 10    # ② 폴링 주기(5~60)
+```
+
+**throttle 규칙** — 다음 중 하나라도 만족하면 발화한다:
+`done == total`(**마지막은 항상**) **또는** 마지막 발화 후 `0.1초` 경과 **또는**
+`max(1, total의 1%)` 만큼 진행. → 즉 진행 시그널은 **초당 최대 ~10회 또는 1%
+단위**(먼저 오는 것) + **마지막 100% 1회 보장**. job 수와 무관하게 총 ~100회.
+
+| Signal | 발화 주기 | 지배 |
+|---|---|---|
+| `submit_progress` | **throttled** (≤10/s, 1%씩) + 마지막 `(total,total)` | ① |
+| `jobs_updated` (제출 중) | submit_progress와 **동일 cadence** (changed 배치) | ① |
+| `jobset_updated` (제출 중) | 위 배치와 함께 | ① |
+| `jobset_updated` (제출 완료) | **1회** (초기 전원 PEND) | 이벤트 |
+| `kill_progress` | **throttled** (chunk kill일 때만) + 마지막 100% | ① |
+| `jobset_updated` (폴링) | **폴링 사이클마다 매번 1회** | ② |
+| `jobs_updated` (폴링) | 폴링 사이클마다, **변경분 있을 때만** | ② |
+| `job_lost` | 폴링에서 LOST 확정된 **레코드마다** | ② |
+| `handler_finished` | **폴링 사이클마다** job당 1회 (+종료 직후 final 보충 1회) | ② |
+| `submit_started`/`ready_started`/`ready_finished` | **일회성** | 이벤트 |
+| `submit_finished` / `kill_finished` | **일회성** (retry 포함 최종) | 이벤트 |
+| `error_occurred` | worker 예외 **발생 시마다** | 이벤트 |
+| `job_detail_ready` | `fetch_job_detail()` 호출당 **1회** | 온디맨드 |
+
+- `js.jobs_failed`는 `jobs_updated`에서 실패분(SUBMIT_FAILED/EXIT/LOST)만 걸러
+  발화하므로 `jobs_updated`와 **같은 주기**다.
+- **전체 JobSet kill**(`js.kill()`)은 `bkill -g` 1회라 증분 없이 바로 완료 —
+  `kill_progress`가 유의미한 건 **대량 chunk/부분 kill, MC `envpath`(chunk마다
+  env source), `verify`(재조회 루프)** 일 때.
+- 폴링 주기는 생성 시 `poll_interval_s=` 또는 `js.start_polling(interval_s=…)`로,
+  throttle은 `progress_min_interval_s`/`progress_min_step_ratio`로 조절(§8).
+
+### pull 스냅샷 — 시그널을 놓친 뒤 "지금 상태"를 직접 조회
+
+진행 시그널은 **push**라 놓치면(진행 dialog를 닫는 등) 다시 안 온다. 백그라운드로
+돌려놓고 나중에 상태 패널을 다시 그릴 때는 **아무 때나 pull로 현재 진행을 조회**한다
+(시그널 연결과 무관, 즉시 반환):
+
+```python
+if js.is_submitting:                    # 제출 작업 자체가 도는 중?
+    s = js.submit_state                 # SubmitProgress(done/total/succeeded/failed/…) | None
+    bar.setValue(int(s.fraction * 100))
+if js.is_killing:                       # kill이 도는 중?
+    s = js.kill_state                   # KillProgress(done/total) | None
+    bar.setValue(int(s.fraction * 100))
+```
+
+- 진행 중이 아니면 `None`. 완료 후 최종 결과는 `submit_finished`/`kill_finished`
+  또는 `js.summary`로 본다.
+- pull은 throttle과 무관하게 **항상 최신값**이다(throttle로 건너뛴 진행도 반영).
+
+---
+
 ## 2. 연결은 한 번만 (앱 시작 시)
 
 ```python
