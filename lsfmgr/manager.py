@@ -504,6 +504,11 @@ class LsfJobManager(QObject):
         envpath 지정 시 그 LSF env를 source한 bkill (MC forward job)."""
         if verify is None:
             verify = bool(self._defaults.get("verify_kill", False))
+        if only_state is None:
+            # 전체 kill은 대기 중 submit 재시도도 포기 확정한다 — 안 하면
+            # RETRY_WAIT의 QTimer가 kill 뒤에 발화해 job이 부활한다.
+            # (부분 kill(only_state)은 살아있는 특정 상태만 겨냥하므로 유지)
+            self.submitter.abort_retries(jobset_id)
         self.killer.kill_jobset(jobset_id, only_state=only_state,
                                 verify=verify, envpath=envpath)
 

@@ -286,3 +286,54 @@ def test_individual_kill_verify_counts_only_targets(qtbot, fake_lsf, config):
         assert len(fake_lsf.alive_jobs()) == 2      # 실제로 2개 살아있음
     finally:
         mgr.shutdown()
+
+
+# ----------------------------------------------------------------------
+# 전체 kill은 대기 중 submit 재시도도 포기 확정 — job 부활 방지
+# ----------------------------------------------------------------------
+def test_whole_kill_aborts_pending_retries(qtbot, manager, fake_lsf):
+    """RETRY_WAIT 중 js.kill() 후 재시도 QTimer가 발화해도 job이 부활하지
+    않는다 — 예전엔 kill 뒤 타이머가 재제출해 PEND로 되살아났다."""
+    import time
+    fake_lsf.fail_next_bsub = 1              # 첫 bsub 실패 → RETRY_WAIT
+    # 재시도 지연을 길게 — kill이 타이머 발화보다 먼저 도는 것을 보장
+    js = manager.submit(["echo a"], mode="bulk", auto_poll=False, max_retry=3,
+                        retry_backoff="fixed:2")
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        recs = js.jobs()
+        if recs and recs[0].state is JobState.RETRY_WAIT:
+            break
+        qtbot.wait(10)
+    assert js.jobs()[0].state is JobState.RETRY_WAIT
+
+    reports = []
+    manager.submit_finished.connect(lambda _js, r: reports.append(r))
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000):
+        js.kill()      # 전체 kill — 재시도 포기 확정 (submit_finished도 이때 발행)
+    qtbot.wait(400)                          # 재시도 타이머 발화 시간 경과
+    rec = js.jobs()[0]
+    assert rec.state is JobState.SUBMIT_FAILED   # 부활 없음
+    assert fake_lsf.alive_jobs() == []
+    assert reports and reports[0].failed == 1
+
+
+def test_partial_kill_keeps_pending_retries(qtbot, manager, fake_lsf):
+    """부분 kill(only_state)은 재시도를 건드리지 않는다 — RETRY_WAIT job은
+    타이머 발화 후 정상 재제출된다."""
+    import time
+    fake_lsf.fail_next_bsub = 1
+    js = manager.submit(["echo a", "echo b"], mode="bulk", auto_poll=False,
+                        max_retry=3)
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        sts = {r.state for r in js.jobs()}
+        if JobState.RETRY_WAIT in sts and JobState.PEND in sts:
+            break
+        qtbot.wait(10)
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000):
+        js.kill(only_state=JobState.PEND)    # PEND만 kill — 재시도 유지
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        pass
+    # RETRY_WAIT였던 job은 재시도로 PEND 복귀
+    assert any(r.state is JobState.PEND for r in js.jobs())

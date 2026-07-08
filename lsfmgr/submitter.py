@@ -465,6 +465,21 @@ class BulkSubmitter(QObject):
             for entry in entries:
                 self._finalize_retry(ctx, entry, "SHUTDOWN")
 
+    def abort_retries(self, jobset_id: str) -> None:
+        """이 jobset의 대기 중 재시도(QTimer)를 포기 확정 — RETRY_WAIT →
+        SUBMIT_FAILED. 전체 kill과 함께 호출해, kill 뒤 재시도 타이머가
+        발화해 job이 부활하는 것을 막는다. 이후 타이머가 발화해도 원장
+        pop이 빈손이라 no-op(정확히 한 번)."""
+        with self._ctx_lock:
+            ctx = self._contexts.get(jobset_id)
+        if ctx is None:
+            return
+        with ctx.lock:
+            entries = list(ctx.pending_retries.values())
+            ctx.pending_retries.clear()
+        for entry in entries:
+            self._finalize_retry(ctx, entry, "KILLED")
+
     # ------------------------------------------------------------------
     # worker 콜백 (worker 스레드에서 호출됨 — Store는 thread-safe)
     # ------------------------------------------------------------------
