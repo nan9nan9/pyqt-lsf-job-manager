@@ -470,7 +470,10 @@ class LsfJobManager(QObject):
         def work():
             try:
                 text = self._job_detail_text(rec)
-            except LsfmgrError as e:
+            except Exception as e:               # noqa: BLE001 — CS-5
+                # LsfmgrError 외의 예외(bhist_path 오설정 FileNotFoundError 등)
+                # 도 반드시 signal로 응답한다 — 여기서 전파되면 _CallTask가
+                # 삼켜 job_detail_ready가 영영 안 오고 UI가 무응답이 된다
                 text = f"(조회 실패) {e}"
             self.job_detail_ready.emit(jobset_id, job_key, text)
 
@@ -544,8 +547,8 @@ class LsfJobManager(QObject):
                  verify: bool = True, workers: Optional[int] = None,
                  max_retry: Optional[int] = None,
                  rate_limit_per_s: Optional[float] = None,
-                 pre_submit: Optional[Callable[[List[str]], bool]] = None
-                 ) -> None:
+                 pre_submit: Optional[Callable[[List[str]], bool]] = None,
+                 envpath: str = "") -> None:
         """[async→Signal] 지정 job들을 상태에 따라 (재)실행 — 결과는 submit_finished.
 
         submit/resubmit을 호출자가 고르지 않는다. **각 job의 현재 상태**로 매니저가
@@ -562,6 +565,8 @@ class LsfJobManager(QObject):
         이전에** 검사한다. False면 돌던 job을 죽이지 않고 그대로 두며 재제출도
         안 한다. 신호 순서는 submit과 동일(ready_started → ready_finished(ok)
         → ok일 때만 submit_started → … → submit_finished).
+        envpath: kill 단계에서 source할 LSF env 경로 (MC forward job — 로컬
+        bkill로 안 죽는 환경). kill_jobs의 envpath와 같은 의미.
         """
         recs = {r.job_key: r for r in self.get_jobs(jobset_id)}
         targets: List[JobRecord] = []
@@ -627,7 +632,7 @@ class LsfJobManager(QObject):
         self._resubmitter.start(ResubmitPlan(
             jobset_id=jobset_id, keyed=keyed, opts=opts,
             live_ids=live_ids, live_keys=live_keys, verify=verify,
-            pre_submit=pre_submit))
+            pre_submit=pre_submit, envpath=envpath))
 
     # ------------------------------------------------------------------
     # JobSet handler (FR-7)

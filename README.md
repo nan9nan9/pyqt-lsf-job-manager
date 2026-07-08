@@ -216,6 +216,8 @@ js.close()                             # 종결 (전원 terminal일 때)
 > for cluster, keys in by_cluster.items():
 >     js.kill_jobs(keys, envpath=CSHRC[cluster])
 > ```
+> `js.resubmit_jobs(keys, envpath=...)`도 동일 — 재제출의 kill 단계에서 그 env를
+> source합니다 (안 주면 forward job이 안 죽은 채 새 job이 중복 제출됨).
 
 ### 3.3 조회 (동기 — 로컬 스냅샷, LSF 호출 없음)
 

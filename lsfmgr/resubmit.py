@@ -33,6 +33,7 @@ class ResubmitPlan:
     live_keys: list             # kill 대상 job_key (EXIT 전이·발행용)
     verify: bool
     pre_submit: object = None   # 재제출 전 게이트 (FR-9) — kill 이전에 검사
+    envpath: str = ""           # kill 시 source할 LSF env (MC forward job)
     # 게이트 실행 중 cancel — 게이트 통과 후 kill 착수 전에 확인해, 취소면
     # 돌던 job을 죽이지 않고 멈춘다 (게이트가 kill 이전이라 완전 취소 가능)
     cancel_event: threading.Event = field(default_factory=threading.Event)
@@ -163,7 +164,11 @@ class _KillPhaseTask(QRunnable):
             mgr.submit_started.emit(plan.jobset_id)  # 게이트 통과 → 착수
         try:
             if plan.live_ids:
-                self._coord.mgr.command.bkill_by_ids(plan.live_ids)
+                # envpath 지정 시 그 클러스터 env를 source한 bkill —
+                # MC forward job은 로컬 bkill로 안 죽어, 안 그러면 원 job이
+                # 산 채로 새 job이 중복 제출된다
+                self._coord.mgr.command.bkill_by_ids(
+                    plan.live_ids, envpath=plan.envpath)
                 if plan.verify:
                     self._await_dead(plan.live_ids)
                 # 파이프라인 stage 1 가시화 — 죽인 job을 EXIT로 전이·발행한다.

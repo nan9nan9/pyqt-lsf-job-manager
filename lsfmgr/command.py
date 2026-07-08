@@ -598,8 +598,8 @@ class LsfCommand:
                 on_progress(processed)
         return calls
 
-    def bkill_by_ids(self, job_ids: Sequence[int]) -> int:
-        return self.bkill_targets([str(i) for i in job_ids])
+    def bkill_by_ids(self, job_ids: Sequence[int], envpath: str = "") -> int:
+        return self.bkill_targets([str(i) for i in job_ids], envpath=envpath)
 
     def bkill_targets_confirm(self, targets: Sequence[str],
                               on_progress: Optional[Callable[[int], None]] = None,

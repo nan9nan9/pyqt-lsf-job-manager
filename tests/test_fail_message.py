@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-from lsfmgr import SqliteStore
+from lsfmgr import InMemoryStore, LsfJobManager, SqliteStore
 from lsfmgr.states import JobState
 
 
@@ -165,3 +165,27 @@ def test_fail_message_persisted_in_sqlite(qtbot, sqlite_manager, fake_lsf,
         assert "queue unavailable" in rec.fail_message
     finally:
         reopened.close()
+
+
+def test_fetch_job_detail_signal_on_broken_bhist(qtbot, fake_lsf, config):
+    """bhist_path 오설정(FileNotFoundError 등 비-LsfmgrError)이어도
+    job_detail_ready는 반드시 온다 — 예전엔 예외가 삼켜져 signal이 유실,
+    UI의 상태 클릭이 무응답이 됐다."""
+    from dataclasses import replace as dc_replace
+    cfg = dc_replace(config, bhist_path="/nonexistent/bhist")
+
+    def runner(argv, timeout):
+        # bhist만 실제 subprocess처럼 FileNotFoundError — 나머지는 FakeLsf
+        if argv[0] == "/nonexistent/bhist":
+            raise FileNotFoundError(2, "No such file or directory", argv[0])
+        return fake_lsf(argv, timeout)
+
+    mgr = LsfJobManager(store=InMemoryStore(), config=cfg, runner=runner)
+    try:
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            js = mgr.submit(["echo a"], mode="bulk", auto_poll=False)
+        with qtbot.waitSignal(mgr.job_detail_ready, timeout=10000) as b:
+            mgr.fetch_job_detail(js.id, js.jobs()[0].job_key)
+        assert "(조회 실패)" in b.args[2]
+    finally:
+        mgr.shutdown()

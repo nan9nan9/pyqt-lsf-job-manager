@@ -149,7 +149,9 @@ class JobSet(QObject):
         살아있는 job은 kill 후, 나머지는 그냥 재제출한다(레코드 재사용).
         commands로 job_key별 새 커맨드 지정 가능(생략 시 기존 커맨드 재사용).
         pre_submit=fn(opts로 전달) 지정 시 재제출 전 게이트 — kill 이전에 검사해
-        False면 돌던 job을 죽이지 않고 재제출도 안 한다(FR-9)."""
+        False면 돌던 job을 죽이지 않고 재제출도 안 한다(FR-9).
+        envpath=경로(opts로 전달) 지정 시 kill 단계에서 그 LSF env를 source한
+        bkill (MC forward job — kill_jobs의 envpath와 동일)."""
         self._check_open()
         self._manager.resubmit_jobs(self._jobset_id, job_keys,
                                     commands=commands, verify=verify, **opts)
