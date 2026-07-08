@@ -214,3 +214,42 @@ def test_gate_reject_no_autopoll(qtbot, manager, fake_lsf):
     # 거부됐으므로 polling이 켜지지 않아 pending/interval 모두 비어야 함
     assert js.id not in manager._pending_autopoll
     assert js.id not in manager._poll_intervals
+
+
+# ----------------------------------------------------------------------
+# 게이트 통과 후 do_launch(레코드 생성)가 store 장애로 실패 → finished 보장
+# (미방어 시 게이트 워커가 죽어 submit_finished 미발화 → jobset 잠김)
+# ----------------------------------------------------------------------
+def test_gate_do_launch_failure_still_finishes(qtbot, manager, fake_lsf):
+    def gate(cmds):
+        def boom(recs):
+            raise RuntimeError("store down")
+        manager.store.add_jobs = boom            # do_launch의 add_jobs 사보타주
+        return True
+    errs = []
+    manager.error_occurred.connect(lambda j, m: errs.append(m))
+    with qtbot.waitSignal(manager.submit_finished, timeout=5000) as b:
+        js = manager.submit(["echo a"], mode="bulk", auto_poll=False,
+                            pre_submit=gate)
+    assert b.args[1].failed == 1                  # 잠기지 않고 failed로 마무리
+    assert any("store down" in m for m in errs)
+
+
+# ----------------------------------------------------------------------
+# 게이트 실행 중 shutdown → 통과해도 제출 안 함 (좀비 없음)
+# ----------------------------------------------------------------------
+def test_gate_shutdown_during_callback(qtbot, fake_lsf, config):
+    import threading
+    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf)
+    started, release = threading.Event(), threading.Event()
+
+    def slow(cmds):
+        started.set()
+        release.wait(5)
+        return True
+
+    js = mgr.submit(["echo a"], mode="bulk", auto_poll=False, pre_submit=slow)
+    assert started.wait(3)
+    release.set()
+    mgr.shutdown()
+    assert fake_lsf.calls_of("bsub") == []

@@ -747,7 +747,15 @@ class _GateTask(QRunnable):
             sub._gate_reject(ctx, finish=True)       # 통과했지만 그새 취소됨
             return
         sub.started.emit(ctx.jobset_id)              # 게이트 통과 → 제출 착수
-        self.do_launch()
+        try:
+            self.do_launch()
+        except Exception as e:                       # noqa: BLE001 — CS-5
+            # do_launch(레코드 add_jobs / 워커 spawn)에서 store 장애 등으로
+            # 예외가 나면 게이트 워커가 여기서 죽어 finished가 영영 미발화 →
+            # jobset이 잠긴다. error + finished(failed=N)로 반드시 마무리한다.
+            log.exception("게이트 통과 후 제출 착수 실패: %s", ctx.jobset_id)
+            sub._gate_fail(ctx, self.make_failed(repr(e)[:4000]), repr(e))
+            return
         if ctx.total == 0:                           # 빈 제출 — 직접 마무리
             sub._finish_if_done(ctx, force=True)
 
