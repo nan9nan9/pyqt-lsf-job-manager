@@ -1,6 +1,6 @@
 # lsfmgr 사용 가이드 (`submit_wrapper` + Signal)
 
-실제 환경에서는 job 마다 `customwrapper_sub` / `customwrapper_sub` / `customwrapper_sub` 같은
+실제 환경에서는 job 마다 `customwrapper_sub` 같은
 **툴 전용 제출 wrapper** 를 쓴다. 각 wrapper 는 툴에 맞는 인자 처리·전처리를 한
 뒤 내부에서 `bsub` 를 호출한다. lsfmgr 는 이 구조를 `submit_wrapper` 로 그대로
 지원한다 — **각 wrapper 커맨드를 그대로 실행하고, 그 결과의 `Job <id>` 로 job 을
@@ -345,7 +345,7 @@ echo "customwrapper_sub: preprocessing..." >&2
 exec bsub "$@"      # bsub 의 stdout("Job <id> ...")·exit code 를 그대로 전파
 ```
 
-저장소 동봉 `bin/customwrapper_sub`·`bin/customwrapper_sub` 등은 테스트용으로 `bsub` 대신
+저장소 동봉 `bin/customwrapper_sub` 는 테스트용으로 `bsub` 대신
 mocklsf 의 가상 `bsub` 를 부르는 형태다. 실제 환경에서는 위처럼 진짜 `bsub` 를
 호출하면 된다.
 

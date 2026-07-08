@@ -21,7 +21,7 @@ PyQt 앱을 실제 LSF 없이 테스트하기 위한 용도. **이 저장소에 
 ├── bin/                # 실제 LSF 명령과 같은 이름의 실행 래퍼
 │   ├── bsub bjobs mjobs bkill bqueues bhist bpeek bstop bresume bmod bgdel
 │   ├── mocklsfd
-│   └── customwrapper_sub customwrapper_sub customwrapper_sub customwrapper_sub   # 툴별 제출 wrapper
+│   └── customwrapper_sub                              # 제출 wrapper (데모)
 └── tests/test_mocklsf.py
 ```
 
