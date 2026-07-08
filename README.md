@@ -208,14 +208,23 @@ js.close()                             # 종결 (전원 terminal일 때)
 > 주면 `tcsh -c "source <envpath> && exec bkill <ids>"` 로 실행됩니다.
 > job마다 forward된 클러스터가 다를 수 있으므로, `collect_clusters=True`로
 > 채워지는 `rec.forward_cluster`로 분류한 뒤 클러스터별로 나눠 각 `envpath`로
-> 호출하면 됩니다:
+> 호출하면 됩니다. **`forward_cluster`가 곧 판별자**입니다 — forward된 job만
+> 클러스터 이름이 들어가고, **forward 안 된 로컬 job은 `None`**이라 envpath
+> 없이 그냥 로컬 `bkill`로 죽여야 합니다 (`None` 버킷 별도 처리):
 > ```python
 > by_cluster = {}
 > for r in js.failed_jobs:                       # 또는 죽일 대상 목록
 >     by_cluster.setdefault(r.forward_cluster, []).append(r.job_key)
 > for cluster, keys in by_cluster.items():
->     js.kill_jobs(keys, envpath=CSHRC[cluster])
+>     if cluster is None:                        # forward 안 된 로컬 job
+>         js.kill_jobs(keys)                     # envpath 없이 (로컬 bkill)
+>     else:                                      # forward된 job
+>         js.kill_jobs(keys, envpath=CSHRC[cluster])
 > ```
+> `None`을 안 걸러내면 `CSHRC[None]`에서 `KeyError`가 나거나 로컬 job에
+> 불필요하게 envpath를 씌우게 됩니다. (`source_cluster`는 LSF 버전에 따라 로컬
+> job도 자기 클러스터명이 나올 수 있어 판별 기준으로는 부적합 — `forward_cluster`
+> 로 판별하세요.)
 > `js.resubmit_jobs(keys, envpath=...)`도 동일 — 재제출의 kill 단계에서 그 env를
 > source합니다 (안 주면 forward job이 안 죽은 채 새 job이 중복 제출됨).
 
@@ -224,12 +233,25 @@ js.close()                             # 종결 (전원 terminal일 때)
 ```python
 js.summary                 # 요약 dict
 js.is_done                 # 전원 terminal?
+js.is_active               # 하나라도 안 끝난(non-terminal) job이 있으면 True
+js.is_inactive             # 전원 terminal(DONE/EXIT/SUBMIT_FAILED/LOST)이면 True
 js.failed_jobs             # SUBMIT_FAILED/EXIT/LOST 목록
 js.jobs()                  # 전체 JobRecord
 js.jobs(states={JobState.RUN})
 js.detect_lost()           # 손실 감지 (name 패턴 복구 시도 포함)
 js.id                      # jobset_id 문자열 (로그/저장용)
 ```
+
+> **`is_active` / `is_inactive`** — 이 JobSet을 다시 수행할지 판단할 때 씁니다.
+> `inactive`는 **모든 job이 terminal**(DONE·EXIT·SUBMIT_FAILED·LOST)이라 더
+> 진행할 게 없는 상태이고, `is_active = not is_inactive`(하나라도 CREATED/
+> SUBMITTING/RETRY_WAIT/PEND/RUN/suspend 등 non-terminal). `is_done`과 거의
+> 같지만 job이 하나도 없는 빈 JobSet은 `is_inactive=True`(is_done은 False)로
+> 다릅니다.
+> ```python
+> if js.is_inactive:        # 진행 중인 것 없음 → 재수행 판단
+>     js.resubmit_jobs([r.job_key for r in js.jobs()])
+> ```
 
 > **실패 원인 표시** — 두 경로로 확인합니다.
 > - **SUBMIT_FAILED/RETRY_WAIT**: `rec.fail_message`에 bsub/wrapper 실행의

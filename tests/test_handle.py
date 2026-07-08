@@ -298,3 +298,78 @@ def test_recover_returns_handle(qtbot, fake_lsf, config, tmp_path):
         assert js.summary["total"] == 1
     finally:
         m2.shutdown()
+
+
+# ----------------------------------------------------------------------
+# is_active / is_inactive — 재수행 판단용
+# inactive = 전원 terminal(DONE/EXIT/SUBMIT_FAILED/LOST), active = 그 반대
+# ----------------------------------------------------------------------
+def _submit_running(qtbot, manager, fake_lsf, n=3):
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        js = manager.submit([f"echo {i}" for i in range(n)],
+                             mode="bulk", auto_poll=False)
+    return js
+
+
+def test_active_while_running(qtbot, manager, fake_lsf):
+    """PEND/RUN 등 non-terminal이 하나라도 있으면 active."""
+    js = _submit_running(qtbot, manager, fake_lsf)
+    assert js.is_active                    # 전원 PEND
+    assert not js.is_inactive
+    fake_lsf.set_all("RUN")
+    manager.querier.query(js.id)
+    assert js.is_active and not js.is_inactive
+
+
+def test_inactive_when_all_done(qtbot, manager, fake_lsf):
+    js = _submit_running(qtbot, manager, fake_lsf)
+    fake_lsf.set_all("DONE")
+    manager.querier.query(js.id)
+    assert js.is_inactive and not js.is_active
+
+
+def test_inactive_when_all_exit(qtbot, manager, fake_lsf):
+    js = _submit_running(qtbot, manager, fake_lsf)
+    fake_lsf.set_all("EXIT", exit_code=1)
+    manager.querier.query(js.id)
+    assert js.is_inactive and not js.is_active
+
+
+def test_inactive_when_mixed_terminal(qtbot, manager, fake_lsf):
+    """DONE/EXIT 섞여도 전원 terminal이면 inactive."""
+    js = _submit_running(qtbot, manager, fake_lsf, n=2)
+    recs = js.jobs()
+    fake_lsf.set_job(recs[0].job_id, "DONE")
+    fake_lsf.set_job(recs[1].job_id, "EXIT", exit_code=2)
+    manager.querier.query(js.id)
+    assert js.is_inactive and not js.is_active
+
+
+def test_inactive_when_all_submit_failed(qtbot, manager, fake_lsf):
+    """전원 SUBMIT_FAILED도 inactive (terminal)."""
+    fake_lsf.fail_next_bsub = 100          # 모든 bsub 실패
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        js = manager.submit(["a", "b"], mode="bulk", auto_poll=False, max_retry=0)
+    assert all(r.state is JobState.SUBMIT_FAILED for r in js.jobs())
+    assert js.is_inactive and not js.is_active
+
+
+def test_inactive_when_all_lost(qtbot, manager, fake_lsf):
+    """전원 LOST도 inactive (terminal)."""
+    js = _submit_running(qtbot, manager, fake_lsf, n=1)
+    # store에서 직접 LOST로 (조회 불가 시나리오)
+    rec = js.jobs()[0]
+    manager.store.transition(js.id, rec.job_key, JobState.LOST,
+                             fail_reason="NO_JOBID_PARSED")
+    assert js.is_inactive and not js.is_active
+
+
+def test_active_when_one_terminal_rest_running(qtbot, manager, fake_lsf):
+    """일부만 끝나고 하나라도 돌고 있으면 active — 재수행 안 함 근거."""
+    js = _submit_running(qtbot, manager, fake_lsf, n=3)
+    recs = js.jobs()
+    fake_lsf.set_job(recs[0].job_id, "DONE")
+    fake_lsf.set_job(recs[1].job_id, "DONE")
+    fake_lsf.set_job(recs[2].job_id, "RUN")   # 하나는 아직 RUN
+    manager.querier.query(js.id)
+    assert js.is_active and not js.is_inactive

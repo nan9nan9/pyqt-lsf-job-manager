@@ -216,6 +216,23 @@ class JobSet(QObject):
         return total > 0 and terminal >= total
 
     @property
+    def is_active(self) -> bool:
+        """[sync, snapshot] 하나라도 아직 안 끝난(non-terminal) job이 있으면 True.
+        inactive(전원 terminal)의 반대 — 이 JobSet을 다시 수행할지 판단할 때 쓴다.
+        non-terminal 예: CREATED/SUBMITTING/RETRY_WAIT/PEND/RUN/suspend 등."""
+        self._check_open()
+        s = self._manager.summary(self._jobset_id)
+        return any(v > 0 for k, v in s.items()
+                   if k != "total" and not JobState(k).is_terminal)
+
+    @property
+    def is_inactive(self) -> bool:
+        """[sync, snapshot] 모든 job이 terminal(DONE/EXIT/SUBMIT_FAILED/LOST)이면
+        True — 더 진행할 것이 없는 상태. is_active의 반대.
+        (job이 하나도 없는 빈 JobSet도 '진행 중인 것 없음'이라 inactive=True)"""
+        return not self.is_active
+
+    @property
     def failed_jobs(self) -> List[JobRecord]:
         """[sync, snapshot] 실패 상태(EXIT/SUBMIT_FAILED/LOST) job 목록."""
         self._check_open()
