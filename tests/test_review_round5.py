@@ -109,7 +109,7 @@ def test_retry_delay_clamped_to_qtimer_range():
 # ----------------------------------------------------------------------
 def test_kill_chunk_failure_still_finishes(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit_wrapper(["primesim_sub -i a.sp"],
+        js = manager.submit_wrapper(["customwrapper_sub -i a.sp"],
                                     auto_poll=False)
     fake_lsf.fail_next_bkill = 1          # mbatchd 장애 주입
     with qtbot.waitSignal(manager.kill_finished, timeout=5000) as blocker:
@@ -131,7 +131,7 @@ def test_kill_chunk_failure_still_finishes(qtbot, manager, fake_lsf):
 def test_wrapper_submitted_array_not_lost(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js = manager.submit_wrapper(
-            [["primesim_sub", "-J", "arr[1-3]", "echo", "hi"]],
+            [["customwrapper_sub", "-J", "arr[1-3]", "echo", "hi"]],
             auto_poll=False)
     fake_lsf.set_all("RUN")
 
@@ -151,7 +151,7 @@ def test_wrapper_submitted_array_bhist_fallback(qtbot, manager, fake_lsf):
     """bjobs에서 사라진 wrapper-array job도 bhist element 블록 집계로 종결."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js = manager.submit_wrapper(
-            [["primesim_sub", "-J", "arr[1-2]", "echo", "hi"]],
+            [["customwrapper_sub", "-J", "arr[1-2]", "echo", "hi"]],
             auto_poll=False)
     rec = js.jobs()[0]
     fake_lsf.set_all("DONE")

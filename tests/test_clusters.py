@@ -197,7 +197,7 @@ def test_double_field_error_degrades_to_core():
 def test_wrapper_array_aggregate_carries_cluster(qtbot, mc_manager, fake_lsf):
     with qtbot.waitSignal(mc_manager.submit_finished, timeout=10000):
         js = mc_manager.submit_wrapper(
-            [["primesim_sub", "-J", "arr[1-3]", "echo", "hi"]], auto_poll=False)
+            [["customwrapper_sub", "-J", "arr[1-3]", "echo", "hi"]], auto_poll=False)
     rec = js.jobs()[0]
     aid = rec.job_id
     for i in (1, 2, 3):

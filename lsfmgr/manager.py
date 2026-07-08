@@ -287,15 +287,15 @@ class LsfJobManager(QObject):
                        **kwargs: Any) -> JobSet:
         """[async→Signal] wrapper 커맨드로 job 제출 — JobSet 핸들 반환.
 
-        실제 환경에서 job 마다 `primesim_sub`/`verilog_sub` 등 서로 다른 제출
+        실제 환경에서 job 마다 `customwrapper_sub` 같은 제출
         wrapper 를 쓰는 구조를 그대로 지원한다. lsfmgr 는 각 커맨드를 **그대로**
         subprocess 실행하고 stdout 의 `Job <id>` 만 파싱해, 그 job_id 로 모니터링·
         kill 을 수행한다(‑q/‑J/‑g 등 인자 조립·주입 없음, 그룹/이름 부착물 없음).
 
         commands:
-          - 단일 문자열 `"primesim_sub -i a.sp"` → job 1개 (공백 분해)
+          - 단일 문자열 `"customwrapper_sub -i a.sp"` → job 1개 (공백 분해)
           - 리스트의 각 항목이 job 1개. 항목은 문자열(공백 분해) 또는 토큰 리스트
-            `["primesim_sub", "-i", "a.sp"]` (셸 파싱 없이 그대로).
+            `["customwrapper_sub", "-i", "a.sp"]` (셸 파싱 없이 그대로).
 
         옵션(kwargs): workers / max_retry / rate_limit_per_s / label / tags /
         description / auto_poll / poll_interval_s. 재시도는 **비정상 종료(non-zero)

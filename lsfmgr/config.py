@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from typing import List, Optional, Sequence, Tuple, Union
 
 #: LSF 명령 경로. 단일 프로그램은 str, bsub를 호출하는 wrapper처럼 고정 인자가
-#: 붙는 명령은 토큰 목록으로 지정한다 (예: ["primesim_sub", "--proj", "X"]).
+#: 붙는 명령은 토큰 목록으로 지정한다 (예: ["customwrapper_sub", "--proj", "X"]).
 #: wrapper는 표준 bsub 옵션(-q/-J/-g/...)을 받아 bsub로 넘기고, bsub의 출력
 #: ("Job <id> ...")을 그대로 뱉으면 된다 — 파싱/추적은 bsub와 동일하다.
 CmdPath = Union[str, Sequence[str]]

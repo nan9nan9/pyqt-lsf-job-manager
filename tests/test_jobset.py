@@ -235,7 +235,7 @@ def test_resubmit_jobs_terminal_no_kill_and_command_override(
 
 def test_resubmit_jobs_wrapper_path(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit_wrapper(["primesim_sub -q normal a.sp"],
+        js = manager.submit_wrapper(["customwrapper_sub -q normal a.sp"],
                                     auto_poll=False)
     jsid = js.id
     key = f"{jsid}_0"
@@ -247,8 +247,8 @@ def test_resubmit_jobs_wrapper_path(qtbot, manager, fake_lsf):
     after = manager.get_jobs(jsid)[0]
     assert after.state is JobState.PEND
     assert after.job_id != old_id                   # wrapper 재실행 → 새 job
-    # 부착물 없는 jobset이므로 wrapper(primesim_sub)로 재제출됨
-    assert len(fake_lsf.calls_of("primesim_sub")) == 2
+    # 부착물 없는 jobset이므로 wrapper(customwrapper_sub)로 재제출됨
+    assert len(fake_lsf.calls_of("customwrapper_sub")) == 2
 
 
 def test_resubmit_jobs_missing_key_raises(qtbot, manager):
@@ -262,7 +262,7 @@ def test_resubmit_wrapper_argv_roundtrip_preserves_quoting(qtbot, manager,
                                                            fake_lsf):
     """공백 포함 인자를 가진 wrapper job도 재제출 시 원본 argv가 복원된다
     (shlex.join 저장 ↔ shlex.split 복원)."""
-    argv = ["primesim_sub", "-q", "normal", "my file.sp"]   # 공백 포함 인자
+    argv = ["customwrapper_sub", "-q", "normal", "my file.sp"]   # 공백 포함 인자
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js = manager.submit_wrapper([argv], auto_poll=False)
     jsid = js.id
@@ -273,7 +273,7 @@ def test_resubmit_wrapper_argv_roundtrip_preserves_quoting(qtbot, manager,
         js.resubmit_jobs([rec.job_key])
 
     # 재제출된 wrapper 호출의 argv가 원본과 동일해야 한다 (분해 손상 없음)
-    calls = fake_lsf.calls_of("primesim_sub")
+    calls = fake_lsf.calls_of("customwrapper_sub")
     assert len(calls) == 2
     assert calls[1][1:] == ["-q", "normal", "my file.sp"], calls[1]
 
@@ -282,7 +282,7 @@ def test_resubmit_mixed_merge_dispatches_per_job(qtbot, manager, fake_lsf):
     """wrapper jobset + bsub jobset을 merge한 혼합 jobset에서 각 job이
     자기 제출 경로(via_wrapper)로 재제출된다 — jobset 부착물 오판 방지."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        w = manager.submit_wrapper(["primesim_sub -q normal a.sp"],
+        w = manager.submit_wrapper(["customwrapper_sub -q normal a.sp"],
                                    auto_poll=False)
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         b = manager.submit_bulk([JobSpec(command="make sim")])
@@ -290,14 +290,14 @@ def test_resubmit_mixed_merge_dispatches_per_job(qtbot, manager, fake_lsf):
     recs = {r.job_key: r for r in manager.get_jobs(merged)}
     wkey = next(k for k, r in recs.items() if r.via_wrapper)
     bkey = next(k for k, r in recs.items() if not r.via_wrapper)
-    n_wrap = len(fake_lsf.calls_of("primesim_sub"))
+    n_wrap = len(fake_lsf.calls_of("customwrapper_sub"))
     n_bsub = len(fake_lsf.calls_of("bsub"))
 
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.resubmit_jobs(merged, [wkey, bkey])
 
     # wrapper job은 wrapper로, bsub job은 bsub로 — 교차 오판 없음
-    assert len(fake_lsf.calls_of("primesim_sub")) == n_wrap + 1
+    assert len(fake_lsf.calls_of("customwrapper_sub")) == n_wrap + 1
     assert len(fake_lsf.calls_of("bsub")) == n_bsub + 1
 
 

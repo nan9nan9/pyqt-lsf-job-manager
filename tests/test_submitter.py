@@ -220,7 +220,7 @@ def test_array_submit(qtbot, manager, fake_lsf):
 
 
 def test_array_submit_with_command_list(qtbot, manager, fake_lsf, tmp_path):
-    cmds = [f"hspice tt_{i}.sp" for i in range(5)]
+    cmds = [f"mytool tt_{i}.sp" for i in range(5)]
     spec = ArrayJobSpec(commands=tuple(cmds))
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         jsid = manager.submit_array(spec)

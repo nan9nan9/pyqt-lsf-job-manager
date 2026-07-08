@@ -27,7 +27,7 @@ def test_wrapper_parse_failure_keeps_stdout(qtbot, manager, fake_lsf):
     """NO_JOBID_PARSED는 stdout에 단서가 있다 — stdout도 담겨야 한다."""
     fake_lsf.no_jobid_next_bsub = 1
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit_wrapper(["primesim_sub -i a.sp"],
+        js = manager.submit_wrapper(["customwrapper_sub -i a.sp"],
                                     auto_poll=False)
     rec = js.jobs()[0]
     assert rec.state is JobState.SUBMIT_FAILED

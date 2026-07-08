@@ -21,7 +21,7 @@ def test_three_line_usage(qtbot, fake_lsf, config):
     mgr = LsfJobManager(config=config, runner=fake_lsf)
     try:
         summaries = []
-        js = mgr.submit([f"hspice run_{i}.sp" for i in range(10)])
+        js = mgr.submit([f"mytool run_{i}.sp" for i in range(10)])
         js.jobset_updated.connect(summaries.append)
 
         assert isinstance(js, JobSet)
@@ -48,13 +48,13 @@ def test_auto4_identical_commands_use_array(qtbot, manager, fake_lsf):
 
 
 def test_auto4_index_pattern_substituted_to_array(qtbot, manager, fake_lsf):
-    js = manager.submit([f"hspice tt_{i}.sp" for i in range(1, 31)],
+    js = manager.submit([f"mytool tt_{i}.sp" for i in range(1, 31)],
                         auto_poll=False)
     with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     calls = fake_lsf.calls_of("bsub")
     assert len(calls) == 1                              # $LSB_JOBINDEX 치환
-    assert "hspice tt_${LSB_JOBINDEX}.sp" in calls[0][-1]
+    assert "mytool tt_${LSB_JOBINDEX}.sp" in calls[0][-1]
 
 
 def test_auto4_mixed_commands_use_bulk(qtbot, manager, fake_lsf):

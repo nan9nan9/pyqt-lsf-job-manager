@@ -28,7 +28,7 @@ def test_kill_merged_wrapper_and_bsub_jobset(qtbot, manager, fake_lsf):
     chunk fallback으로 반드시 죽여야 한다."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js_w = manager.submit_wrapper(
-            ["primesim_sub -i a.sp", "primesim_sub -i b.sp"], auto_poll=False)
+            ["customwrapper_sub -i a.sp", "customwrapper_sub -i b.sp"], auto_poll=False)
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js_b = manager.submit(["echo x", "echo y"], mode="bulk",
                               auto_poll=False)
@@ -47,7 +47,7 @@ def test_kill_merged_optimistic_no_false_exit(qtbot, manager, fake_lsf):
     """optimistic 정책이 LSF에 살아있는 job을 EXIT로 오표시하면 안 된다 —
     kill이 wrapper job까지 실제로 커버해야 store가 거짓말하지 않는다."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js_w = manager.submit_wrapper(["primesim_sub -i a.sp"],
+        js_w = manager.submit_wrapper(["customwrapper_sub -i a.sp"],
                                       auto_poll=False)
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js_b = manager.submit(["echo x"], auto_poll=False)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """JobSet handler 예제 — job 별 주기 실행 + 최종 수집 (콘솔).
 
-시나리오: EDA 시뮬레이션이 도는 동안 **각 job 의 출력 파일을 몇 초마다 파싱**해
+시나리오: 시뮬레이션이 도는 동안 **각 job 의 출력 파일을 몇 초마다 파싱**해
 진행 상황(중간 결과)을 수집하고, job 이 끝나면(DONE/EXIT) **최종 수집을 한 번 더**
 수행한다. 이 "주기 파싱" 작업을 lsfmgr 의 JobSet handler 로 붙인다.
 
@@ -99,7 +99,7 @@ def main():
     mgr.handler_finished.connect(on_handler)
 
     # --- 제출 + polling + handler 등록 ---
-    cmds = [wrapper("primesim_sub", "-q", "normal", f"run_{i}.sp")
+    cmds = [wrapper("customwrapper_sub", "-q", "normal", f"run_{i}.sp")
             for i in range(N_JOBS)]
     js = mgr.submit_wrapper(cmds, label="handler-demo", auto_poll=False)
     js.start_polling(interval_s=1)     # 데모: 상태 전이를 촘촘히 관찰

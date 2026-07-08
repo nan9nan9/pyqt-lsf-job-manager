@@ -2,9 +2,9 @@
 
 모든 예제는 기본으로 **mocklsf**(저장소 동봉 가상 LSF)를 테스트 환경으로 쓴다.
 실제 LSF cluster 명령이 아니라 `bin/`의 가상 명령을 subprocess 로 호출하며,
-job 제출은 `primesim_sub` 같은 wrapper 를 거쳐 mocklsf 의 bsub 로 이어진다.
+job 제출은 `customwrapper_sub` 같은 wrapper 를 거쳐 mocklsf 의 bsub 로 이어진다.
 
-- 기본 제출 wrapper: `primesim_sub` (finesim_sub / spectrefx_sub 로 교체 가능)
+- 기본 제출 wrapper: `customwrapper_sub` (실제 환경에선 원하는 wrapper로 교체)
 - mocklsf 상태는 프로세스별 임시 `MOCKLSF_HOME`(SQLite)에 격리되고, 종료 시 정리
 - 타이밍/실패율은 MOCKLSF_* 환경변수로 조정 (configure_mocklsf 헬퍼)
 
@@ -28,11 +28,11 @@ from lsfmgr import LsfJobManager
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(_REPO_ROOT, "bin")
 
-#: 기본 제출 wrapper — 실제 EDA 환경의 툴 전용 제출 스크립트를 흉내낸다.
-DEFAULT_WRAPPER = "primesim_sub"
+#: 기본 제출 wrapper — 실제 환경의 툴 전용 제출 스크립트를 흉내낸다.
+DEFAULT_WRAPPER = "customwrapper_sub"
 
-#: 데모에서 고를 수 있는 툴별 제출 wrapper (job 마다 다른 wrapper 사용 가능).
-WRAPPERS = ["primesim_sub", "finesim_sub", "spectrefx_sub", "verilog_sub"]
+#: 데모 제출 wrapper 목록 (실제 환경에선 여기에 여러 wrapper를 둘 수 있다).
+WRAPPERS = ["customwrapper_sub"]
 
 _REAL = os.environ.get("LSFMGR_REAL") == "1"
 

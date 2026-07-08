@@ -21,11 +21,11 @@ PyQt 앱을 실제 LSF 없이 테스트하기 위한 용도. **이 저장소에 
 ├── bin/                # 실제 LSF 명령과 같은 이름의 실행 래퍼
 │   ├── bsub bjobs mjobs bkill bqueues bhist bpeek bstop bresume bmod bgdel
 │   ├── mocklsfd
-│   └── primesim_sub finesim_sub spectrefx_sub verilog_sub   # 툴별 제출 wrapper
+│   └── customwrapper_sub customwrapper_sub customwrapper_sub customwrapper_sub   # 툴별 제출 wrapper
 └── tests/test_mocklsf.py
 ```
 
-> 실제 환경처럼 job 마다 wrapper(`primesim_sub` 등)로 제출하는 방법은
+> 실제 환경처럼 job 마다 wrapper(`customwrapper_sub` 등)로 제출하는 방법은
 > [`lsfmgr.md`](lsfmgr.md) 참고 (lsfmgr `submit_wrapper`).
 
 ## 동작 방식

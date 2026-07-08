@@ -18,7 +18,7 @@ def test_quickstart_verbatim(qtbot, fake_lsf, config):
     mgr = LsfJobManager(config=config, runner=fake_lsf)
     try:
         lines = []
-        js = mgr.submit([f"hspice run_{i}.sp" for i in range(50)])
+        js = mgr.submit([f"mytool run_{i}.sp" for i in range(50)])
         js.jobset_updated.connect(
             lambda s: lines.append(
                 f"RUN={s.get('RUN', 0)} DONE={s.get('DONE', 0)}/{s['total']}"))

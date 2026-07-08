@@ -3,14 +3,14 @@
 
 하나의 화면에서 lsfmgr 의 주요 기능을 모두 다룬다:
   - submit_wrapper 로 제출 + 진행률 바 / 취소   (QT-5/QT-6, rate limit)
-  - job 마다 다른 wrapper (primesim_sub/verilog_sub …) 또는 '혼합'
+  - job 마다 wrapper 커맨드 (customwrapper_sub 등) 또는 '혼합'
   - 다중 JobSet 관리 + 요약 실시간 갱신        (Facade Signal, README §9)
   - 선택 JobSet 의 job 단위 모니터링 테이블     (상태별 색, jobs_updated 배치)
   - kill 전략: 전체 / PEND만 / verify           (FR-3, KillReport — job_id 기반)
   - 실패 처리: retry(비정상 종료) / SUBMIT_FAILED / EXIT / detect_lost
   - SQLite 영속 + 세션 복원                     (orphan → recover → reconcile, FR-6)
 
-제출은 wrapper 커맨드(예: `primesim_sub -q normal run_3.sp`)를 그대로 실행하고
+제출은 wrapper 커맨드(예: `customwrapper_sub -q normal run_3.sp`)를 그대로 실행하고
 그 결과의 `Job <id>` 로 job 을 관리한다. 테스트 환경은 저장소 동봉 mocklsf 이며,
 실제 LSF 에서 돌리려면 LSFMGR_REAL=1 을 준다.
 
@@ -56,7 +56,7 @@ _JOB_ID_RE = re.compile(r"Job <([^>]+)>")
 def make_logging_runner(bus: _LogBus):
     """default_runner 를 감싸, 실제 실행된 '제출 명령'과 할당된 job_id 를 로깅.
 
-    lsfmgr 는 submit 마다 이 runner 로 argv(맨 앞이 primesim_sub wrapper)를
+    lsfmgr 는 submit 마다 이 runner 로 argv(맨 앞이 customwrapper_sub wrapper)를
     subprocess 실행한다. 여기서 그 argv 원문과 stdout 의 'Job <id>' 를 남긴다.
     조회/종료(bjobs/bkill 등)는 제외하고 제출 명령만 로깅한다.
     """
@@ -96,7 +96,7 @@ _STATE_COLOR = {
 
 
 class SubmitForm(QGroupBox):
-    """submit_wrapper 옵션 폼. job 마다 wrapper(primesim_sub 등)로 제출한다."""
+    """submit_wrapper 옵션 폼. job 마다 wrapper(customwrapper_sub 등)로 제출한다."""
 
     def __init__(self, on_submit):
         super().__init__("Submit 옵션 (submit_wrapper)")
@@ -145,7 +145,7 @@ class SubmitForm(QGroupBox):
         """job 마다 wrapper 커맨드(토큰 리스트)를 만든다.
 
         '혼합' 선택 시 job 마다 다른 wrapper 를 순환 사용한다 — 실제 환경에서
-        job 별로 primesim_sub/verilog_sub 등이 섞이는 상황을 재현한다.
+        job 별로 서로 다른 wrapper 커맨드가 섞이는 상황을 재현한다.
         """
         n = self.count.value()
         q = self.queue.text().strip()
@@ -180,7 +180,7 @@ class Dashboard(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("lsfmgr — 통합 대시보드 (mocklsf / primesim_sub)")
+        self.setWindowTitle("lsfmgr — 통합 대시보드 (mocklsf / customwrapper_sub)")
         self.mgr = None
         self._items = {}                 # jobset_id → QTreeWidgetItem
         self._active_submit = None       # 진행률 바가 추적 중인 jobset_id

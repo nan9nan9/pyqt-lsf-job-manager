@@ -17,12 +17,12 @@ from tests.test_store_contract import make_job, make_jobset
 # ----------------------------------------------------------------------
 def test_template_rejects_leading_zero_indices():
     # "run_01" vs $LSB_JOBINDEX(=1) → run_1 이 되므로 array 불가 판정이어야 함
-    cmds = [f"hspice run_{i:02d}.sp" for i in range(1, 11)]
+    cmds = [f"mytool run_{i:02d}.sp" for i in range(1, 11)]
     assert detect_array_template(cmds) is None
 
     # zero-padding 없는 1..N은 여전히 array 가능
-    cmds2 = [f"hspice run_{i}.sp" for i in range(1, 11)]
-    assert detect_array_template(cmds2) == "hspice run_${LSB_JOBINDEX}.sp"
+    cmds2 = [f"mytool run_{i}.sp" for i in range(1, 11)]
+    assert detect_array_template(cmds2) == "mytool run_${LSB_JOBINDEX}.sp"
 
 
 def test_leading_zero_commands_submitted_verbatim(qtbot, manager, fake_lsf):

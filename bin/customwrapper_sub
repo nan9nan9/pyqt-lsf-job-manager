@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# MockLSF primesim_sub — PrimeSim 잡 제출 wrapper (bash).
+# MockLSF customwrapper_sub — 커스텀 잡 제출 wrapper (bash).
 # 받은 인자를 그대로 mocklsf 의 bsub 에 전달하고, 그 출력을 그대로 통과시킨다.
 #
 set -eo pipefail

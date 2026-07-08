@@ -161,7 +161,7 @@ class _SubmitTask(_BaseSubmitTask):
 class _WrapperSubmitTask(_BaseSubmitTask):
     """wrapper 커맨드 1개를 '그대로' 실행하는 worker (submit_wrapper 용).
 
-    lsfmgr 는 인자를 조립하지 않는다 — argv(예: ["primesim_sub","-i","a.sp"])를
+    lsfmgr 는 인자를 조립하지 않는다 — argv(예: ["customwrapper_sub","-i","a.sp"])를
     subprocess 로 실행하고 stdout 의 'Job <id>' 만 파싱한다. 관리는 그렇게 얻은
     job_id 로만 이뤄진다(그룹/이름 부착물 없음).
     """

@@ -125,18 +125,18 @@ def test_gate_wrapper_path(qtbot, manager, fake_lsf):
 
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js = manager.submit_wrapper(
-            ["primesim_sub -i a.sp", ["verilog_sub", "-q", "long", "tb.v"]],
+            ["customwrapper_sub -i a.sp", ["customwrapper_sub", "-q", "long", "tb.v"]],
             auto_poll=False, pre_submit=gate)
-    assert got["cmds"] == ["primesim_sub -i a.sp", "verilog_sub -q long tb.v"]
+    assert got["cmds"] == ["customwrapper_sub -i a.sp", "customwrapper_sub -q long tb.v"]
     assert all(r.state is JobState.PEND for r in js.jobs())
 
 
 def test_gate_wrapper_reject(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000) as blocker:
-        js = manager.submit_wrapper(["primesim_sub -i a.sp"], auto_poll=False,
+        js = manager.submit_wrapper(["customwrapper_sub -i a.sp"], auto_poll=False,
                                     pre_submit=lambda c: False)
     assert blocker.args[1].cancelled == 1
-    assert fake_lsf.calls_of("primesim_sub") == []
+    assert fake_lsf.calls_of("customwrapper_sub") == []
 
 
 # ----------------------------------------------------------------------

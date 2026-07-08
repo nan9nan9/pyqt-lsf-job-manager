@@ -1,6 +1,6 @@
 """submit_wrapper 테스트 — wrapper 커맨드로 제출하고 job_id 로 관리.
 
-lsfmgr 는 각 wrapper 커맨드(primesim_sub 등)를 그대로 실행하고 'Job <id>' 를
+lsfmgr 는 각 wrapper 커맨드(customwrapper_sub 등)를 그대로 실행하고 'Job <id>' 를
 파싱해 job_id 기반으로 관리한다(‑q/‑J/‑g 조립·주입 없음, 그룹/이름 부착물 없음).
 재시도는 비정상 종료(non-zero)만 대상이며 파싱 실패는 재시도하지 않는다.
 """
@@ -19,7 +19,7 @@ def _finish(qtbot, mgr, timeout=15000):
 # 기본 — 커맨드 실행 + job_id 확보 + 부착물 없음
 # ----------------------------------------------------------------------
 def test_submit_wrapper_captures_job_id(qtbot, manager, fake_lsf):
-    cmds = [f"primesim_sub -q normal run_{i}.sp" for i in range(20)]
+    cmds = [f"customwrapper_sub -q normal run_{i}.sp" for i in range(20)]
     with qtbot.waitSignal(manager.submit_finished, timeout=15000) as blocker:
         js = manager.submit_wrapper(cmds, workers=8)
     _, report = blocker.args
@@ -30,8 +30,8 @@ def test_submit_wrapper_captures_job_id(qtbot, manager, fake_lsf):
     assert all(r.job_id is not None for r in recs)       # 전원 job_id 확보
     assert all(r.state == JobState.PEND for r in recs)
 
-    # 실제로 primesim_sub 가 실행됐는지 (bsub 직접 호출 아님)
-    assert fake_lsf.calls_of("primesim_sub"), "primesim_sub 가 실행되지 않음"
+    # 실제로 customwrapper_sub 가 실행됐는지 (bsub 직접 호출 아님)
+    assert fake_lsf.calls_of("customwrapper_sub"), "customwrapper_sub 가 실행되지 않음"
 
     # job_id 만으로 관리 → 그룹/이름 부착물 없음
     jsrec = manager.store.get_jobset(js.id)
@@ -40,17 +40,17 @@ def test_submit_wrapper_captures_job_id(qtbot, manager, fake_lsf):
 
 
 def test_submit_wrapper_token_list_and_mixed(qtbot, manager, fake_lsf):
-    # 문자열 / 토큰 리스트 혼용 + job 마다 다른 wrapper
+    # 문자열 / 토큰 리스트 혼용 + job 마다 다른 커맨드
     cmds = [
-        "primesim_sub -q normal a.sp",
-        ["verilog_sub", "-q", "long", "b.v"],
-        ["primesim_sub", "c.sp"],
+        "customwrapper_sub -q normal a.sp",
+        ["customwrapper_sub", "-q", "long", "b.v"],
+        ["customwrapper_sub", "c.sp"],
     ]
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js = manager.submit_wrapper(cmds)
     assert all(r.job_id is not None for r in manager.get_jobs(js.id))
-    assert fake_lsf.calls_of("primesim_sub")
-    assert fake_lsf.calls_of("verilog_sub")
+    # 세 커맨드 모두 wrapper를 그대로 거쳐 실행됨
+    assert len(fake_lsf.calls_of("customwrapper_sub")) == 3
 
 
 # ----------------------------------------------------------------------
@@ -59,7 +59,7 @@ def test_submit_wrapper_token_list_and_mixed(qtbot, manager, fake_lsf):
 def test_wrapper_retry_on_nonzero(qtbot, manager, fake_lsf):
     fake_lsf.fail_next_bsub = 2          # 처음 2회 rc!=0 → 재시도로 성공
     with qtbot.waitSignal(manager.submit_finished, timeout=15000) as blocker:
-        js = manager.submit_wrapper(["primesim_sub x.sp"], max_retry=3)
+        js = manager.submit_wrapper(["customwrapper_sub x.sp"], max_retry=3)
     _, report = blocker.args
     assert report.succeeded == 1
     assert report.retried >= 1
@@ -71,7 +71,7 @@ def test_wrapper_no_retry_on_parse_fail(qtbot, manager, fake_lsf):
     # 위험이 있어, max_retry 가 있어도 재시도하지 않고 즉시 실패해야 한다.
     fake_lsf.no_jobid_next_bsub = 5
     with qtbot.waitSignal(manager.submit_finished, timeout=10000) as blocker:
-        js = manager.submit_wrapper(["primesim_sub x.sp"], max_retry=3)
+        js = manager.submit_wrapper(["customwrapper_sub x.sp"], max_retry=3)
     _, report = blocker.args
     assert report.failed == 1 and report.succeeded == 0
     assert report.retried == 0           # 재시도 안 함
@@ -80,7 +80,7 @@ def test_wrapper_no_retry_on_parse_fail(qtbot, manager, fake_lsf):
     assert rec.state == JobState.SUBMIT_FAILED
     assert rec.fail_reason == "NO_JOBID_PARSED"
     # bsub 흉내는 딱 1회만 호출됐어야 한다 (재시도 없음)
-    assert len(fake_lsf.calls_of("primesim_sub")) == 1
+    assert len(fake_lsf.calls_of("customwrapper_sub")) == 1
 
 
 # ----------------------------------------------------------------------
@@ -89,7 +89,7 @@ def test_wrapper_no_retry_on_parse_fail(qtbot, manager, fake_lsf):
 def test_wrapper_kill_by_id(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=15000):
         js = manager.submit_wrapper(
-            [f"primesim_sub run_{i}.sp" for i in range(10)], workers=8)
+            [f"customwrapper_sub run_{i}.sp" for i in range(10)], workers=8)
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
         js.kill()
     _, report = blocker.args

@@ -200,7 +200,7 @@ mgr.kill_finished.connect(lambda jsid, rpt: bar.setVisible(False))
 
 ```python
 def on_submit_clicked(self):
-    cmds = [f"primesim_sub -q normal run_{i}.sp" for i in range(5000)]
+    cmds = [f"customwrapper_sub -q normal run_{i}.sp" for i in range(5000)]
     js = self.mgr.submit_wrapper(cmds, workers=32, max_retry=3, label="sweep")
     self._current_jsid = js.id                # 이 JobSet을 테이블에 표시
     self.bar.setValue(0)
@@ -267,7 +267,7 @@ def on_resubmit_selected(self):
     keys = self.table.selected_job_keys()
     js.resubmit_jobs(keys)                     # 상태 기반 자동 분기
     # 커맨드를 바꿔 재실행하려면:
-    # js.resubmit_jobs(keys, commands={key: "primesim_sub -q long a.sp"})
+    # js.resubmit_jobs(keys, commands={key: "customwrapper_sub -q long a.sp"})
 ```
 
 선택 job이 섞여 있어도 **조건별로** 처리되고, 그 과정이 `jobs_updated`로 단계별 발행:

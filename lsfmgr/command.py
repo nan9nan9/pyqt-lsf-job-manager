@@ -308,7 +308,7 @@ class LsfCommand:
         """wrapper 커맨드(argv)를 조립 없이 그대로 실행하고 'Job <id>' 파싱.
 
         lsfmgr 가 -q/-J/-g 등을 붙이지 않는다 — argv 전체가 사용자가 준 wrapper
-        커맨드(예: ["primesim_sub", "-i", "a.sp"])다. 실패 분류(FR-2.1):
+        커맨드(예: ["customwrapper_sub", "-i", "a.sp"])다. 실패 분류(FR-2.1):
           - rc != 0            → BSUB_EXIT_<rc>   (재시도 O — 일시적 오류 가정)
           - timeout            → BSUB_TIMEOUT     (재시도 X — 중복 제출 위험)
           - 'Job <id>' 없음    → NO_JOBID_PARSED  (재시도 X — 이미 제출됐을 수 있음)
