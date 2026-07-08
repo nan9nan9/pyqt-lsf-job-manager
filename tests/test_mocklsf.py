@@ -482,3 +482,81 @@ def test_mc_bkill_needs_cluster_env():
             assert dbmod.Database().all_jobs()[0].stat == "EXIT"
         finally:
             _pop_mc_env()
+
+
+def test_mc_array_shares_one_forward_cluster():
+    """한 array 의 모든 element 는 같은 클러스터로 forward 된다(한 submit=한 결정)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["MOCKLSF_FORWARD_CLUSTERS"] = "cluster_b,cluster_c"
+        os.environ["MOCKLSF_FORWARD_RATE"] = "1.0"
+        try:
+            config, submit, scheduler, dbmod = _fresh_env(tmp)
+            database = dbmod.Database()
+            opts, cmd = submit.parse_args(["-J", "arr[1-5]", "sleep", "30"])
+            jobs, size, _ = submit.build_jobs(database.next_job_id(), opts, cmd)
+            database.insert_jobs(jobs)
+            assert size == 5
+            fclusters = {j.forward_cluster for j in database.all_jobs()}
+            assert len(fclusters) == 1 and fclusters != {""}
+        finally:
+            _pop_mc_env()
+
+
+def test_mc_wrong_cluster_context_refused():
+    """다른 forward 클러스터 컨텍스트에서 kill 시도하면 안 죽는다(rc 255)."""
+    import importlib
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["MOCKLSF_FORWARD_CLUSTERS"] = "cluster_b,cluster_c"
+        os.environ["MOCKLSF_FORWARD_RATE"] = "1.0"
+        os.environ.pop("MOCKLSF_CLUSTER", None)
+        try:
+            config, submit, scheduler, dbmod = _fresh_env(tmp)
+            from mocklsf import cli
+            importlib.reload(cli)
+            database = dbmod.Database()
+            opts, cmd = submit.parse_args(["sleep", "30"])
+            jid = database.next_job_id()
+            jobs, _, _ = submit.build_jobs(jid, opts, cmd)
+            database.insert_jobs(jobs)
+            scheduler.Scheduler(database).tick(time.time())
+            fc = database.all_jobs()[0].forward_cluster
+            database.close()
+            wrong = "cluster_c" if fc == "cluster_b" else "cluster_b"
+            os.environ["MOCKLSF_CLUSTER"] = wrong          # 엉뚱한 클러스터
+            importlib.reload(config)
+            assert cli.cmd_bkill([str(jid)]) == 255
+            assert dbmod.Database().all_jobs()[0].stat == "RUN"
+        finally:
+            _pop_mc_env()
+
+
+def test_mc_off_kill_works_in_any_context():
+    """MC 꺼짐(클러스터 정보 없는 job) 이면 어떤 컨텍스트에서도 로컬 kill 된다."""
+    import importlib
+    with tempfile.TemporaryDirectory() as tmp:
+        _pop_mc_env()
+        os.environ["MOCKLSF_CLUSTER"] = "weirdname"        # 이상한 컨텍스트여도
+        try:
+            config, submit, scheduler, dbmod = _fresh_env(tmp)
+            from mocklsf import cli
+            importlib.reload(cli)
+            database = dbmod.Database()
+            opts, cmd = submit.parse_args(["sleep", "30"])
+            jid = database.next_job_id()
+            jobs, _, _ = submit.build_jobs(jid, opts, cmd)
+            database.insert_jobs(jobs)
+            scheduler.Scheduler(database).tick(time.time())
+            database.close()
+            assert cli.cmd_bkill([str(jid)]) == 0
+            assert dbmod.Database().all_jobs()[0].stat == "EXIT"
+        finally:
+            _pop_mc_env()
+
+
+def test_mc_bkill_error_msg_not_lsfmgr_resolved():
+    """forward job 의 로컬 kill 실패 메시지가 lsfmgr 의 'resolved'(해소) 패턴과
+    겹치면 안 된다 — 겹치면 lsfmgr 가 안 죽은 job 을 죽은 걸로 오인한다."""
+    from lsfmgr.command import _parse_bkill_resolved
+    msg = ("Job <1001>: forwarded to cluster <cluster_b> — "
+           "source its cluster env to kill")
+    assert _parse_bkill_resolved(msg) == set()
