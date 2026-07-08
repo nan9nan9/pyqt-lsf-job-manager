@@ -27,6 +27,10 @@ from lsfmgr import LsfJobManager
 # --- 경로: 저장소 루트/bin (예제는 examples/ 하위) --------------------------
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(_REPO_ROOT, "bin")
+# 저장소 루트를 import 경로에 — mocklsf(가상 LSF 패키지, 미설치)를 예제에서
+# import 할 수 있게 한다 (cluster_env_path 등).
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 #: 기본 제출 wrapper — 실제 환경의 툴 전용 제출 스크립트를 흉내낸다.
 DEFAULT_WRAPPER = "customwrapper_sub"
@@ -74,12 +78,15 @@ def _init_mocklsf_home() -> str:
 
 def configure_mocklsf(*, pend=None, run=None, submit_delay=None,
                       submit_fail_rate=None, exit_rate=None,
-                      suspend_rate=None, slots_per_host=None) -> None:
-    """mocklsf 타이밍/실패율을 MOCKLSF_* 환경변수로 설정한다.
+                      suspend_rate=None, slots_per_host=None,
+                      forward_clusters=None, forward_rate=None) -> None:
+    """mocklsf 타이밍/실패율/MultiCluster를 MOCKLSF_* 환경변수로 설정한다.
 
     데몬은 첫 submit 시 기동하며 그때의 환경을 읽으므로, 이 함수는 반드시
     submit **이전**(예: 예제 상단)에서 호출해야 반영된다.
     (min, max) 튜플 또는 단일 값을 받는다. 실제 LSF 모드에선 무시된다.
+    forward_clusters(리스트)를 주면 MC(job forwarding)를 켠다 — 그 원격
+    클러스터들로 forward_rate 확률로 job이 포워딩된 것처럼 동작한다.
     """
     if _REAL:
         return
@@ -102,6 +109,18 @@ def configure_mocklsf(*, pend=None, run=None, submit_delay=None,
         os.environ["MOCKLSF_SUSPEND_RATE"] = str(suspend_rate)
     if slots_per_host is not None:
         os.environ["MOCKLSF_SLOTS_PER_HOST"] = str(slots_per_host)
+    if forward_clusters is not None:
+        os.environ["MOCKLSF_FORWARD_CLUSTERS"] = ",".join(forward_clusters)
+    if forward_rate is not None:
+        os.environ["MOCKLSF_FORWARD_RATE"] = str(forward_rate)
+
+
+def cluster_env_path(cluster: str) -> str:
+    """forward 클러스터 <cluster>의 cshrc(env) 경로 — lsfmgr kill의 envpath로
+    넘긴다. mocklsf가 첫 DB 접근 시 자동 생성한다(홈 보장 후 반환)."""
+    from mocklsf import config as mockcfg
+    mockcfg.ensure_home()                 # clusterenv/<cluster>.cshrc 생성 보장
+    return mockcfg.cluster_env_path(cluster)
 
 
 # 프로세스 시작 시 1회: 격리 홈 + 데모용 빠른 기본 타이밍.

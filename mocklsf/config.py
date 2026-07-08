@@ -146,6 +146,12 @@ def ensure_home():
     os.makedirs(JOB_OUT_DIR, exist_ok=True)
     if FORWARD_CLUSTERS:
         os.makedirs(CLUSTER_ENV_DIR, exist_ok=True)
+        # mock 명령(bkill 등)이 있는 bin/ — 실제 LSF cshrc.lsf 가 LSF_BINDIR 를
+        # PATH 에 넣듯, source 시 mock bin 을 PATH 앞에 둬 bare `bkill` 이
+        # 이 bin 의 bkill 로 해석되게 한다(lsfmgr 는 envpath 로 `... && bkill`
+        # 를 실행 — PATH 의 bkill 을 쓴다).
+        mock_bin = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin")
         for cluster in FORWARD_CLUSTERS:
             path = cluster_env_path(cluster)
             if not os.path.exists(path):
@@ -156,4 +162,7 @@ def ensure_home():
                         f"# MockLSF {cluster} 클러스터 env — source 하면 이\n"
                         f"# 프로세스의 bkill 이 {cluster} 로 forward된 job 을\n"
                         f"# 죽일 수 있다(실제 MC 의 cshrc.lsf 흉내).\n"
-                        f"setenv MOCKLSF_CLUSTER {cluster}\n")
+                        f"setenv MOCKLSF_CLUSTER {cluster}\n"
+                        # 따옴표 필수 — PATH 에 공백 포함 경로(WSL 등)가 있으면
+                        # 따옴표 없는 setenv 는 'Too many arguments' 로 실패한다.
+                        f'setenv PATH "{mock_bin}:$PATH"\n')
