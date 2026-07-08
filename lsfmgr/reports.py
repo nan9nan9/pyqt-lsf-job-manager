@@ -50,6 +50,30 @@ class SubmitProgress:
 
 
 @dataclass(frozen=True)
+class KillProgress:
+    """진행 중 kill의 실시간 스냅샷 — 아무 때나 조회 가능(pull).
+
+    kill_progress Signal(push)의 조회 버전. 대량 chunked kill(특히 MC envpath는
+    chunk마다 env source, verify는 재조회 루프)을 백그라운드로 돌려놓고 진행
+    dialog를 닫은 뒤 나중에 다시 그릴 때 쓴다. 끝나면 None(핸들 kill_state가
+    None), 최종 결과는 kill_finished(KillReport)로 본다.
+    부착물 전략(group/‏name 1명령)만으로 끝나는 kill은 증분 진행이 없어
+    done/total이 0으로 머물다 완료 시 채워질 수 있다(거의 즉시 끝나는 경로)."""
+    jobset_id: str
+    done: int                # 처리한 target 수(chunk 누적)
+    total: int               # kill 대상 target 수
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.total - self.done)
+
+    @property
+    def fraction(self) -> float:
+        """0.0~1.0 진행률 (total=0이면 0.0 — 아직 증분 단계 전/부착물 전략)."""
+        return (self.done / self.total) if self.total else 0.0
+
+
+@dataclass(frozen=True)
 class KillReport:
     """kill_finished Signal로 전달되는 결과."""
     jobset_id: str

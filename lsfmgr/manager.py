@@ -35,7 +35,7 @@ from .options import (
 )
 from .qt import QCoreApplication, QObject, QRunnable, QThreadPool, QTimer, Signal
 from .resubmit import ResubmitCoordinator, ResubmitPlan
-from .reports import ReconcileReport, SubmitProgress
+from .reports import KillProgress, ReconcileReport, SubmitProgress
 from .states import JobRecord, JobSetRecord, JobState
 from .store.base import JobSetStore
 from .store.memory import InMemoryStore
@@ -406,6 +406,16 @@ class LsfJobManager(QObject):
         resubmit의 kill 단계처럼 아직 submit ctx가 없는 구간에선 None이지만
         is_submitting은 True일 수 있다(준비 중)."""
         return self.submitter.progress_snapshot(jobset_id)
+
+    def is_killing(self, jobset_id: str) -> bool:
+        """[sync] 이 jobset에 진행 중인 kill이 있는지. 대량 chunked kill을
+        백그라운드로 돌려놓고 진행 dialog를 닫은 뒤에도 확인한다."""
+        return self.killer.is_active(jobset_id)
+
+    def kill_snapshot(self, jobset_id: str) -> "Optional[KillProgress]":
+        """[sync] 진행 중 kill의 실시간 스냅샷(done/total) — 없으면 None.
+        kill_progress Signal을 놓친 시점에도 현재 진행을 pull로 조회한다."""
+        return self.killer.progress_snapshot(jobset_id)
 
     # --- 내부 submit 구현 (High/Low 공유) ---
     def _submit_bulk_impl(self, specs: List[JobSpec], opts: Options,

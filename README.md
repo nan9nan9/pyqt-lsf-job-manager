@@ -274,6 +274,10 @@ js.id                      # jobset_id 문자열 (로그/저장용)
 > `submit_finished(SubmitReport)` 또는 `js.summary`로 봅니다.
 > `is_submitting`은 제출/재제출이 도는 동안 True입니다(`jobs`의 PEND/RUN이
 > 아니라 **제출 작업 자체**의 진행 여부).
+> **kill도 대칭**입니다 — 대량 chunked kill(특히 MC `envpath`는 chunk마다 env
+> source, `verify`는 재조회 루프)도 오래 걸릴 수 있어 `js.is_killing` /
+> `js.kill_state`(`KillProgress(done/total)` + `.remaining`/`.fraction`)로 같은
+> 방식으로 조회합니다. 완료 후 최종은 `kill_finished(KillReport)`.
 > > 앱을 닫으면(`shutdown`) 진행 중이던 bsub는 완료까지 기다리되 아직 제출
 > > 안 된 몫은 취소됩니다. 앱 재시작 후에도 이어서 추적하려면
 > > `persistent=True`(SQLite)로 두고 재시작 시 `list_orphan_jobsets()` →

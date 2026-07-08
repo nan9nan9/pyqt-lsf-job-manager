@@ -7,14 +7,15 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .command import LsfCommand
 from .errors import LsfmgrError
 from .monitor import JobsetQuerier
 from .qt import QObject, QRunnable, QThreadPool, Signal
-from .reports import KillReport
+from .reports import KillProgress, KillReport
 from .states import JobState
 from .store.base import JobSetStore
 from .util import EmitThrottler
@@ -37,6 +38,40 @@ class Killer(QObject):
         self.querier = querier
         self._pool = QThreadPool()
         self._pool.setMaxThreadCount(4)
+        # 진행 중 kill의 pull 스냅샷 — jobset_id -> [done, total] (throttle 무관
+        # 최신값). worker(update)와 조회 스레드(snapshot)가 공유해 lock으로 보호.
+        self._active: Dict[str, List[int]] = {}
+        self._active_lock = threading.Lock()
+
+    def is_active(self, jobset_id: str) -> bool:
+        """이 jobset에 진행 중인 kill이 있는지 (pull)."""
+        with self._active_lock:
+            return jobset_id in self._active
+
+    def progress_snapshot(self, jobset_id: str) -> Optional[KillProgress]:
+        """진행 중 kill의 실시간 스냅샷 — 없으면 None."""
+        with self._active_lock:
+            dt = self._active.get(jobset_id)
+            if dt is None:
+                return None
+            return KillProgress(jobset_id=jobset_id, done=dt[0], total=dt[1])
+
+    def _reg(self, jobset_id: str) -> None:
+        if jobset_id:                    # 전역 kill(jsid 없음)은 스냅샷 대상 아님
+            with self._active_lock:
+                self._active[jobset_id] = [0, 0]
+
+    def _set_progress(self, jobset_id: str, done: int, total: int) -> None:
+        if jobset_id:
+            with self._active_lock:
+                dt = self._active.get(jobset_id)
+                if dt is not None:
+                    dt[0], dt[1] = done, total
+
+    def _unreg(self, jobset_id: str) -> None:
+        if jobset_id:
+            with self._active_lock:
+                self._active.pop(jobset_id, None)
 
     # ------------------------------------------------------------------
     def kill_jobset(self, jobset_id: str, *,
@@ -78,19 +113,26 @@ class _KillTask(QRunnable):
                                    cfg.progress_min_step_ratio)
 
     def run(self):
+        self.killer._reg(self.jobset_id)     # pull 스냅샷 등록
         try:
-            report = self._run()
-        except Exception as e:               # noqa: BLE001 — CS-5
-            log.exception("kill 실패: %s", self.jobset_id)
-            self.killer.error.emit(self.jobset_id, repr(e))
-            return
-        # 완료 시 항상 100% 보장 (미확인이 남아도 작업은 끝) — submit과 대칭
-        self.killer.progress.emit(self.jobset_id, report.requested,
-                                  report.requested)
-        self.killer.finished.emit(self.jobset_id, report)
+            try:
+                report = self._run()
+            except Exception as e:           # noqa: BLE001 — CS-5
+                log.exception("kill 실패: %s", self.jobset_id)
+                self.killer.error.emit(self.jobset_id, repr(e))
+                return
+            # 완료 시 항상 100% 보장 (미확인이 남아도 작업은 끝) — submit과 대칭
+            self.killer._set_progress(self.jobset_id, report.requested,
+                                      report.requested)
+            self.killer.progress.emit(self.jobset_id, report.requested,
+                                      report.requested)
+            self.killer.finished.emit(self.jobset_id, report)
+        finally:
+            self.killer._unreg(self.jobset_id)
 
     def _emit_progress(self, done: int, total: int) -> None:
-        """chunk 진행 통지 (throttled)."""
+        """chunk 진행 통지 (throttled) + pull 스냅샷 갱신(throttle 무관 최신)."""
+        self.killer._set_progress(self.jobset_id, done, total)
         if total > 0 and self._prog.should_emit(done, total):
             self.killer.progress.emit(self.jobset_id, done, total)
 

@@ -13,7 +13,7 @@ from .states import JobRecord, JobState
 
 if TYPE_CHECKING:
     from .manager import LsfJobManager
-    from .reports import SubmitProgress
+    from .reports import KillProgress, SubmitProgress
 
 
 class JobSet(QObject):
@@ -250,6 +250,22 @@ class JobSet(QObject):
         완료 후 최종 결과는 summary / submit_finished(SubmitReport)로 본다."""
         self._check_open()
         return self._manager.submit_snapshot(self._jobset_id)
+
+    @property
+    def is_killing(self) -> bool:
+        """[sync] 이 JobSet에 진행 중인 kill이 있는지. 대량 chunked kill(특히
+        MC envpath/verify)을 백그라운드로 돌려놓고 진행 dialog를 닫은 뒤에도
+        아직 kill 중인지 아무 때나 확인한다."""
+        self._check_open()
+        return self._manager.is_killing(self._jobset_id)
+
+    @property
+    def kill_state(self) -> "Optional[KillProgress]":
+        """[sync] 진행 중 kill의 실시간 스냅샷(done/total) — 진행 중이 아니면
+        None. kill_progress Signal을 놓친 뒤 상태 패널을 다시 그릴 때 pull로
+        조회한다. 완료 후 최종 결과는 kill_finished(KillReport)로 본다."""
+        self._check_open()
+        return self._manager.kill_snapshot(self._jobset_id)
 
     @property
     def failed_jobs(self) -> List[JobRecord]:
