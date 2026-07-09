@@ -397,15 +397,53 @@ class LsfCommand:
     def bjobs_by_name(self, pattern: str) -> List[JobStatus]:
         return self._bjobs(["-J", pattern])
 
-    def bjobs_by_ids(self, job_ids: Sequence[int]) -> List[JobStatus]:
-        """job_id 목록 chunked 조회 — 최후 수단 (graceful degradation)."""
+    def bjobs_by_ids(self, job_ids: Sequence[int]
+                     ) -> Tuple[List[JobStatus], Set[int]]:
+        """job_id 목록 chunked 조회 — 최후 수단 (graceful degradation).
+
+        반환: (조회 성공분, 조회 실패한 chunk의 job_id 집합) — bhist_states와
+        동일한 chunk 단위 실패 격리. caller는 실패 집합의 job만 판단을
+        보류하고, 성공 chunk에서 미발견된 job은 부재로 확정할 수 있다."""
         out: List[JobStatus] = []
         ids = [str(i) for i in job_ids]
         base = self._prog_len(self.config.bjobs_path) + 40
-        for chunk in chunk_args(ids, self.config.chunk_size,
-                                self.config.arg_max, base):
-            out.extend(self._bjobs(chunk))
-        return out
+        failed = self._query_chunks_isolated(
+            ids, base, lambda chunk: out.extend(self._bjobs(chunk)), "bjobs")
+        return out, failed
+
+    def _query_chunks_isolated(self, ids: List[str], base: int,
+                               run_chunk: Callable[[List[str]], None],
+                               what: str) -> Set[int]:
+        """chunked 조회 공통 골격 — chunk 단위 실패 격리 + 연속 실패 회로 차단.
+
+        run_chunk(chunk)가 LsfCommandError를 던지면 그 chunk의 job_id만
+        실패로 귀속하고 다음 chunk를 계속한다. 연속 2회 실패는 특정 chunk가
+        아니라 조회 수단 자체의 전면 장애로 본다(데몬 hang이면 chunk마다
+        timeout까지 기다린다) — 남은 chunk를 호출 없이 실패 처리하고
+        중단한다. 격리(1개 chunk 실패는 계속)와 fail-fast(전면 장애에
+        chunk 수 × timeout 직렬 블록 방지)를 양립시키는 회로 차단.
+        반환: 조회 실패로 귀속된 job_id 집합."""
+        failed: Set[int] = set()
+        chunks = list(chunk_args(ids, self.config.chunk_size,
+                                 self.config.arg_max, base))
+        consecutive = 0
+        for i, chunk in enumerate(chunks):
+            try:
+                run_chunk(chunk)
+            except LsfCommandError as e:
+                log.warning("조회 실패(%s): %s", what, e)
+                failed.update(int(x) for x in chunk)
+                consecutive += 1
+                if consecutive >= 2 and i + 1 < len(chunks):
+                    log.warning("%s 연속 %d회 실패 — 남은 %d개 chunk 조회 "
+                                "중단(전면 장애로 간주)", what, consecutive,
+                                len(chunks) - i - 1)
+                    for rest in chunks[i + 1:]:
+                        failed.update(int(x) for x in rest)
+                    break
+                continue
+            consecutive = 0
+        return failed
 
     def _run_or_nomatch(self, argv: List[str],
                         timeout: float) -> Optional[CommandResult]:
@@ -498,44 +536,22 @@ class LsfCommand:
         전 element를 덮어써 DONE/EXIT가 뒤섞인다. 미발견 job은 미포함.
 
         반환: (조회 성공분 map, 조회 실패한 chunk의 job_id 집합). 실패는
-        chunk 단위로 격리한다 — 한 chunk가 exit≠0(디스크 full로 bhist가
-        로그를 못 쓰는 등)이어도 그 chunk의 job만 실패로 표시하고 나머지
-        chunk는 계속 조회한다. caller는 실패 집합의 job만 판단 보류하고,
-        성공 chunk에서 미발견된 job은 진짜 소실로 확정할 수 있다.
+        chunk 단위로 격리하고 연속 실패엔 회로를 차단한다
+        (_query_chunks_isolated 참조). caller는 실패 집합의 job만 판단
+        보류하고, 성공 chunk에서 미발견된 job은 진짜 소실로 확정할 수 있다.
         """
         result: Dict[LsfCommand.BhistKey, Tuple[JobState, Optional[int]]] = {}
-        failed: Set[int] = set()
         ids = [str(i) for i in job_ids]
         base = self._prog_len(self.config.bhist_path) + 20
-        chunks = list(chunk_args(ids, self.config.chunk_size,
-                                 self.config.arg_max, base))
-        consecutive = 0
-        for i, chunk in enumerate(chunks):
-            argv = cmd_tokens(self.config.bhist_path) + ["-l", "-n", "0"] + chunk
-            try:
-                res = self._run_query(argv)
-            except LsfCommandError as e:
-                # 이 chunk만 실패로 격리 — 나머지 chunk 조회는 계속한다.
-                log.warning("조회 실패(bhist): %s", e)
-                failed.update(int(x) for x in chunk)
-                consecutive += 1
-                # 연속 실패 = 특정 chunk가 아니라 bhist 자체의 전면 장애
-                # (데몬 hang이면 chunk마다 timeout까지 기다린다) — 나머지
-                # chunk를 즉시 실패로 표시하고 끊는다. 격리(1개 chunk 실패는
-                # 계속)와 fail-fast(전면 장애에 chunk 수 × timeout 직렬
-                # 블록 방지)를 양립시키는 회로 차단.
-                if consecutive >= 2 and i + 1 < len(chunks):
-                    log.warning("bhist 연속 %d회 실패 — 남은 %d개 chunk "
-                                "조회 중단(전면 장애로 간주)",
-                                consecutive, len(chunks) - i - 1)
-                    for rest in chunks[i + 1:]:
-                        failed.update(int(x) for x in rest)
-                    break
-                continue
-            consecutive = 0
-            if res is None:
-                continue
-            result.update(self._parse_bhist(res.stdout))
+
+        def run_chunk(chunk: List[str]) -> None:
+            argv = (cmd_tokens(self.config.bhist_path)
+                    + ["-l", "-n", "0"] + chunk)
+            res = self._run_query(argv)
+            if res is not None:
+                result.update(self._parse_bhist(res.stdout))
+
+        failed = self._query_chunks_isolated(ids, base, run_chunk, "bhist")
         return result, failed
 
     def bhist_detail(self, job_id: int,

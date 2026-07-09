@@ -65,13 +65,17 @@ class JobsetQuerier:
         probes = (
             [(f"group {p}", lambda p=p: self.command.bjobs_by_group(p))
              for p in js.lsf_group_paths]
-            + [(f"array {a}", lambda a=a: self.command.bjobs_by_ids([a]))
-               for a in js.array_job_ids]
             + [(f"name {pt}", lambda pt=pt: self.command.bjobs_by_name(pt))
                for pt in js.name_patterns])
         probe_failed = False
         for what, fn in probes:
             probe_failed |= not self._try(lambda fn=fn: collect(fn()), what)
+        # array probe — bjobs_by_ids는 격리형(예외 대신 실패 id 집합 반환).
+        # 단일 id 조회라 실패 집합이 비어있지 않음 == 그 probe의 실패다.
+        for a in js.array_job_ids:
+            sts, arr_failed = self.command.bjobs_by_ids([a])
+            collect(sts)
+            probe_failed |= bool(arr_failed)
 
         # --- 2) 부착물로 커버 안 된 job은 chunked bjobs (graceful degradation) ---
         def lookup(rec: JobRecord) -> Optional[JobStatus]:
@@ -96,9 +100,13 @@ class JobsetQuerier:
 
         leftover_ids = sorted({r.job_id for r in targets
                                if r.job_id is not None and lookup(r) is None})
+        # chunk 단위 실패 격리 (bhist와 대칭) — 한 chunk의 실패가 전역
+        # probe_failed로 뭉개지면 성공 chunk에서 부재 확인된 job의 LOST
+        # 확정까지 jobset 전체가 보류된다. 실패 chunk의 job만 보류한다.
+        bjobs_failed: set = set()
         if leftover_ids:
-            probe_failed |= not self._try(lambda: collect(
-                self.command.bjobs_by_ids(leftover_ids)), "chunk")
+            sts, bjobs_failed = self.command.bjobs_by_ids(leftover_ids)
+            collect(sts)
 
         # --- 3) 상태 반영 + bjobs 미발견분은 bhist fallback (FR-4.3) ---
         # 이 사이클은 시작 시점 스냅샷(targets) 기반이고 bjobs 왕복 동안 수 초가
@@ -179,10 +187,13 @@ class JobsetQuerier:
                     update_specs.append((rec.job_key, state, unchanged(rec),
                                          {"exit_code": exit_code}))
                 elif (probe_failed or rec.job_id in bhist_failed
-                      or (rec.job_id is None and bhist_failed)):
-                    # 세 번째 조건: job_id 없는 레코드는 bhist로 확인 자체가
-                    # 불가 — bhist 장애가 섞인 사이클엔 보수적으로 보류한다
-                    # (chunk 격리 도입 전의 전역 보류와 동일 semantics, FR-4.3)
+                      or rec.job_id in bjobs_failed
+                      or (rec.job_id is None
+                          and (bhist_failed or bjobs_failed))):
+                    # 마지막 조건: job_id 없는 레코드는 id 기반 조회(bjobs
+                    # chunk/bhist)로 확인 자체가 불가 — 그 수단들의 장애가
+                    # 섞인 사이클엔 보수적으로 보류한다 (chunk 격리 도입
+                    # 전의 전역 보류와 동일 semantics, FR-4.3)
                     # 조회 수단 실패가 섞인 사이클 — LOST 확정 보류.
                     # probe(bjobs) 실패, 또는 이 job이 속한 bhist chunk가
                     # 실패한 경우. LSF 순단이면 다음 사이클에서 정상 복구되고,

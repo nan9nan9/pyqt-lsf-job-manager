@@ -187,3 +187,53 @@ def test_revert_to_created_clears_failure_residue(qtbot, manager, fake_lsf):
     assert rec.fail_reason is None
     assert rec.fail_message is None
     assert rec.retry_count == 0
+
+
+def test_quiesce_wait_releases_killer_pool_slot(qtbot, manager, fake_lsf):
+    """quiesce 대기는 killer pool(4스레드) 슬롯을 반납한다 — 대기 4건이
+    pool을 다 잡아도 다섯 번째 kill이 즉시 착수·완료돼야 한다."""
+    gate = threading.Event()
+    try:
+        # kill 4건을 quiesce에서 블록시켜 pool 4슬롯을 점유 상태로 만든다
+        blocked = [manager.create_jobset(1) for _ in range(4)]
+        for jsid in blocked:
+            manager.killer.kill_jobset(jsid, quiesce=lambda: gate.wait(30))
+
+        target = manager.create_jobset(1)     # 5번째 — 즉시 처리돼야 함
+        with qtbot.waitSignal(manager.kill_finished, timeout=5000) as blocker:
+            manager.killer.kill_jobset(target)
+        assert blocker.args[0] == target      # 블록 4건보다 먼저 완료
+    finally:
+        gate.set()                            # 블록 해제 (teardown 청소)
+
+
+def test_quiesce_submits_cancels_late_cycle(qtbot, config, fake_lsf):
+    """_quiesce_submits는 초기 cancel이 못 잡은(자기 호출 이후 등록된)
+    submit 사이클도 스스로 취소+대기한다 — kill과 resubmit 착수가 경합하는
+    창을 닫는 재취소 루프의 핵심 계약."""
+    runner = GatedBsub(fake_lsf)
+    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=runner)
+    try:
+        # '초기 cancel 이후 시작된 사이클'을 흉내: cancel 없이 제출만 진행 중
+        js = mgr.submit(["echo 1", "echo 2"], mode="bulk", workers=1,
+                        auto_poll=False)
+        assert runner.entered.wait(5)
+
+        done = {}
+
+        def run_quiesce():                    # killer worker 역할
+            done["ok"] = mgr._quiesce_submits(js.id)
+
+        t = threading.Thread(target=run_quiesce)
+        t.start()
+        runner.gate.set()                     # 진행 중 bsub 완료 허용
+        t.join(15)
+        assert not t.is_alive()
+
+        assert done["ok"] is True             # 활동 없음 확인 후 True
+        # 루프의 재취소가 사이클을 잡았다 — 미착수분은 CREATED 복귀
+        states = sorted(r.state.name for r in js.jobs())
+        assert states == ["CREATED", "PEND"], states
+        assert mgr.submitter.is_active(js.id) is False
+    finally:
+        mgr.shutdown()

@@ -151,7 +151,16 @@ class _KillTask(QRunnable):
             # 뜬다. cancel된 미제출 job은 CREATED로 복귀해 대상에서 빠지고,
             # 그새 제출이 완료된 job은 PEND(job_id 확보)로 확정되어 아래
             # 스냅샷에 포함된다 — SUBMITTING을 건너뛰다 놓치는 유출이 없다.
-            if not self.quiesce():
+            # 대기 동안 pool 슬롯을 반납한다(releaseThread — Qt의 blocking
+            # task 표준 패턴) — 안 그러면 quiesce 대기 몇 건이 pool
+            # (maxThreadCount=4)을 전부 점유해 후속 kill(긴급 kill 포함)이
+            # bkill 한 번 못 나가고 분 단위로 큐잉된다.
+            k._pool.releaseThread()
+            try:
+                quiesced = self.quiesce()
+            finally:
+                k._pool.reserveThread()
+            if not quiesced:
                 # 대기 초과는 report.errors에 남긴다 — 스냅샷 이후 제출이
                 # 완료된 job이 kill 대상에서 빠졌을 수 있다는 뜻이라, 로그로만
                 # 삼키면 kill_finished가 '전부 정리됨'으로 오보된다. errors가

@@ -61,7 +61,7 @@ def test_explicit_id_still_returns_done(fake_lsf):
     """explicit job id 조회는 -a 없이도 종료 job(DONE/EXIT)을 돌려준다."""
     fake_lsf.jobs["1001"] = FakeJob(1001, None, "j_done", "grp", "q", "echo",
                                     stat="DONE", exit_code=0)
-    got = _cmd(fake_lsf).bjobs_by_ids([1001])
+    got, _failed = _cmd(fake_lsf).bjobs_by_ids([1001])
     assert [(s.job_id, s.state) for s in got] == [(1001, JobState.DONE)]
 
 

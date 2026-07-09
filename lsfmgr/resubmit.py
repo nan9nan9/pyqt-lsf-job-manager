@@ -206,8 +206,10 @@ class _KillPhaseTask(QRunnable):
         """bjobs 재조회로 종료 확인 — 유한 대기(best-effort). 못 죽어도 진행."""
         interval = max(0.2, self._coord.mgr.config.poll_interval_s / 5)
         for _ in range(5):
-            statuses = self._coord.mgr.command.bjobs_by_ids(ids)
-            if not any(s.state.is_on_lsf for s in statuses):
+            statuses, failed = self._coord.mgr.command.bjobs_by_ids(ids)
+            # 조회 실패 chunk가 있으면 그 job들의 종료를 확인 못 한 것 —
+            # '없음'으로 오판하지 않고 다음 라운드에서 재확인한다
+            if not failed and not any(s.state.is_on_lsf for s in statuses):
                 return
             time.sleep(interval)
         log.warning("resubmit_jobs verify: 일부 job이 아직 종료 안 됨 (진행): %s",

@@ -91,10 +91,24 @@ def test_bjobs_by_ids_chunked(fake_lsf):
     cfg = LsfConfig(chunk_size=10)
     cmd = LsfCommand(cfg, fake_lsf)
     ids = [cmd.bsub(f"run {i}") for i in range(25)]
-    out = cmd.bjobs_by_ids(ids)
+    out, failed = cmd.bjobs_by_ids(ids)
     assert len(out) == 25
+    assert failed == set()
     # 25개 / chunk 10 → bjobs 3회
     assert len(fake_lsf.calls_of("bjobs")) == 3
+
+
+def test_bjobs_by_ids_chunk_failure_isolated(fake_lsf):
+    """chunk 하나의 실패는 그 chunk의 id만 실패 집합에 귀속 — 나머지 chunk는
+    정상 조회된다 (bhist_states와 동일한 격리)."""
+    cmd = LsfCommand(LsfConfig(chunk_size=1), fake_lsf)
+    ids = [cmd.bsub(f"run {i}") for i in range(3)]
+    fake_lsf.bjobs_fail_ids = {ids[1]}       # 가운데 id의 chunk만 rc=255
+
+    out, failed = cmd.bjobs_by_ids(ids)
+
+    assert failed == {ids[1]}
+    assert {s.job_id for s in out} == {ids[0], ids[2]}
 
 
 def test_bjobs_empty_result(cmd):
@@ -103,7 +117,7 @@ def test_bjobs_empty_result(cmd):
 
 def test_bjobs_array_elements(cmd, fake_lsf):
     jid = cmd.bsub("run.sh", job_name="arr[1-5]")
-    out = cmd.bjobs_by_ids([jid])
+    out, _failed = cmd.bjobs_by_ids([jid])
     assert len(out) == 5
     assert {s.array_index for s in out} == {1, 2, 3, 4, 5}
     assert all(s.job_id == jid for s in out)
@@ -112,7 +126,7 @@ def test_bjobs_array_elements(cmd, fake_lsf):
 def test_bjobs_exit_code_parsing(cmd, fake_lsf):
     jid = cmd.bsub("run")
     fake_lsf.set_job(jid, "EXIT", exit_code=42)
-    out = cmd.bjobs_by_ids([jid])
+    out, _failed = cmd.bjobs_by_ids([jid])
     assert out[0].state is JobState.EXIT
     assert out[0].exit_code == 42
 

@@ -145,6 +145,33 @@ def test_bhist_circuit_breaker_on_consecutive_failures(fake_lsf):
     assert len(fake_lsf.calls_of("bhist")) == 2        # 2회 후 차단
 
 
+def test_bjobs_chunk_failure_isolated(qtbot, config, fake_lsf):
+    """bjobs leftover chunk도 실패가 job 단위로 격리된다 — 실패 chunk의
+    job만 보류되고 성공 chunk의 job은 정상 갱신된다 (bhist와 대칭).
+    wrapper job은 부착물(group/name)이 없어 폴링이 곧장 id chunk 조회를
+    탄다 — chunk_size=1로 job마다 별도 chunk가 되게 한다."""
+    mgr = LsfJobManager(store=InMemoryStore(),
+                        config=replace(config, chunk_size=1), runner=fake_lsf)
+    try:
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            js = mgr.submit_wrapper(["customwrapper_sub a.sp",
+                                     "customwrapper_sub b.sp"])
+        bad, good = (r.job_id for r in js.jobs())
+        mgr.querier.query(js.id)                  # 둘 다 PEND 반영
+        fake_lsf.set_job(good, "RUN")
+        fake_lsf.bjobs_fail_ids = {bad}           # bad의 chunk만 rc=255
+
+        result = mgr.querier.query(js.id)
+
+        states = {r.job_id: r.state for r in js.jobs()}
+        assert states[bad] is JobState.PEND       # 실패 chunk → 보류(직전 유지)
+        assert states[good] is JobState.RUN        # 성공 chunk → 정상 갱신
+        assert result.lost == ()                  # LOST 오확정 없음
+        assert bad not in {r.job_id for r in result.changed}
+    finally:
+        mgr.shutdown()
+
+
 def test_jobid_none_deferred_when_bhist_failing(qtbot, manager, fake_lsf):
     """job_id 없는 missing 레코드는 bhist로 확인 자체가 불가 — bhist 장애가
     섞인 사이클엔 LOST 확정하지 않고 보류한다 (chunk 격리 전과 동일, FR-4.3)."""

@@ -543,10 +543,31 @@ class LsfJobManager(QObject):
             self.submitter.cancel_submit(jobset_id)
             self._resubmitter.cancel(jobset_id)
             self.submitter.abort_retries(jobset_id)
-            quiesce = lambda: self.submitter.wait_quiesce(jobset_id)  # noqa: E731
+            quiesce = lambda: self._quiesce_submits(jobset_id)  # noqa: E731
         self.killer.kill_jobset(jobset_id, only_state=only_state,
                                 verify=verify, envpath=envpath,
                                 quiesce=quiesce)
+
+    def _quiesce_submits(self, jobset_id: str) -> bool:
+        """[killer worker] 이 jobset의 submit 활동이 완전히 멎을 때까지
+        취소+대기를 반복한다 — kill 우선권의 quiesce 단계 (FR-3).
+
+        kill_jobset의 초기 cancel과 이 대기 사이에는 원자성이 없다 —
+        resubmit kill-phase 완료(_killed)와 경합하면 그 좁은 창에서 초기
+        cancel이 못 잡은 새 submit ctx가 등록될 수 있다. 여기서 취소를
+        다시 걸고(등록된 ctx는 이번엔 반드시 잡힌다) 활동이 없어질 때까지
+        확인하는 루프로 그 창을 닫는다. kill 진행 중 도착한 재제출도
+        취소된다 — kill이 우선권을 갖는다는 정책 그대로다.
+        한도 내에 안 멎으면 False — killer가 KillReport.errors로 보고한다."""
+        for _ in range(3):
+            self._resubmitter.cancel(jobset_id)      # kill-phase 대기 plan
+            self.submitter.cancel_submit(jobset_id)  # 새로 등록된 ctx도 취소
+            if not self.submitter.wait_quiesce(jobset_id):
+                return False
+            if not (self.submitter.is_active(jobset_id)
+                    or self._resubmitter.is_active(jobset_id)):
+                return True
+        return False
 
     def kill_jobs(self, job_ids: Sequence, *,
                   jobset_id: Optional[str] = None,

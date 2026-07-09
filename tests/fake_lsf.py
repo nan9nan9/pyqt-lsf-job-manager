@@ -55,6 +55,8 @@ class FakeLsf:
                                              # bjobs는 정상, bhist 로그 기록 실패)
         self.bhist_fail_ids: set = set()     # 이 job_id가 포함된 bhist 호출만 exit 1
                                              # (chunk 단위 부분 실패 재현용)
+        self.bjobs_fail_ids: set = set()     # 이 job_id가 포함된 bjobs id 조회만
+                                             # rc=255 (bjobs chunk 부분 실패 재현용)
         self.fail_next_bkill = 0             # 앞으로 N회 bkill rc=255 에러
         self.reject_clusters = False         # MC 필드(-o source_cluster) 미지원 흉내
         self.forward_needs_env = False       # forward job은 env source한 bkill만 죽음
@@ -150,6 +152,13 @@ class FakeLsf:
             return CommandResult(255, "", "LSF is down. Please wait ...\n")
         opts, rest = _parse_opts(args, {"-o", "-g", "-J"},
                                  flags={"-a", "-noheader"})
+        if self.bjobs_fail_ids:
+            # 이 호출(chunk)에 실패 지정된 id가 하나라도 있으면 chunk 전체
+            # rc=255. 문구에 _NO_JOB_PATTERNS가 없어야 '장애'로 취급된다.
+            req = {int(m.group(1)) for a in rest
+                   if (m := re.match(r"^(\d+)", a))}
+            if req & self.bjobs_fail_ids:
+                return CommandResult(255, "", "LSF: mbatchd rejected query\n")
         # 실제 LSF: -a면 종료 job 포함. -a가 없어도 explicit job id를 지정하면
         # CLEAN_PERIOD 내 종료 job(DONE/EXIT)을 보여준다. 반면 -g/-J만으로
         # (id 미지정) 조회하면 active(unfinished)만 나온다.
