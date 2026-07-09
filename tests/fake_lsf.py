@@ -51,6 +51,8 @@ class FakeLsf:
         self.no_jobid_next_bsub = 0          # 앞으로 N회 id 파싱 불가 출력
         self.reject_group = False            # -g 지정 시 거부
         self.fail_all_queries = False        # bjobs/bhist 장애 (LSF down)
+        self.fail_bhist = False              # bhist만 exit 1 (working dir full 등 —
+                                             # bjobs는 정상, bhist 로그 기록 실패)
         self.fail_next_bkill = 0             # 앞으로 N회 bkill rc=255 에러
         self.reject_clusters = False         # MC 필드(-o source_cluster) 미지원 흉내
         self.forward_needs_env = False       # forward job은 env source한 bkill만 죽음
@@ -146,7 +148,12 @@ class FakeLsf:
             return CommandResult(255, "", "LSF is down. Please wait ...\n")
         opts, rest = _parse_opts(args, {"-o", "-g", "-J"},
                                  flags={"-a", "-noheader"})
-        matched = self._select(opts, rest, include_done="-a" in opts)
+        # 실제 LSF: -a면 종료 job 포함. -a가 없어도 explicit job id를 지정하면
+        # CLEAN_PERIOD 내 종료 job(DONE/EXIT)을 보여준다. 반면 -g/-J만으로
+        # (id 미지정) 조회하면 active(unfinished)만 나온다.
+        has_explicit_id = any(re.match(r"^\d+(?:\[\d+\])?$", a) for a in rest)
+        matched = self._select(opts, rest,
+                               include_done=("-a" in opts) or has_explicit_id)
         if not matched:
             return CommandResult(255, "", "No matching job found\n")
         fmt = opts.get("-o", "")
@@ -265,6 +272,11 @@ class FakeLsf:
     def _do_bhist(self, args: List[str]) -> CommandResult:
         if self.fail_all_queries:
             return CommandResult(255, "", "LSF is down. Please wait ...\n")
+        if self.fail_bhist:
+            # working dir/파티션 full → bhist가 자기 로그를 못 써 exit 1.
+            # 문구에 _NO_JOB_PATTERNS가 없어야 '장애'로 취급된다("없음" 아님).
+            return CommandResult(
+                1, "", "bhist: cannot write to log directory: No space left\n")
         _, rest = _parse_opts(args, {"-n"}, flags={"-l"})
         blocks = []
         for a in rest:

@@ -358,9 +358,16 @@ class LsfCommand:
     _BJOBS_FULL_MC_FMT = f"{_CORE_FIELDS} {_FULL_EXTRA} {_CLUSTER_EXTRA} {_DELIM}"
 
     def _bjobs(self, selector: List[str]) -> List[JobStatus]:
+        # -a를 붙이지 않는다. -a는 -g/-J(group/name) 조회에 과거 종료 job까지
+        # 끌어와 by_name 풀을 오염시킨다 — job_id 없는 레코드/이름 재사용 시
+        # 옛날 다른 job의 DONE/EXIT가 현재 레코드로 로드된다(ID 가드가
+        # rec.job_id 있을 때만 동작). group/name 조회는 active(RUN/PEND 등)만
+        # 반환하게 두고, 종료 상태는 leftover_ids의 explicit-ID 재조회로 잡는다
+        # — explicit job id를 주면 LSF는 -a 없이도 CLEAN_PERIOD 내 종료 job을
+        # 보여준다. CLEAN_PERIOD 밖(purge)만 bhist fallback으로 넘어간다.
         def run(fmt: str) -> Optional[CommandResult]:
             argv = cmd_tokens(self.config.bjobs_path) + [
-                "-a", "-noheader", "-o", fmt] + selector
+                "-noheader", "-o", fmt] + selector
             return self._run_query(argv)
 
         # 확장 필드/옵션 오류로 보이면 다음 포맷 단계로 영구 강등 후 재시도한다.
