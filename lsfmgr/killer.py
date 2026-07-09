@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .command import LsfCommand
 from .errors import LsfmgrError
@@ -76,10 +76,13 @@ class Killer(QObject):
     # ------------------------------------------------------------------
     def kill_jobset(self, jobset_id: str, *,
                     only_state: Optional[JobState] = None,
-                    verify: bool = False, envpath: str = "") -> None:
+                    verify: bool = False, envpath: str = "",
+                    quiesce: Optional[Callable[[], bool]] = None) -> None:
+        """quiesce: 지정 시 kill 대상 스냅샷 전에 worker에서 호출되는 blocking
+        훅 — 진행 중 submit이 멎기를 기다린다 (kill 우선권, manager가 배선)."""
         self._pool.start(_KillTask(
             self, jobset_id=jobset_id, only_state=only_state, verify=verify,
-            envpath=envpath))
+            envpath=envpath, quiesce=quiesce))
 
     def kill_jobs(self, job_ids: Sequence, *, verify: bool = False,
                   jobset_id: str = "", envpath: str = "") -> None:
@@ -99,7 +102,8 @@ class _KillTask(QRunnable):
     def __init__(self, killer: Killer, *, jobset_id: str,
                  only_state: Optional[JobState] = None,
                  job_ids: Optional[List] = None, verify: bool = False,
-                 envpath: str = ""):
+                 envpath: str = "",
+                 quiesce: Optional[Callable[[], bool]] = None):
         super().__init__()
         self.setAutoDelete(True)
         self.killer = killer
@@ -108,6 +112,7 @@ class _KillTask(QRunnable):
         self.job_ids = job_ids
         self.verify = verify
         self.envpath = envpath
+        self.quiesce = quiesce
         cfg = killer.command.config          # chunk progress throttle (submit 대칭)
         self._prog = EmitThrottler(cfg.progress_min_interval_s,
                                    cfg.progress_min_step_ratio)
@@ -138,6 +143,14 @@ class _KillTask(QRunnable):
 
     # ------------------------------------------------------------------
     def _run(self) -> KillReport:
+        if self.quiesce is not None:
+            # kill 우선권 (FR-3) — 진행 중 submit이 멎은 뒤에 대상 스냅샷을
+            # 뜬다. cancel된 미제출 job은 CREATED로 복귀해 대상에서 빠지고,
+            # 그새 제출이 완료된 job은 PEND(job_id 확보)로 확정되어 아래
+            # 스냅샷에 포함된다 — SUBMITTING을 건너뛰다 놓치는 유출이 없다.
+            if not self.quiesce():
+                log.warning("submit 정지 대기 초과 — 그대로 kill 진행: %s",
+                            self.jobset_id)
         k = self.killer
         strategies: List[str] = []
         errors: List[str] = []

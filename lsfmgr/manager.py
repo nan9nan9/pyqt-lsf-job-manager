@@ -529,13 +529,24 @@ class LsfJobManager(QObject):
         envpath 지정 시 그 LSF env를 source한 bkill (MC forward job)."""
         if verify is None:
             verify = bool(self._defaults.get("verify_kill", False))
+        quiesce = None
         if only_state is None:
-            # 전체 kill은 대기 중 submit 재시도도 포기 확정한다 — 안 하면
-            # RETRY_WAIT의 QTimer가 kill 뒤에 발화해 job이 부활한다.
+            # 전체 kill은 진행 중 submit에 대해 우선권을 갖는다 (FR-3):
+            # ① 진행 중 submit 취소 — 미착수 worker는 안전 지점에서 CREATED
+            #    복귀(제출 자체를 안 함), kill-phase 대기 중 재제출 plan도 취소.
+            # ② 대기 중 submit 재시도 포기 확정 — 안 하면 RETRY_WAIT의
+            #    QTimer가 kill 뒤에 발화해 job이 부활한다.
+            # ③ killer는 quiesce로 submit이 멎기를 기다린 뒤 스냅샷 — 이미
+            #    bsub에 들어가 그새 제출된 job은 PEND(job_id)로 잡혀 kill된다.
+            #    SUBMITTING이 kill 대상에서 스킵돼 유출되던 구멍을 막는다.
             # (부분 kill(only_state)은 살아있는 특정 상태만 겨냥하므로 유지)
+            self.submitter.cancel_submit(jobset_id)
+            self._resubmitter.cancel(jobset_id)
             self.submitter.abort_retries(jobset_id)
+            quiesce = lambda: self.submitter.wait_quiesce(jobset_id)  # noqa: E731
         self.killer.kill_jobset(jobset_id, only_state=only_state,
-                                verify=verify, envpath=envpath)
+                                verify=verify, envpath=envpath,
+                                quiesce=quiesce)
 
     def kill_jobs(self, job_ids: Sequence, *,
                   jobset_id: Optional[str] = None,

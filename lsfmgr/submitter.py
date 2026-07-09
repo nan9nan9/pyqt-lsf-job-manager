@@ -459,6 +459,24 @@ class BulkSubmitter(QObject):
         if ctx is not None:
             ctx.cancel_event.set()
 
+    def wait_quiesce(self, jobset_id: str) -> bool:
+        """진행 중 submit 사이클이 멎을 때까지 blocking 대기 (kill 우선권).
+
+        cancel_submit + abort_retries 후 killer worker 스레드에서 호출된다.
+        미착수 worker는 안전 지점에서 CREATED로 복귀하고, 이미 bsub에 들어간
+        worker는 완료(PEND, job_id 확보)까지 기다린다 — 그래야 killer가 직후
+        뜨는 스냅샷에 '그새 제출돼 버린' job이 빠짐없이 포함된다. 안 기다리면
+        kill 스냅샷 이후에 PEND가 되어 kill을 영영 빠져나간다 (FR-3).
+        반환: 시간 내 정지 여부 — False면 caller가 경고 후 그대로 진행."""
+        with self._ctx_lock:
+            ctx = self._contexts.get(jobset_id)
+        if ctx is None:
+            return True
+        # 진행 중 bsub는 submit_timeout_s 안에 반드시 끝난다(subprocess
+        # timeout). cancel된 나머지 worker는 즉시 빠지므로 여유만 더한다.
+        timeout_s = ctx.options.submit_timeout_s + 30.0
+        return ctx.pool.waitForDone(int(timeout_s * 1000))
+
     def shutdown(self) -> None:
         """모든 submit 중단 요청 후 pool join (CS-8).
         진행 중이던 bsub는 완료까지 기다려 job_id 유실을 막는다."""
@@ -539,9 +557,13 @@ class BulkSubmitter(QObject):
     def _task_cancelled(self, ctx: _SubmitContext, job_key: str) -> None:
         # 아직 submit 전이므로 CREATED로 되돌림 (안전 지점 중단, QT-6)
         rec = self.store.get_job(ctx.jobset_id, job_key)
+        changed = None
         if rec.state in (JobState.SUBMITTING, JobState.RETRY_WAIT):
-            self.store.transition(ctx.jobset_id, job_key, JobState.CREATED)
-        self._count(ctx, cancelled=True)
+            changed = self.store.transition(ctx.jobset_id, job_key,
+                                            JobState.CREATED)
+        # CREATED 복귀도 발행한다 — CREATED는 폴링 대상(is_on_lsf)이 아니라
+        # 여기서 안 알리면 UI 표가 SUBMITTING에 영구 고착된다 (kill/cancel 후)
+        self._count(ctx, cancelled=True, changed=changed)
 
     def _task_crashed(self, ctx: _SubmitContext, job_key: str,
                       err: Exception) -> None:
@@ -819,6 +841,18 @@ class _ArraySubmitTask(QRunnable):
         jsid = ctx.jobset_id
         n = spec.size
         keys = [f"{jsid}[{i}]" for i in range(1, n + 1)]
+        if ctx.cancel_event.is_set():
+            # kill/cancel 우선 — 제출 전 안전 지점 중단, 전 element CREATED
+            # 복귀 (bulk의 _task_cancelled와 대칭, QT-6)
+            changed = []
+            for key in keys:
+                rec = sub.store.get_job(jsid, key)
+                if rec.state in (JobState.SUBMITTING, JobState.RETRY_WAIT):
+                    r = sub.store.transition(jsid, key, JobState.CREATED)
+                    if r is not None:
+                        changed.append(r)
+            sub._count(ctx, cancelled=True, changed=changed)
+            return
         for key in keys:
             sub.store.transition(jsid, key, JobState.SUBMITTING)
 
