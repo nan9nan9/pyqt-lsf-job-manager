@@ -507,8 +507,10 @@ class LsfCommand:
         failed: Set[int] = set()
         ids = [str(i) for i in job_ids]
         base = self._prog_len(self.config.bhist_path) + 20
-        for chunk in chunk_args(ids, self.config.chunk_size,
-                                self.config.arg_max, base):
+        chunks = list(chunk_args(ids, self.config.chunk_size,
+                                 self.config.arg_max, base))
+        consecutive = 0
+        for i, chunk in enumerate(chunks):
             argv = cmd_tokens(self.config.bhist_path) + ["-l", "-n", "0"] + chunk
             try:
                 res = self._run_query(argv)
@@ -516,7 +518,21 @@ class LsfCommand:
                 # 이 chunk만 실패로 격리 — 나머지 chunk 조회는 계속한다.
                 log.warning("조회 실패(bhist): %s", e)
                 failed.update(int(x) for x in chunk)
+                consecutive += 1
+                # 연속 실패 = 특정 chunk가 아니라 bhist 자체의 전면 장애
+                # (데몬 hang이면 chunk마다 timeout까지 기다린다) — 나머지
+                # chunk를 즉시 실패로 표시하고 끊는다. 격리(1개 chunk 실패는
+                # 계속)와 fail-fast(전면 장애에 chunk 수 × timeout 직렬
+                # 블록 방지)를 양립시키는 회로 차단.
+                if consecutive >= 2 and i + 1 < len(chunks):
+                    log.warning("bhist 연속 %d회 실패 — 남은 %d개 chunk "
+                                "조회 중단(전면 장애로 간주)",
+                                consecutive, len(chunks) - i - 1)
+                    for rest in chunks[i + 1:]:
+                        failed.update(int(x) for x in rest)
+                    break
                 continue
+            consecutive = 0
             if res is None:
                 continue
             result.update(self._parse_bhist(res.stdout))

@@ -143,17 +143,23 @@ class _KillTask(QRunnable):
 
     # ------------------------------------------------------------------
     def _run(self) -> KillReport:
+        k = self.killer
+        strategies: List[str] = []
+        errors: List[str] = []
         if self.quiesce is not None:
             # kill 우선권 (FR-3) — 진행 중 submit이 멎은 뒤에 대상 스냅샷을
             # 뜬다. cancel된 미제출 job은 CREATED로 복귀해 대상에서 빠지고,
             # 그새 제출이 완료된 job은 PEND(job_id 확보)로 확정되어 아래
             # 스냅샷에 포함된다 — SUBMITTING을 건너뛰다 놓치는 유출이 없다.
             if not self.quiesce():
-                log.warning("submit 정지 대기 초과 — 그대로 kill 진행: %s",
-                            self.jobset_id)
-        k = self.killer
-        strategies: List[str] = []
-        errors: List[str] = []
+                # 대기 초과는 report.errors에 남긴다 — 스냅샷 이후 제출이
+                # 완료된 job이 kill 대상에서 빠졌을 수 있다는 뜻이라, 로그로만
+                # 삼키면 kill_finished가 '전부 정리됨'으로 오보된다. errors가
+                # 남으면 optimistic EXIT 표시도 함께 억제된다(오표시 방지).
+                msg = ("quiesce: submit 정지 대기 초과 — 그 사이 제출된 "
+                       "job이 kill에서 빠졌을 수 있음")
+                log.warning("%s: %s", msg, self.jobset_id)
+                errors.append(msg)
         calls = 0
         unconfirmed = 0
         retries = 0

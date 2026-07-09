@@ -178,7 +178,11 @@ class JobsetQuerier:
                     state, exit_code = found
                     update_specs.append((rec.job_key, state, unchanged(rec),
                                          {"exit_code": exit_code}))
-                elif probe_failed or rec.job_id in bhist_failed:
+                elif (probe_failed or rec.job_id in bhist_failed
+                      or (rec.job_id is None and bhist_failed)):
+                    # 세 번째 조건: job_id 없는 레코드는 bhist로 확인 자체가
+                    # 불가 — bhist 장애가 섞인 사이클엔 보수적으로 보류한다
+                    # (chunk 격리 도입 전의 전역 보류와 동일 semantics, FR-4.3)
                     # 조회 수단 실패가 섞인 사이클 — LOST 확정 보류.
                     # probe(bjobs) 실패, 또는 이 job이 속한 bhist chunk가
                     # 실패한 경우. LSF 순단이면 다음 사이클에서 정상 복구되고,

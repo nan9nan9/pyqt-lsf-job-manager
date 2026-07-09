@@ -470,7 +470,12 @@ class BulkSubmitter(QObject):
         반환: 시간 내 정지 여부 — False면 caller가 경고 후 그대로 진행."""
         with self._ctx_lock:
             ctx = self._contexts.get(jobset_id)
-        if ctx is None:
+        # 취소된(cancel_event set) 사이클만 기다린다 — kill의 cancel과 이
+        # 대기 사이에 취소된 사이클이 끝나고 새 사이클(재제출 등)이 시작됐을
+        # 수 있다. 그 새 사이클은 이 kill의 대상이 아니므로 붙잡으면 안 된다:
+        # 붙잡으면 killer가 무관한 제출이 끝날 때까지 블록된 뒤 방금 재제출된
+        # job 전원을 스냅샷에 담아 오살한다.
+        if ctx is None or not ctx.cancel_event.is_set():
             return True
         # 진행 중 bsub는 submit_timeout_s 안에 반드시 끝난다(subprocess
         # timeout). cancel된 나머지 worker는 즉시 빠지므로 여유만 더한다.
@@ -555,14 +560,29 @@ class BulkSubmitter(QObject):
         self._count(ctx, failed=True, reason=err.fail_reason, changed=rec)
 
     def _task_cancelled(self, ctx: _SubmitContext, job_key: str) -> None:
-        # 아직 submit 전이므로 CREATED로 되돌림 (안전 지점 중단, QT-6)
-        rec = self.store.get_job(ctx.jobset_id, job_key)
-        changed = None
-        if rec.state in (JobState.SUBMITTING, JobState.RETRY_WAIT):
-            changed = self.store.transition(ctx.jobset_id, job_key,
-                                            JobState.CREATED)
-        # CREATED 복귀도 발행한다 — CREATED는 폴링 대상(is_on_lsf)이 아니라
-        # 여기서 안 알리면 UI 표가 SUBMITTING에 영구 고착된다 (kill/cancel 후)
+        self._revert_to_created(ctx, [job_key])
+
+    def _revert_to_created(self, ctx: _SubmitContext,
+                           keys: List[str]) -> None:
+        """kill/cancel 안전 지점 중단 — 아직 submit 전인 job을 CREATED로
+        복귀시키고 작업 1단위 완료로 계상한다 (QT-6, bulk/array 공용 정책).
+
+        - guard(CAS)로 SUBMITTING/RETRY_WAIT일 때만 전이 — 그새 다른 상태로
+          바뀐(또는 remove_job으로 소실된) 키는 조용히 건너뛴다.
+        - 이전 시도의 실패 잔재(fail_reason/fail_message/retry_count)를 함께
+          리셋한다 — 안 지우면 '제출된 적 없는' CREATED job이 실패 이력을
+          달고 UI/persistent store에 남는다 (_task_succeeded가 성공 시
+          fail_reason=None을 명시 전달하는 것과 대칭).
+        - CREATED 복귀도 changed로 발행한다 — CREATED는 폴링 대상(is_on_lsf)
+          이 아니라 여기서 안 알리면 UI 표가 SUBMITTING에 영구 고착된다.
+        """
+        def guard(cur):
+            return cur.state in (JobState.SUBMITTING, JobState.RETRY_WAIT)
+        changed = list(self.store.transition_many(
+            ctx.jobset_id,
+            [(k, JobState.CREATED, guard,
+              {"fail_reason": None, "fail_message": None, "retry_count": 0})
+             for k in keys]))
         self._count(ctx, cancelled=True, changed=changed)
 
     def _task_crashed(self, ctx: _SubmitContext, job_key: str,
@@ -843,15 +863,8 @@ class _ArraySubmitTask(QRunnable):
         keys = [f"{jsid}[{i}]" for i in range(1, n + 1)]
         if ctx.cancel_event.is_set():
             # kill/cancel 우선 — 제출 전 안전 지점 중단, 전 element CREATED
-            # 복귀 (bulk의 _task_cancelled와 대칭, QT-6)
-            changed = []
-            for key in keys:
-                rec = sub.store.get_job(jsid, key)
-                if rec.state in (JobState.SUBMITTING, JobState.RETRY_WAIT):
-                    r = sub.store.transition(jsid, key, JobState.CREATED)
-                    if r is not None:
-                        changed.append(r)
-            sub._count(ctx, cancelled=True, changed=changed)
+            # 복귀 (bulk _task_cancelled와 동일 정책·공용 헬퍼, QT-6)
+            sub._revert_to_created(ctx, keys)
             return
         for key in keys:
             sub.store.transition(jsid, key, JobState.SUBMITTING)

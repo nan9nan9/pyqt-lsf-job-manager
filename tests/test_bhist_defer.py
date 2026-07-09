@@ -126,3 +126,40 @@ def test_bhist_chunk_failure_isolated(qtbot, config, fake_lsf):
         assert good in changed and bad not in changed
     finally:
         mgr.shutdown()
+
+
+def test_bhist_circuit_breaker_on_consecutive_failures(fake_lsf):
+    """bhist 전면 장애(모든 chunk 실패) 시 연속 2회 실패에서 회로를 끊는다 —
+    나머지 chunk는 호출 없이 실패 처리되어, 데몬 hang일 때 chunk 수 ×
+    timeout만큼 폴링 스레드가 직렬 블록되던 회귀를 막는다."""
+    from lsfmgr import LsfConfig
+    from lsfmgr.command import LsfCommand
+
+    fake_lsf.fail_bhist = True
+    cmd = LsfCommand(config=LsfConfig(chunk_size=1), runner=fake_lsf)
+
+    hist, failed = cmd.bhist_states([1, 2, 3, 4, 5])   # chunk 5개
+
+    assert hist == {}
+    assert failed == {1, 2, 3, 4, 5}                   # 전원 실패 귀속
+    assert len(fake_lsf.calls_of("bhist")) == 2        # 2회 후 차단
+
+
+def test_jobid_none_deferred_when_bhist_failing(qtbot, manager, fake_lsf):
+    """job_id 없는 missing 레코드는 bhist로 확인 자체가 불가 — bhist 장애가
+    섞인 사이클엔 LOST 확정하지 않고 보류한다 (chunk 격리 전과 동일, FR-4.3)."""
+    from lsfmgr.states import JobRecord
+
+    js, jid = _submit_running(qtbot, manager, fake_lsf)
+    fake_lsf.vanish_job(jid)                 # id 있는 job — bhist 경로를 연다
+    # id 없는 on-LSF 레코드 (persistent 복구 행 등을 흉내)
+    manager.store.add_job(JobRecord(
+        job_id=None, array_index=None, jobset_id=js.id,
+        lsf_job_name="manual_1", state=JobState.PEND, command=""))
+    fake_lsf.fail_bhist = True               # bhist 장애 사이클
+
+    result = manager.querier.query(js.id)
+
+    assert result.lost == ()                 # 아무도 LOST 확정 안 됨
+    states = {r.job_key: r.state for r in js.jobs()}
+    assert states["manual_1"] is JobState.PEND   # 보류 (구 동작과 동일)

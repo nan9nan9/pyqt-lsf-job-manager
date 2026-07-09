@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 from lsfmgr import InMemoryStore, LsfJobManager
 from lsfmgr.states import JobState
@@ -120,3 +121,69 @@ def test_array_cancel_before_bsub_returns_created(qtbot, manager, fake_lsf):
     assert all(r.state is JobState.CREATED
                for r in manager.store.get_jobs(jsid))
     assert fake_lsf.calls_of("bsub") == []   # 제출 자체가 안 나감
+
+
+def test_wait_quiesce_ignores_uncancelled_cycle(qtbot, config, fake_lsf):
+    """wait_quiesce는 '취소된 사이클'만 기다린다 — cancel 없이 진행 중인
+    (예: kill의 cancel 이후 새로 시작된 재제출) 사이클은 붙잡지 않는다.
+    안 그러면 killer가 무관한 제출을 기다렸다가 그 결과물을 오살한다."""
+    runner = GatedBsub(fake_lsf)
+    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=runner)
+    try:
+        js = mgr.submit(["echo 1"], mode="bulk", workers=1, auto_poll=False)
+        assert runner.entered.wait(5)        # 제출 진행 중 (cancel 안 됨)
+
+        t0 = time.monotonic()
+        assert mgr.submitter.wait_quiesce(js.id) is True   # 즉시 반환
+        assert time.monotonic() - t0 < 2.0   # timeout(60s)까지 안 붙잡음
+
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            runner.gate.set()
+    finally:
+        mgr.shutdown()
+
+
+def test_quiesce_timeout_recorded_in_kill_report(qtbot, manager, fake_lsf):
+    """quiesce 대기 초과는 KillReport.errors에 남고 optimistic EXIT 표시도
+    억제된다 — 유출 가능성이 '전부 정리됨'으로 오보되지 않는다."""
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
+
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
+        manager.killer.kill_jobset(js.id, quiesce=lambda: False)  # 초과 재현
+    _jsid, report = blocker.args
+
+    assert any("quiesce" in e for e in report.errors), report.errors
+    assert report.changed == []              # optimistic EXIT 억제
+    # store 상태는 폴링(actual)로 수렴하도록 남는다 — 여기선 PEND 유지
+    assert js.jobs()[0].state is JobState.PEND
+
+
+def test_revert_to_created_clears_failure_residue(qtbot, manager, fake_lsf):
+    """CREATED 복귀는 이전 시도의 실패 잔재(fail_reason/fail_message/
+    retry_count)를 함께 리셋한다 — 안 지우면 '제출된 적 없는' job이
+    실패 이력을 달고 UI/persistent store에 남는다."""
+    from lsfmgr.options import Options
+    from lsfmgr.qt import QThreadPool
+    from lsfmgr.states import JobRecord
+    from lsfmgr.submitter import _SubmitContext
+    from lsfmgr.util import TokenBucketLimiter
+
+    jsid = manager.create_jobset(1)
+    key = f"{jsid}_0"
+    manager.store.add_jobs([JobRecord(
+        job_id=None, array_index=None, jobset_id=jsid, lsf_job_name=key,
+        state=JobState.RETRY_WAIT, fail_reason="BSUB_TIMEOUT",
+        fail_message="bsub: timeout after 30s", retry_count=2,
+        command="echo x")])
+    ctx = _SubmitContext(jobset_id=jsid, total=1, max_retry=0,
+                         pool=QThreadPool(), limiter=TokenBucketLimiter(None),
+                         options=Options())
+
+    manager.submitter._revert_to_created(ctx, [key])
+
+    rec = manager.store.get_job(jsid, key)
+    assert rec.state is JobState.CREATED
+    assert rec.fail_reason is None
+    assert rec.fail_message is None
+    assert rec.retry_count == 0
