@@ -22,6 +22,7 @@ class JobSet(QObject):
     # 이름은 Manager Signal과 일치시킨다(jsid 인자만 없음) — 두 계층 매핑이
     # 1:1로 명확해지도록. 같은 이벤트를 이 JobSet으로 좁혀 발행한다.
     jobset_updated = Signal(dict)      # 요약 {"total":.., "RUN":.., ...}
+    jobs_updated = Signal(list)        # 상태 변경분 [JobRecord] — 테이블 행 갱신용
     submit_progress = Signal(int, int) # submit 진행 (done, total), throttled
     submit_finished = Signal(object)   # SubmitReport (retry 포함 최종)
     jobs_failed = Signal(list)         # SUBMIT_FAILED/EXIT/LOST 변경분 [JobRecord]

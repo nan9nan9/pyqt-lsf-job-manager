@@ -132,6 +132,10 @@ class _KillTask(QRunnable):
                                       report.requested)
             self.killer.progress.emit(self.jobset_id, report.requested,
                                       report.requested)
+            # finished보다 먼저 등록 해제 — queued 신호를 받은 slot이
+            # is_killing을 pull하면 반드시 False여야 한다 (결정적 계약).
+            # finally의 중복 해제는 pop이라 무해(멱등).
+            self.killer._unreg(self.jobset_id)
             self.killer.finished.emit(self.jobset_id, report)
         finally:
             self.killer._unreg(self.jobset_id)

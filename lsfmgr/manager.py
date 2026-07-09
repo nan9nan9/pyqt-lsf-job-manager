@@ -952,6 +952,8 @@ class LsfJobManager(QObject):
         h = self._handle_of(jsid)
         if h is None:
             return
+        # 단일 JobSet 위젯의 표 갱신용 — jsid 필터 없이 변경분 배치를 그대로.
+        h.jobs_updated.emit(changed)
         failed = [r for r in changed if r.state.is_failed]
         if failed:
             h.jobs_failed.emit(failed)

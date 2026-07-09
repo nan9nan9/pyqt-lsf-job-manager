@@ -411,6 +411,10 @@ polling(자동):
   → job_lost                                 # LOST 확정 시에만
 ```
 
+> 명령별 내부 동작(스레드·상태 전이·kill 우선권 barrier)의 상세 도식은
+> [docs/flows.md](docs/flows.md), 실행 가능한 최소 데모는
+> [examples/gui_demo.py](examples/gui_demo.py) 참고.
+
 ### 5.2 연결 패턴 — 위젯별 권장 신호
 
 | 위젯 | 연결할 Signal | 이유 |

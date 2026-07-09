@@ -90,6 +90,7 @@ JobSet 을 한 곳에서 보면 `mgr.*` 를 쓴다.
 
 | JobSet Signal | 시그니처 | 대응 Manager Signal | 이 Signal 을 유발하는 함수 |
 |---|---|---|---|
+| `js.jobs_updated` | `([JobRecord])` | `jobs_updated` | 상태 변경분 배치 — 단일 JobSet 표의 행 갱신용 (jsid 필터 불필요) |
 | `js.submit_progress` | `(done, total)` | `submit_progress` | submit 계열 · `js.resubmit_jobs` |
 | `js.submit_finished` | `(SubmitReport)` | `submit_finished` | submit 계열 · `js.resubmit_jobs` · `js.cancel` |
 | `js.jobset_updated` | `(summary)` | `jobset_updated` | submit 완료(초기 PEND) · `js.start_polling` · `js.refresh` · `js.reconcile` |

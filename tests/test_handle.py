@@ -373,3 +373,20 @@ def test_active_when_one_terminal_rest_running(qtbot, manager, fake_lsf):
     fake_lsf.set_job(recs[2].job_id, "RUN")   # 하나는 아직 RUN
     manager.querier.query(js.id)
     assert js.is_active and not js.is_inactive
+
+
+# ----------------------------------------------------------------------
+# js.jobs_updated — 단일 JobSet 표 갱신용 파생 발행 (README §5.2)
+# ----------------------------------------------------------------------
+def test_handle_jobs_updated_derived(qtbot, manager, fake_lsf):
+    """Manager.jobs_updated(jsid, ...)가 핸들 js.jobs_updated(records)로
+    중계된다 — 단일 jobset GUI가 jsid 필터 없이 표를 갱신하는 근거."""
+    batches = []
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        js = manager.submit(["echo a", "echo b"], mode="bulk",
+                            auto_poll=False)
+        js.jobs_updated.connect(batches.append)
+
+    qtbot.waitUntil(lambda: any(batches), timeout=5000)
+    keys = {r.job_key for batch in batches for r in batch}
+    assert keys == {r.job_key for r in js.jobs()}   # 초기 배치가 전원 포함
