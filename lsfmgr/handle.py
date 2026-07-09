@@ -25,6 +25,7 @@ class JobSet(QObject):
     submit_progress = Signal(int, int) # submit 진행 (done, total), throttled
     submit_finished = Signal(object)   # SubmitReport (retry 포함 최종)
     jobs_failed = Signal(list)         # SUBMIT_FAILED/EXIT/LOST 변경분 [JobRecord]
+    kill_started = Signal()            # kill 접수 즉시(동기) — 착수 피드백
     kill_finished = Signal(object)     # KillReport
     kill_progress = Signal(int, int)   # chunk kill 진행 (done, total)
     error_occurred = Signal(str)       # worker 예외 등

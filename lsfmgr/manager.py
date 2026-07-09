@@ -64,6 +64,7 @@ class LsfJobManager(QObject):
     jobset_updated = Signal(str, dict)         # jobset_id, summary
     jobs_updated = Signal(str, list)           # jobset_id, [JobRecord] 변경분
     job_lost = Signal(str, object)             # jobset_id, JobRecord
+    kill_started = Signal(str)                 # jobset_id — kill 접수 즉시(동기)
     kill_finished = Signal(str, object)        # jobset_id, KillReport
     kill_progress = Signal(str, int, int)      # jobset_id, done, total (chunk kill)
     error_occurred = Signal(str, str)          # jobset_id, message
@@ -187,6 +188,7 @@ class LsfJobManager(QObject):
         # 핸들 Signal 이름은 Facade와 동일 — relay 대상 attr명도 그대로
         self.submit_progress.connect(self._handle_relay("submit_progress"))
         self.jobset_updated.connect(self._handle_relay("jobset_updated"))
+        self.kill_started.connect(self._handle_relay("kill_started"))
         self.kill_finished.connect(self._handle_relay("kill_finished"))
         self.kill_progress.connect(self._handle_relay("kill_progress"))
         self.error_occurred.connect(self._handle_relay("error_occurred"))
@@ -553,6 +555,10 @@ class LsfJobManager(QObject):
             self._resubmitter.cancel(jobset_id)
             self.submitter.abort_retries(jobset_id)
             scope = lambda: self._gate.kill_scope(jobset_id)  # noqa: E731
+        # 접수 즉시(동기) 착수 통지 — quiesce(진행 중 bsub 완료 대기)로
+        # kill_finished가 수십 초 늦어지는 케이스에서도 UI가 '접수됨'을
+        # 바로 표시할 수 있다 (submit의 ready_started/submit_started와 대칭)
+        self.kill_started.emit(jobset_id)
         self.killer.kill_jobset(jobset_id, only_state=only_state,
                                 verify=verify, envpath=envpath,
                                 scope=scope)
@@ -569,6 +575,8 @@ class LsfJobManager(QObject):
         클러스터가 다르면 클러스터별로 나눠 각 envpath로 호출한다."""
         if verify is None:
             verify = bool(self._defaults.get("verify_kill", False))
+        if jobset_id:                    # jobset 컨텍스트가 있을 때만 착수 통지
+            self.kill_started.emit(jobset_id)
         self.killer.kill_jobs(job_ids, verify=verify,
                               jobset_id=jobset_id or "", envpath=envpath)
 

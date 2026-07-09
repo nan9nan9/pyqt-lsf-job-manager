@@ -76,6 +76,7 @@ Signal 은 두 계층이다.
 | `jobset_updated` | `(jobset_id, summary)` | **submit 완료(초기 PEND)** · `start_polling`(주기) · `query_once`(1회) · `reconcile` — 상태 갱신 |
 | `jobs_updated` | `(jobset_id, [JobRecord])` | **submit 완료(전체 초기 레코드)** · polling **변경분이 있을 때만** |
 | `job_lost` | `(jobset_id, JobRecord)` | `start_polling` · `query_once` · `detect_lost` — LSF 에서 소실 확정 |
+| `kill_started` | `(jobset_id)` | `kill_jobset` · `kill_jobs(jobset_id=...)` 접수 즉시(동기) — 착수 피드백 |
 | `kill_progress` | `(jobset_id, done, total)` | chunk kill 진행 중(대량 id/부분/chunk fallback, throttled) |
 | `kill_finished` | `(jobset_id, KillReport)` | `kill_jobset` · `kill_jobs` |
 | `handler_finished` | `(jobset_id, handler_name, HandlerResult)` | `add_handler` 로 등록한 handler 1회 실행 완료 시 |
@@ -93,6 +94,7 @@ JobSet 을 한 곳에서 보면 `mgr.*` 를 쓴다.
 | `js.submit_finished` | `(SubmitReport)` | `submit_finished` | submit 계열 · `js.resubmit_jobs` · `js.cancel` |
 | `js.jobset_updated` | `(summary)` | `jobset_updated` | submit 완료(초기 PEND) · `js.start_polling` · `js.refresh` · `js.reconcile` |
 | `js.jobs_failed` | `([JobRecord])` | (파생) | submit 완료 시 `SUBMIT_FAILED` + polling 중 실패 상태 전이분 |
+| `js.kill_started` | `()` | `kill_started` | `js.kill` · `js.kill_jobs` 접수 즉시(동기) |
 | `js.kill_progress` | `(done, total)` | `kill_progress` | chunk kill 진행(throttled, 마지막은 100%) |
 | `js.kill_finished` | `(KillReport)` | `kill_finished` | `js.kill` · `js.kill_jobs` |
 | `js.handler_finished` | `(handler_name, HandlerResult)` | `handler_finished` | `js.add_handler` 로 등록한 handler |

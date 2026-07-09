@@ -165,6 +165,7 @@ js.resubmit_jobs([job_key, ...], pre_submit=prepare)
 | `submit_progress` | `(done, total)` | submit/resubmit 진행 (throttled) |
 | `submit_finished` | `SubmitReport` | submit/resubmit 완료 (retry 포함 최종) |
 | `jobs_failed` | `list[JobRecord]` | SUBMIT_FAILED/EXIT/LOST 변경분 — `rec.fail_message`에 실패 진단 원문 |
+| `kill_started` | — | kill 접수 즉시(동기) 착수 통지 — 정지 대기로 완료가 늦어져도 UI가 바로 표시 |
 | `kill_progress` | `(done, total)` | 대량 chunk kill 진행 (throttled, 마지막 100%) |
 | `kill_finished` | `KillReport` | kill 완료 |
 | `handler_finished` | `(name, HandlerResult)` | 등록한 handler 1회 실행 완료마다 (§3.5) |

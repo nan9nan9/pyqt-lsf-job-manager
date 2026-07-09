@@ -189,6 +189,29 @@ def test_revert_to_created_clears_failure_residue(qtbot, manager, fake_lsf):
     assert rec.retry_count == 0
 
 
+def test_kill_started_emitted_synchronously(qtbot, manager, fake_lsf):
+    """kill_started는 kill 접수 즉시(동기) 발행되고 핸들로도 중계된다 —
+    quiesce로 kill_finished가 수십 초 늦어지는 케이스에서도 UI가 착수를
+    바로 표시할 수 있다 (submit_started와 대칭인 착수 피드백)."""
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
+
+    order = []
+    manager.kill_started.connect(lambda jsid: order.append(("started", jsid)))
+    manager.kill_finished.connect(lambda jsid, _r: order.append(("finished",
+                                                                 jsid)))
+    js.kill_started.connect(lambda: order.append(("handle_started", js.id)))
+
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000):
+        manager.kill_jobset(js.id)
+        # 동기 발행 — kill_jobset 반환 시점에 이미 도착해 있어야 한다
+        assert ("started", js.id) in order
+        assert ("handle_started", js.id) in order
+
+    assert order.index(("started", js.id)) \
+        < order.index(("finished", js.id))
+
+
 def test_barrier_wait_releases_killer_pool_slot(qtbot, manager, fake_lsf):
     """barrier 정지 대기는 killer pool(4스레드) 슬롯을 반납한다 — 대기
     4건이 pool을 다 잡아도 다섯 번째 kill이 즉시 착수·완료돼야 한다."""
