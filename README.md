@@ -383,6 +383,67 @@ js.jobset_updated.connect(on_update)
 5. 바인딩 강제: `QT_API=pyside6` (pyqt5/pyside2/pyqt6/pyside6) 환경변수를
    Qt import 전에 설정. 미설정 시 앱이 import한 바인딩 자동 감지.
 
+### 5.1 명령 → Signal 타임라인 (무엇이 언제 오나)
+
+사용자 명령에 대한 신호는 아래 순서가 **보장**됩니다. 라이브러리가 store를
+먼저 갱신한 뒤 신호를 쏘므로(store-first), 어떤 slot에서든 `js.jobs()`를
+pull하면 신호 내용과 일치하는 상태를 봅니다.
+
+```
+submit / resubmit:
+  (ready_started → ready_finished)          # pre_submit 게이트 지정 시
+  → submit_started                          # 제출 착수
+  → jobs_updated([전원 SUBMITTING])          # 표가 즉시 채워짐
+  → submit_progress + jobs_updated(변경분)    # 스로틀 배치 (0.5s 또는 1%)
+  → submit_finished(SubmitReport)           # 반드시 마지막 배치 뒤에 도착
+  → jobset_updated(최종 요약)
+
+kill:
+  → kill_started                            # 접수 즉시(동기) — 스피너 켜는 지점
+  → jobs_updated([CREATED 복귀 배치])        # 진행 중 submit이 있었으면 (취소분)
+  → kill_progress                           # 대량 chunk kill일 때 (스로틀)
+  → kill_finished(KillReport)               # 완료
+  → jobs_updated([EXIT 전원 배치])           # 기본(optimistic) — 폴링 안 기다림
+  → jobset_updated(요약)
+
+polling(자동):
+  → jobset_updated(요약) + jobs_updated(변경분만)   # jobset당 주기당 1회
+  → job_lost                                 # LOST 확정 시에만
+```
+
+### 5.2 연결 패턴 — 위젯별 권장 신호
+
+| 위젯 | 연결할 Signal | 이유 |
+|---|---|---|
+| 요약 배지/카운터 | `jobset_updated(summary)` | dict 하나로 전 상태 카운트 — 표 순회 불필요 |
+| job 테이블 | `jobs_updated([JobRecord])` | **변경분만 옴** — 전체 리로드 말고 해당 행만 갱신 |
+| 진행 바 | `submit_progress` / `kill_progress` | 이미 스로틀됨 — 그대로 바인딩 |
+| "실행 중" 스피너 | `kill_started`·`submit_started` 켜고 `*_finished` 끄기 | kill은 정지 대기로 완료가 늦을 수 있어 착수 신호가 따로 있음 |
+| 실패 알림 | `jobs_failed` / `job_lost` / `error_occurred` | 실패 계열만 구독 |
+
+```python
+js = mgr.submit(cmds, label="sweep")
+js.jobs_updated.connect(table.apply_changed)     # 변경 행만 반영
+js.jobset_updated.connect(badge.set_counts)
+js.kill_started.connect(lambda: spinner.start("killing..."))
+js.kill_finished.connect(lambda rep: spinner.stop())
+```
+
+### 5.3 성능 — 신호가 GUI를 버벅이게 하지 않으려면
+
+- **빈도는 라이브러리가 제한**합니다: progress·변경분 배치는 0.5초 간격
+  또는 진행률 1% 변화 시에만 발화(마지막 100%는 항상). 10,000개 submit도
+  초당 최대 ~2회 배치입니다.
+- **`jobs_updated`는 전체가 아니라 변경분**입니다 — 테이블 전체 리셋 대신
+  `rec.job_key`로 해당 행만 갱신하세요 (`QAbstractTableModel`이면 해당 행
+  `dataChanged`만).
+- **RUN 수천 개 이상을 다루면 `poll_runtime_updates=False`** 권장 —
+  기본값(True)은 실행 경과시간을 매 폴링 갱신하므로 RUN 전원이 매 주기
+  변경분 배치에 실립니다. 끄면 상태 전이 시점에만 반영됩니다.
+- `kill_status_policy`는 기본(`"optimistic"`)을 유지하세요 — kill 확인 즉시
+  EXIT가 반영됩니다. `"actual"`로 바꾸면 다음 폴링(기본 10초)까지
+  PEND/RUN으로 보입니다.
+
 ---
 
 ## 6. SQLite 영속 모드 (옵션)

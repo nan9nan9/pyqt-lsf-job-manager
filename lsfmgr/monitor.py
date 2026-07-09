@@ -162,6 +162,7 @@ class JobsetQuerier:
         if missing:
             hist: Dict = {}
             bhist_failed: set = set()        # bhist 조회 실패한 job_id (chunk 격리)
+            deferred: List[str] = []         # 이번 사이클 판단 보류 job_key
             ids = sorted({r.job_id for r in missing if r.job_id is not None})
             if ids:
                 try:
@@ -200,12 +201,18 @@ class JobsetQuerier:
                     # 진짜 소실이면 장애 해소 후 사이클에서 확정된다 (FR-4.3).
                     # bhist chunk 격리 덕에 다른 chunk에서 확인된 job은 여기서
                     # 안 걸리고 정상 전이/LOST 확정된다.
-                    log.warning("조회 실패로 %s 판단 보류 (LOST 확정 안 함)",
-                                rec.job_key)
+                    deferred.append(rec.job_key)
                 else:
                     lost_specs.append((rec.job_key, JobState.LOST,
                                        unchanged(rec),
                                        {"fail_reason": "NOT_FOUND_IN_LSF"}))
+            if deferred:
+                # 사이클당 1줄로 집계 — job당 경고면 대형 jobset의 장애
+                # 사이클마다 수백 줄이 반복돼 로그가 잠긴다 (NFR-6)
+                log.warning("조회 실패로 %d건 판단 보류 (LOST 확정 안 함): "
+                            "%s%s", len(deferred), ", ".join(deferred[:5]),
+                            f" 외 {len(deferred) - 5}건"
+                            if len(deferred) > 5 else "")
 
         # 전이 대상 소실(사이클 도중 remove_job)·guard 거부는 transition_many가
         # 조용히 건너뛰고 반환 목록에서 제외한다 (safe_transition과 동일 계약).
