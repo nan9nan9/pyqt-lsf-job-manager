@@ -82,3 +82,48 @@ def test_unregister_idempotent_and_scoped():
     scope = gate.kill_scope("js1")
     assert scope.acquire() is True        # 남은 활동 없음 — 즉시 True
     scope.release()
+
+
+def test_no_deadlock_under_concurrent_stress():
+    """다중 스레드 register/unregister/kill-barrier 충돌 — 데드락 없이
+    모두 유한 시간 내 종료해야 한다. gate lock은 leaf(쥔 채 호출/대기
+    없음)라는 설계 불변식의 스모크 검증."""
+    gate = SubmitGate()
+    stop = threading.Event()
+    errors = []
+
+    def submitter(jsid):
+        try:
+            while not stop.is_set():
+                ev = threading.Event()
+                tok = gate.register(jsid, ev, lambda t: True, 0.01)
+                if tok is not None:
+                    gate.unregister(jsid, tok)
+        except Exception as e:            # noqa: BLE001
+            errors.append(e)
+
+    def killer(jsid):
+        try:
+            while not stop.is_set():
+                s = gate.kill_scope(jsid)
+                s.acquire()
+                s.release()
+        except Exception as e:            # noqa: BLE001
+            errors.append(e)
+
+    threads = ([threading.Thread(target=submitter, args=(f"js{i % 2}",))
+                for i in range(4)]
+               + [threading.Thread(target=killer, args=(f"js{i % 2}",))
+                  for i in range(4)])
+    for t in threads:
+        t.start()
+    stop_timer = threading.Timer(0.5, stop.set)
+    stop_timer.start()
+    for t in threads:
+        t.join(10)                        # 데드락이면 여기서 잡힌다
+    stop_timer.cancel()
+    stop.set()
+
+    assert not errors, errors
+    assert all(not t.is_alive() for t in threads), "데드락/행 감지"
+    assert gate._barriers == {}           # barrier 전부 해제됨
