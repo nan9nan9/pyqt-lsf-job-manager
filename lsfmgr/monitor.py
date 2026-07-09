@@ -153,11 +153,15 @@ class JobsetQuerier:
 
         if missing:
             hist: Dict = {}
-            bhist_ok = True
+            bhist_failed: set = set()        # bhist 조회 실패한 job_id (chunk 격리)
             ids = sorted({r.job_id for r in missing if r.job_id is not None})
             if ids:
-                bhist_ok = self._try(lambda: hist.update(
-                    self.command.bhist_states(ids)), "bhist")
+                try:
+                    hist, bhist_failed = self.command.bhist_states(ids)
+                except LsfmgrError as e:
+                    # 예상 밖 전면 실패는 전원 보류로 폴백 (기존 안전망 유지)
+                    log.warning("조회 실패(bhist): %s", e)
+                    bhist_failed = set(ids)
             for rec in missing:
                 # bhist 키는 (job_id, array_index) — array element별 구분
                 found = None
@@ -174,10 +178,13 @@ class JobsetQuerier:
                     state, exit_code = found
                     update_specs.append((rec.job_key, state, unchanged(rec),
                                          {"exit_code": exit_code}))
-                elif probe_failed or not bhist_ok:
+                elif probe_failed or rec.job_id in bhist_failed:
                     # 조회 수단 실패가 섞인 사이클 — LOST 확정 보류.
-                    # LSF 순단이면 다음 사이클에서 정상 복구되고, 진짜
-                    # 소실이면 장애 해소 후 사이클에서 확정된다 (FR-4.3)
+                    # probe(bjobs) 실패, 또는 이 job이 속한 bhist chunk가
+                    # 실패한 경우. LSF 순단이면 다음 사이클에서 정상 복구되고,
+                    # 진짜 소실이면 장애 해소 후 사이클에서 확정된다 (FR-4.3).
+                    # bhist chunk 격리 덕에 다른 chunk에서 확인된 job은 여기서
+                    # 안 걸리고 정상 전이/LOST 확정된다.
                     log.warning("조회 실패로 %s 판단 보류 (LOST 확정 안 함)",
                                 rec.job_key)
                 else:

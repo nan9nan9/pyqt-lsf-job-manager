@@ -53,6 +53,8 @@ class FakeLsf:
         self.fail_all_queries = False        # bjobs/bhist 장애 (LSF down)
         self.fail_bhist = False              # bhist만 exit 1 (working dir full 등 —
                                              # bjobs는 정상, bhist 로그 기록 실패)
+        self.bhist_fail_ids: set = set()     # 이 job_id가 포함된 bhist 호출만 exit 1
+                                             # (chunk 단위 부분 실패 재현용)
         self.fail_next_bkill = 0             # 앞으로 N회 bkill rc=255 에러
         self.reject_clusters = False         # MC 필드(-o source_cluster) 미지원 흉내
         self.forward_needs_env = False       # forward job은 env source한 bkill만 죽음
@@ -278,6 +280,13 @@ class FakeLsf:
             return CommandResult(
                 1, "", "bhist: cannot write to log directory: No space left\n")
         _, rest = _parse_opts(args, {"-n"}, flags={"-l"})
+        if self.bhist_fail_ids:
+            # 이 호출(chunk)에 실패 지정된 id가 하나라도 있으면 chunk 전체 exit 1
+            req = {int(m.group(1)) for a in rest
+                   if (m := re.match(r"^(\d+)", a))}
+            if req & self.bhist_fail_ids:
+                return CommandResult(
+                    1, "", "bhist: cannot write to log directory: No space left\n")
         blocks = []
         for a in rest:
             m = re.match(r"^(\d+)(?:\[(\d+)\])?$", a)   # "id" 또는 "id[idx]"

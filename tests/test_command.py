@@ -212,9 +212,10 @@ def test_bhist_states(cmd, fake_lsf):
     fake_lsf.set_job(j2, "EXIT", 7)
     fake_lsf.vanish_job(j1)
     fake_lsf.vanish_job(j2)
-    hist = cmd.bhist_states([j1, j2])
+    hist, failed = cmd.bhist_states([j1, j2])
     assert hist[(j1, None)] == (JobState.DONE, 0)
     assert hist[(j2, None)] == (JobState.EXIT, 7)
+    assert failed == set()
 
 
 def test_bhist_distinguishes_array_elements(cmd, fake_lsf):
@@ -223,7 +224,7 @@ def test_bhist_distinguishes_array_elements(cmd, fake_lsf):
     fake_lsf.set_job(jid, "DONE", 0, array_index=1)
     fake_lsf.set_job(jid, "EXIT", 9, array_index=2)
     fake_lsf.set_job(jid, "DONE", 0, array_index=3)
-    hist = cmd.bhist_states([jid])
+    hist, _failed = cmd.bhist_states([jid])
     assert hist[(jid, 1)] == (JobState.DONE, 0)
     assert hist[(jid, 2)] == (JobState.EXIT, 9)
     assert hist[(jid, 3)] == (JobState.DONE, 0)

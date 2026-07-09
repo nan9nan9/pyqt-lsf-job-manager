@@ -489,24 +489,38 @@ class LsfCommand:
     BhistKey = Tuple[int, Optional[int]]
 
     def bhist_states(self, job_ids: Sequence[int]
-                     ) -> Dict[BhistKey, Tuple[JobState, Optional[int]]]:
+                     ) -> Tuple[Dict[BhistKey, Tuple[JobState, Optional[int]]],
+                                Set[int]]:
         """bhist -l 파싱 — (job_id, array_index) → (최종 상태, exit_code).
 
         array job은 element별 블록("Job <id[idx]>")이 나오므로 반드시
         element 단위로 구분한다 — id 단일 키로 합치면 마지막 블록이
         전 element를 덮어써 DONE/EXIT가 뒤섞인다. 미발견 job은 미포함.
+
+        반환: (조회 성공분 map, 조회 실패한 chunk의 job_id 집합). 실패는
+        chunk 단위로 격리한다 — 한 chunk가 exit≠0(디스크 full로 bhist가
+        로그를 못 쓰는 등)이어도 그 chunk의 job만 실패로 표시하고 나머지
+        chunk는 계속 조회한다. caller는 실패 집합의 job만 판단 보류하고,
+        성공 chunk에서 미발견된 job은 진짜 소실로 확정할 수 있다.
         """
         result: Dict[LsfCommand.BhistKey, Tuple[JobState, Optional[int]]] = {}
+        failed: Set[int] = set()
         ids = [str(i) for i in job_ids]
         base = self._prog_len(self.config.bhist_path) + 20
         for chunk in chunk_args(ids, self.config.chunk_size,
                                 self.config.arg_max, base):
             argv = cmd_tokens(self.config.bhist_path) + ["-l", "-n", "0"] + chunk
-            res = self._run_query(argv)
+            try:
+                res = self._run_query(argv)
+            except LsfCommandError as e:
+                # 이 chunk만 실패로 격리 — 나머지 chunk 조회는 계속한다.
+                log.warning("조회 실패(bhist): %s", e)
+                failed.update(int(x) for x in chunk)
+                continue
             if res is None:
                 continue
             result.update(self._parse_bhist(res.stdout))
-        return result
+        return result, failed
 
     def bhist_detail(self, job_id: int,
                      array_index: Optional[int] = None) -> str:
