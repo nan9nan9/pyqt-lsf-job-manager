@@ -26,6 +26,7 @@ from .command import LsfCommand
 from .config import ArrayJobSpec, JobSpec, LsfConfig, spec_to_json
 from .errors import SubmitError
 from .jobset_core import JobSetManager
+from .lifecycle import SubmitGate
 from .options import Options
 from .qt import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
 from .reports import SubmitProgress, SubmitReport
@@ -68,6 +69,8 @@ class _SubmitContext:
     # 진행 중 상태 전이분(PEND/SUBMIT_FAILED) 버퍼 — progress와 같은 cadence로
     # jobs_changed 배치 발행. UI가 완료를 안 기다리고 점진 갱신하게 한다.
     changed_buffer: list = field(default_factory=list)
+    # SubmitGate 등록 토큰 — None이면 kill barrier에 거부돼 born-cancelled
+    gate_token: object = None
 
 
 class _BaseSubmitTask(QRunnable):
@@ -197,12 +200,16 @@ class BulkSubmitter(QObject):
     def __init__(self, store: JobSetStore, command: LsfCommand,
                  jobset_manager: JobSetManager,
                  config: Optional[LsfConfig] = None,
-                 parent: Optional[QObject] = None):
+                 parent: Optional[QObject] = None,
+                 gate: Optional[SubmitGate] = None):
         super().__init__(parent)
         self.store = store
         self.command = command
         self.jobsets = jobset_manager
         self.config = config or command.config
+        # kill 우선권 게이트 — manager가 killer와 공유하는 것을 주입한다.
+        # (단독 사용 시 자체 생성 — barrier 없는 항상-허용 게이트로 동작)
+        self._gate = gate or SubmitGate()
         self._contexts: Dict[str, _SubmitContext] = {}
         self._ctx_lock = threading.Lock()
         self._shutdown = False
@@ -260,6 +267,16 @@ class BulkSubmitter(QObject):
             return
         keyed = list(keyed_items)
         ctx = self._new_context(jobset_id, len(keyed), options)
+        if ctx.cancel_event.is_set():
+            # born-cancelled (kill barrier 중 시작) — 아래 리셋은 기존
+            # job_id/이력을 소거하는 파괴적 연산이라, 시작 전 취소면 레코드를
+            # 아예 건드리지 않고 전원 취소로만 계상한다 (원상 유지)
+            for _ in keyed:
+                self._count(ctx, cancelled=True)
+            if not keyed:
+                QTimer.singleShot(0,
+                                  lambda: self._finish_if_done(ctx, force=True))
+            return
         # 기존 레코드 리셋 — 이전 실행의 흔적(job_id/exit_code/실행시간/위치)을
         # 지우고 새 command 반영. 지우지 않으면 재제출 실패 시 죽은 옛 job_id·
         # 이전 실행의 start/finish/working_dir가 새 커맨드의 것처럼 잔존한다.
@@ -334,7 +351,13 @@ class BulkSubmitter(QObject):
 
     def _new_context(self, jobset_id: str, total: int,
                      options: Options) -> _SubmitContext:
-        """submit 사이클 1건의 pool/ctx 구성 + 등록 (submit/resubmit 공통)."""
+        """submit 사이클 1건의 pool/ctx 구성 + 등록 (submit/resubmit/array 공통).
+
+        SubmitGate 등록까지 여기서 한다 — kill barrier가 올라가 있으면
+        born-cancelled(cancel_event가 켜진 채 시작): 어떤 job도 LSF에
+        제출되지 않고 기존 취소 경로(CREATED 복귀, finished(cancelled))로
+        마무리된다. barrier 확인과 등록이 게이트 lock 아래 원자적이라
+        'kill의 취소를 빠져나가는 늦은 사이클'이 구조적으로 불가능하다."""
         pool = QThreadPool()
         pool.setMaxThreadCount(options.workers)
         ctx = _SubmitContext(
@@ -344,6 +367,14 @@ class BulkSubmitter(QObject):
             throttler=self._make_throttler(), options=options)
         with self._ctx_lock:
             self._contexts[jobset_id] = ctx
+        # 진행 중 bsub는 submit_timeout_s로 반드시 끝난다(subprocess timeout).
+        # 취소된 나머지 worker는 즉시 빠지므로 여유만 더한 대기 상한.
+        ctx.gate_token = self._gate.register(
+            jobset_id, ctx.cancel_event,
+            lambda t: ctx.pool.waitForDone(int(t * 1000)),
+            options.submit_timeout_s + 30.0)
+        if ctx.gate_token is None:
+            ctx.cancel_event.set()           # born-cancelled
         return ctx
 
     def _make_throttler(self) -> EmitThrottler:
@@ -413,14 +444,8 @@ class BulkSubmitter(QObject):
         """[async→Signal] array job submit (FR-1.3) — bsub 1회.
         pre_submit(commands)->bool: 지정 시 제출 전 게이트 (FR-9)."""
         n = spec.size
-        ctx = _SubmitContext(
-            jobset_id=jobset_id, total=1,
-            max_retry=options.max_retry,
-            pool=QThreadPool(), limiter=TokenBucketLimiter(None),
-            throttler=self._make_throttler(), options=options)
-        ctx.pool.setMaxThreadCount(1)
-        with self._ctx_lock:
-            self._contexts[jobset_id] = ctx
+        ctx = self._new_context(jobset_id, 1, options)   # 게이트 등록 포함
+        ctx.pool.setMaxThreadCount(1)        # bsub 1회 — worker 1개면 충분
 
         def do_launch():
             created = self.store.add_jobs([
@@ -458,29 +483,6 @@ class BulkSubmitter(QObject):
             ctx = self._contexts.get(jobset_id)
         if ctx is not None:
             ctx.cancel_event.set()
-
-    def wait_quiesce(self, jobset_id: str) -> bool:
-        """진행 중 submit 사이클이 멎을 때까지 blocking 대기 (kill 우선권).
-
-        cancel_submit + abort_retries 후 killer worker 스레드에서 호출된다.
-        미착수 worker는 안전 지점에서 CREATED로 복귀하고, 이미 bsub에 들어간
-        worker는 완료(PEND, job_id 확보)까지 기다린다 — 그래야 killer가 직후
-        뜨는 스냅샷에 '그새 제출돼 버린' job이 빠짐없이 포함된다. 안 기다리면
-        kill 스냅샷 이후에 PEND가 되어 kill을 영영 빠져나간다 (FR-3).
-        반환: 시간 내 정지 여부 — False면 caller가 경고 후 그대로 진행."""
-        with self._ctx_lock:
-            ctx = self._contexts.get(jobset_id)
-        # 취소된(cancel_event set) 사이클만 기다린다 — kill의 cancel과 이
-        # 대기 사이에 취소된 사이클이 끝나고 새 사이클(재제출 등)이 시작됐을
-        # 수 있다. 그 새 사이클은 이 kill의 대상이 아니므로 붙잡으면 안 된다:
-        # 붙잡으면 killer가 무관한 제출이 끝날 때까지 블록된 뒤 방금 재제출된
-        # job 전원을 스냅샷에 담아 오살한다.
-        if ctx is None or not ctx.cancel_event.is_set():
-            return True
-        # 진행 중 bsub는 submit_timeout_s 안에 반드시 끝난다(subprocess
-        # timeout). cancel된 나머지 worker는 즉시 빠지므로 여유만 더한다.
-        timeout_s = ctx.options.submit_timeout_s + 30.0
-        return ctx.pool.waitForDone(int(timeout_s * 1000))
 
     def shutdown(self) -> None:
         """모든 submit 중단 요청 후 pool join (CS-8).
@@ -740,6 +742,8 @@ class BulkSubmitter(QObject):
             fail_reasons=dict(ctx.fail_reasons))
 
     def _drop_ctx(self, ctx: _SubmitContext) -> None:
+        if ctx.gate_token is not None:       # 게이트 활동 종료 (멱등)
+            self._gate.unregister(ctx.jobset_id, ctx.gate_token)
         with self._ctx_lock:
             if self._contexts.get(ctx.jobset_id) is ctx:
                 del self._contexts[ctx.jobset_id]

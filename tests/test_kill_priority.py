@@ -123,40 +123,40 @@ def test_array_cancel_before_bsub_returns_created(qtbot, manager, fake_lsf):
     assert fake_lsf.calls_of("bsub") == []   # 제출 자체가 안 나감
 
 
-def test_wait_quiesce_ignores_uncancelled_cycle(qtbot, config, fake_lsf):
-    """wait_quiesce는 '취소된 사이클'만 기다린다 — cancel 없이 진행 중인
-    (예: kill의 cancel 이후 새로 시작된 재제출) 사이클은 붙잡지 않는다.
-    안 그러면 killer가 무관한 제출을 기다렸다가 그 결과물을 오살한다."""
-    runner = GatedBsub(fake_lsf)
-    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=runner)
-    try:
-        js = mgr.submit(["echo 1"], mode="bulk", workers=1, auto_poll=False)
-        assert runner.entered.wait(5)        # 제출 진행 중 (cancel 안 됨)
+class _StubScope:
+    """테스트용 KillScope 대역 — acquire 결과를 주입한다."""
 
-        t0 = time.monotonic()
-        assert mgr.submitter.wait_quiesce(js.id) is True   # 즉시 반환
-        assert time.monotonic() - t0 < 2.0   # timeout(60s)까지 안 붙잡음
+    def __init__(self, quiesced=True, gate=None):
+        self.quiesced = quiesced
+        self.gate = gate                     # 블로킹 재현용 (threading.Event)
+        self.released = threading.Event()
 
-        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            runner.gate.set()
-    finally:
-        mgr.shutdown()
+    def acquire(self):
+        if self.gate is not None:
+            self.gate.wait(30)
+        return self.quiesced
+
+    def release(self):
+        self.released.set()
 
 
 def test_quiesce_timeout_recorded_in_kill_report(qtbot, manager, fake_lsf):
-    """quiesce 대기 초과는 KillReport.errors에 남고 optimistic EXIT 표시도
-    억제된다 — 유출 가능성이 '전부 정리됨'으로 오보되지 않는다."""
+    """barrier 정지 대기 초과는 KillReport.errors에 남고 optimistic EXIT
+    표시도 억제된다 — 유출 가능성이 '전부 정리됨'으로 오보되지 않는다.
+    barrier는 실패해도 반드시 release된다."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
 
+    stub = _StubScope(quiesced=False)        # 대기 초과 재현
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
-        manager.killer.kill_jobset(js.id, quiesce=lambda: False)  # 초과 재현
+        manager.killer.kill_jobset(js.id, scope=lambda: stub)
     _jsid, report = blocker.args
 
     assert any("quiesce" in e for e in report.errors), report.errors
     assert report.changed == []              # optimistic EXIT 억제
     # store 상태는 폴링(actual)로 수렴하도록 남는다 — 여기선 PEND 유지
     assert js.jobs()[0].state is JobState.PEND
+    assert stub.released.is_set()            # finally에서 barrier 해제 보장
 
 
 def test_revert_to_created_clears_failure_residue(qtbot, manager, fake_lsf):
@@ -189,15 +189,16 @@ def test_revert_to_created_clears_failure_residue(qtbot, manager, fake_lsf):
     assert rec.retry_count == 0
 
 
-def test_quiesce_wait_releases_killer_pool_slot(qtbot, manager, fake_lsf):
-    """quiesce 대기는 killer pool(4스레드) 슬롯을 반납한다 — 대기 4건이
-    pool을 다 잡아도 다섯 번째 kill이 즉시 착수·완료돼야 한다."""
+def test_barrier_wait_releases_killer_pool_slot(qtbot, manager, fake_lsf):
+    """barrier 정지 대기는 killer pool(4스레드) 슬롯을 반납한다 — 대기
+    4건이 pool을 다 잡아도 다섯 번째 kill이 즉시 착수·완료돼야 한다."""
     gate = threading.Event()
     try:
-        # kill 4건을 quiesce에서 블록시켜 pool 4슬롯을 점유 상태로 만든다
+        # kill 4건을 acquire에서 블록시켜 pool 4슬롯을 점유 상태로 만든다
         blocked = [manager.create_jobset(1) for _ in range(4)]
         for jsid in blocked:
-            manager.killer.kill_jobset(jsid, quiesce=lambda: gate.wait(30))
+            manager.killer.kill_jobset(
+                jsid, scope=lambda: _StubScope(gate=gate))
 
         target = manager.create_jobset(1)     # 5번째 — 즉시 처리돼야 함
         with qtbot.waitSignal(manager.kill_finished, timeout=5000) as blocker:
@@ -207,33 +208,35 @@ def test_quiesce_wait_releases_killer_pool_slot(qtbot, manager, fake_lsf):
         gate.set()                            # 블록 해제 (teardown 청소)
 
 
-def test_quiesce_submits_cancels_late_cycle(qtbot, config, fake_lsf):
-    """_quiesce_submits는 초기 cancel이 못 잡은(자기 호출 이후 등록된)
-    submit 사이클도 스스로 취소+대기한다 — kill과 resubmit 착수가 경합하는
-    창을 닫는 재취소 루프의 핵심 계약."""
-    runner = GatedBsub(fake_lsf)
-    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=runner)
+def test_submit_during_kill_barrier_is_born_cancelled(qtbot, manager,
+                                                      fake_lsf):
+    """kill barrier가 올라간 동안 시작된 재제출은 born-cancelled — 레코드를
+    건드리지도, LSF에 제출하지도 않고 전원 취소로 끝난다. 초기 cancel이
+    못 잡는 '늦은 사이클'이 구조적으로 막히는지의 핵심 계약 (SubmitGate)."""
+    from lsfmgr.config import JobSpec
+    from lsfmgr.options import Options
+
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
+    rec = js.jobs()[0]
+    fake_lsf.set_all("DONE", 0)
+    manager.querier.query(js.id)             # DONE 확정 (원상 기준점)
+
+    scope = manager._gate.kill_scope(js.id)
+    assert scope.acquire() is True           # kill 진행 중 상태 재현
     try:
-        # '초기 cancel 이후 시작된 사이클'을 흉내: cancel 없이 제출만 진행 중
-        js = mgr.submit(["echo 1", "echo 2"], mode="bulk", workers=1,
-                        auto_poll=False)
-        assert runner.entered.wait(5)
+        n_lsf = len(fake_lsf.jobs)
+        with qtbot.waitSignal(manager.submit_finished,
+                              timeout=10000) as blocker:
+            manager.submitter.resubmit_existing(
+                js.id, [(rec.job_key, JobSpec(command="echo again"))],
+                Options())
+        _jsid, report = blocker.args
 
-        done = {}
-
-        def run_quiesce():                    # killer worker 역할
-            done["ok"] = mgr._quiesce_submits(js.id)
-
-        t = threading.Thread(target=run_quiesce)
-        t.start()
-        runner.gate.set()                     # 진행 중 bsub 완료 허용
-        t.join(15)
-        assert not t.is_alive()
-
-        assert done["ok"] is True             # 활동 없음 확인 후 True
-        # 루프의 재취소가 사이클을 잡았다 — 미착수분은 CREATED 복귀
-        states = sorted(r.state.name for r in js.jobs())
-        assert states == ["CREATED", "PEND"], states
-        assert mgr.submitter.is_active(js.id) is False
+        assert report.cancelled == 1 and report.succeeded == 0
+        assert len(fake_lsf.jobs) == n_lsf   # LSF 제출 0
+        after = js.jobs()[0]
+        assert after.state is JobState.DONE  # 리셋조차 안 됨 (원상 유지)
+        assert after.job_id == rec.job_id
     finally:
-        mgr.shutdown()
+        scope.release()

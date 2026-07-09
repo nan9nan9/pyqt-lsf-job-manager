@@ -132,9 +132,17 @@ class LsfJobManager(QObject):
         self.jobsets = JobSetManager(self.store, self.command, self.config)
         self.querier = JobsetQuerier(self.store, self.command)
 
+        # kill 우선권 게이트 (FR-3) — submit 사이클 등록과 kill barrier를
+        # 한 lock으로 묶어, kill의 취소를 빠져나가는 늦은 submit 시작이
+        # 구조적으로 불가능하게 한다 (lifecycle.py). submitter가 등록하고
+        # killer가 kill_jobset의 scope로 barrier를 잡는다.
+        from .lifecycle import SubmitGate
+        self._gate = SubmitGate()
+
         from .submitter import BulkSubmitter
         self.submitter = BulkSubmitter(self.store, self.command,
-                                       self.jobsets, self.config, parent=self)
+                                       self.jobsets, self.config, parent=self,
+                                       gate=self._gate)
         self.submitter.progress.connect(self.submit_progress)
         self.submitter.finished.connect(self.submit_finished)
         self.submitter.error.connect(self.error_occurred)
@@ -529,45 +537,25 @@ class LsfJobManager(QObject):
         envpath 지정 시 그 LSF env를 source한 bkill (MC forward job)."""
         if verify is None:
             verify = bool(self._defaults.get("verify_kill", False))
-        quiesce = None
+        scope = None
         if only_state is None:
             # 전체 kill은 진행 중 submit에 대해 우선권을 갖는다 (FR-3):
-            # ① 진행 중 submit 취소 — 미착수 worker는 안전 지점에서 CREATED
-            #    복귀(제출 자체를 안 함), kill-phase 대기 중 재제출 plan도 취소.
+            # ① 진행 중 submit 즉시 취소(응답성 — 빨리 멈출수록 kill 대상↓),
+            #    kill-phase 대기 중 재제출 plan 취소(kill 후 발화 부활 방지).
             # ② 대기 중 submit 재시도 포기 확정 — 안 하면 RETRY_WAIT의
             #    QTimer가 kill 뒤에 발화해 job이 부활한다.
-            # ③ killer는 quiesce로 submit이 멎기를 기다린 뒤 스냅샷 — 이미
-            #    bsub에 들어가 그새 제출된 job은 PEND(job_id)로 잡혀 kill된다.
-            #    SUBMITTING이 kill 대상에서 스킵돼 유출되던 구멍을 막는다.
+            # ③ killer가 SubmitGate barrier(scope)를 잡는다 — 정확성은 이게
+            #    보장한다: barrier와 등록이 한 lock 아래 원자적이라, ①이 못
+            #    잡은 늦은 사이클은 barrier가 넘겨받아 취소하거나(먼저 등록)
+            #    등록 자체가 거부된다(나중). 재취소 루프가 필요 없다.
             # (부분 kill(only_state)은 살아있는 특정 상태만 겨냥하므로 유지)
             self.submitter.cancel_submit(jobset_id)
             self._resubmitter.cancel(jobset_id)
             self.submitter.abort_retries(jobset_id)
-            quiesce = lambda: self._quiesce_submits(jobset_id)  # noqa: E731
+            scope = lambda: self._gate.kill_scope(jobset_id)  # noqa: E731
         self.killer.kill_jobset(jobset_id, only_state=only_state,
                                 verify=verify, envpath=envpath,
-                                quiesce=quiesce)
-
-    def _quiesce_submits(self, jobset_id: str) -> bool:
-        """[killer worker] 이 jobset의 submit 활동이 완전히 멎을 때까지
-        취소+대기를 반복한다 — kill 우선권의 quiesce 단계 (FR-3).
-
-        kill_jobset의 초기 cancel과 이 대기 사이에는 원자성이 없다 —
-        resubmit kill-phase 완료(_killed)와 경합하면 그 좁은 창에서 초기
-        cancel이 못 잡은 새 submit ctx가 등록될 수 있다. 여기서 취소를
-        다시 걸고(등록된 ctx는 이번엔 반드시 잡힌다) 활동이 없어질 때까지
-        확인하는 루프로 그 창을 닫는다. kill 진행 중 도착한 재제출도
-        취소된다 — kill이 우선권을 갖는다는 정책 그대로다.
-        한도 내에 안 멎으면 False — killer가 KillReport.errors로 보고한다."""
-        for _ in range(3):
-            self._resubmitter.cancel(jobset_id)      # kill-phase 대기 plan
-            self.submitter.cancel_submit(jobset_id)  # 새로 등록된 ctx도 취소
-            if not self.submitter.wait_quiesce(jobset_id):
-                return False
-            if not (self.submitter.is_active(jobset_id)
-                    or self._resubmitter.is_active(jobset_id)):
-                return True
-        return False
+                                scope=scope)
 
     def kill_jobs(self, job_ids: Sequence, *,
                   jobset_id: Optional[str] = None,

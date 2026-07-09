@@ -77,12 +77,13 @@ class Killer(QObject):
     def kill_jobset(self, jobset_id: str, *,
                     only_state: Optional[JobState] = None,
                     verify: bool = False, envpath: str = "",
-                    quiesce: Optional[Callable[[], bool]] = None) -> None:
-        """quiesce: 지정 시 kill 대상 스냅샷 전에 worker에서 호출되는 blocking
-        훅 — 진행 중 submit이 멎기를 기다린다 (kill 우선권, manager가 배선)."""
+                    scope: Optional[Callable[[], object]] = None) -> None:
+        """scope: KillScope 팩토리 (kill 우선권, manager가 SubmitGate로 배선).
+        지정 시 worker에서 scope().acquire()로 barrier를 올려 진행 중 submit을
+        취소·대기하고, kill 완료까지 새 submit 시작을 막는다."""
         self._pool.start(_KillTask(
             self, jobset_id=jobset_id, only_state=only_state, verify=verify,
-            envpath=envpath, quiesce=quiesce))
+            envpath=envpath, scope=scope))
 
     def kill_jobs(self, job_ids: Sequence, *, verify: bool = False,
                   jobset_id: str = "", envpath: str = "") -> None:
@@ -103,7 +104,7 @@ class _KillTask(QRunnable):
                  only_state: Optional[JobState] = None,
                  job_ids: Optional[List] = None, verify: bool = False,
                  envpath: str = "",
-                 quiesce: Optional[Callable[[], bool]] = None):
+                 scope: Optional[Callable[[], object]] = None):
         super().__init__()
         self.setAutoDelete(True)
         self.killer = killer
@@ -112,7 +113,7 @@ class _KillTask(QRunnable):
         self.job_ids = job_ids
         self.verify = verify
         self.envpath = envpath
-        self.quiesce = quiesce
+        self.scope_factory = scope
         cfg = killer.command.config          # chunk progress throttle (submit 대칭)
         self._prog = EmitThrottler(cfg.progress_min_interval_s,
                                    cfg.progress_min_step_ratio)
@@ -143,21 +144,32 @@ class _KillTask(QRunnable):
 
     # ------------------------------------------------------------------
     def _run(self) -> KillReport:
+        # kill 우선권 barrier는 kill이 끝날 때까지 유지한다 — 그동안 새
+        # submit 등록은 SubmitGate가 거부(born-cancelled)하므로 'kill 진행 중
+        # 도착한 제출/재제출은 취소된다'가 타이밍이 아닌 규칙이 된다.
+        scope = self.scope_factory() if self.scope_factory else None
+        try:
+            return self._run_kill(scope)
+        finally:
+            if scope is not None:
+                scope.release()
+
+    def _run_kill(self, scope) -> KillReport:
         k = self.killer
         strategies: List[str] = []
         errors: List[str] = []
-        if self.quiesce is not None:
-            # kill 우선권 (FR-3) — 진행 중 submit이 멎은 뒤에 대상 스냅샷을
-            # 뜬다. cancel된 미제출 job은 CREATED로 복귀해 대상에서 빠지고,
-            # 그새 제출이 완료된 job은 PEND(job_id 확보)로 확정되어 아래
-            # 스냅샷에 포함된다 — SUBMITTING을 건너뛰다 놓치는 유출이 없다.
+        if scope is not None:
+            # kill 우선권 (FR-3) — barrier를 올리는 순간(SubmitGate lock 아래
+            # 원자적) 그 시점의 submit 활동을 넘겨받아 취소·대기한다. 미제출
+            # job은 CREATED로 복귀해 대상에서 빠지고, 그새 제출이 완료된
+            # job은 PEND(job_id 확보)로 확정되어 아래 스냅샷에 포함된다.
+            # barrier 이후의 새 시작은 등록 거부되므로 놓치는 유출이 없다.
             # 대기 동안 pool 슬롯을 반납한다(releaseThread — Qt의 blocking
-            # task 표준 패턴) — 안 그러면 quiesce 대기 몇 건이 pool
-            # (maxThreadCount=4)을 전부 점유해 후속 kill(긴급 kill 포함)이
-            # bkill 한 번 못 나가고 분 단위로 큐잉된다.
+            # task 표준 패턴) — 안 그러면 대기 몇 건이 pool(maxThreadCount=4)
+            # 을 전부 점유해 후속 kill(긴급 kill 포함)이 큐에 갇힌다.
             k._pool.releaseThread()
             try:
-                quiesced = self.quiesce()
+                quiesced = scope.acquire()
             finally:
                 k._pool.reserveThread()
             if not quiesced:
