@@ -171,11 +171,10 @@ class _KillPhaseTask(QRunnable):
                 # envpath 지정 시 그 클러스터 env를 source한 bkill —
                 # MC forward job은 로컬 bkill로 안 죽어, 안 그러면 원 job이
                 # 산 채로 새 job이 중복 제출된다
-                with self._coord.mgr.command.operation("resubmit"):  # 태깅
-                    self._coord.mgr.command.bkill_by_ids(
-                        plan.live_ids, envpath=plan.envpath)
-                    if plan.verify:
-                        self._await_dead(plan.live_ids)
+                self._coord.mgr.command.bkill_by_ids(
+                    plan.live_ids, envpath=plan.envpath)
+                if plan.verify:
+                    self._await_dead(plan.live_ids)
                 # 파이프라인 stage 1 가시화 — 죽인 job을 EXIT로 전이·발행한다.
                 # (이어지는 재제출이 CREATED로 리셋하기 전에 kill 결과를 표에
                 # 드러낸다: 살아있던 것만 EXIT, 이미 terminal/미제출은 안 건드림)

@@ -127,8 +127,7 @@ class _KillTask(QRunnable):
                  ", envpath" if self.envpath else "")
         try:
             try:
-                with self.killer.command.operation("kill"):  # DEBUG 태깅
-                    report = self._run()
+                report = self._run()
             except Exception as e:           # noqa: BLE001 — CS-5
                 log.exception("kill 실패: %s", self.jobset_id)
                 self.killer.error.emit(self.jobset_id, repr(e))

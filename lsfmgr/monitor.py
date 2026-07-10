@@ -40,13 +40,6 @@ class JobsetQuerier:
         self.command = command
 
     def query(self, jobset_id: str) -> QueryResult:
-        # 상위 명령 태그 — 이 사이클의 모든 bjobs/bhist DEBUG 로그에 [poll].
-        # (query_once/reconcile/kill-verify도 query를 타지만 대다수가 폴링이라
-        # poll로 태깅 — 세분이 필요하면 caller가 operation()으로 덮어쓴다)
-        with self.command.operation("poll"):
-            return self._query(jobset_id)
-
-    def _query(self, jobset_id: str) -> QueryResult:
         js = self.store.get_jobset(jobset_id)
         # 조회 대상(is_on_lsf)만 SQL 단에서 걸러 가져온다 — 전체 스캔 대신
         # 인덱스(jobset_id,state)로. 대다수가 terminal인 대형 jobset에서 매

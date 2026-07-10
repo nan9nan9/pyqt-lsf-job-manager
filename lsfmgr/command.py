@@ -5,11 +5,9 @@ Qt 비의존 순수 Python (§8 원칙). shell 미경유, runner 주입으로 mo
 """
 from __future__ import annotations
 
-import contextlib
 import logging
 import re
 import subprocess
-import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import (
@@ -199,27 +197,6 @@ class LsfCommand:
             if self.config.collect_clusters
             else [self._BJOBS_FULL_FMT, self._BJOBS_CORE_FMT])
         self._bjobs_fmt_idx = 0
-        # 상위 명령 태그(submit/kill/poll/resubmit) — worker 스레드 경계에서
-        # operation()으로 설정하면 그 안의 모든 _run DEBUG 로그에 붙는다.
-        # bjobs는 poll/kill/resubmit가 공유하므로 메서드 인자가 아니라 실행
-        # 컨텍스트(스레드별)로 태깅해야 정확히 귀속된다.
-        self._op_local = threading.local()
-
-    @property
-    def _op(self) -> str:
-        return getattr(self._op_local, "tag", None) or "cmd"
-
-    @contextlib.contextmanager
-    def operation(self, tag: str):
-        """이 블록 안의 모든 LSF 실행 DEBUG 로그에 상위 명령 태그를 단다.
-        worker 스레드 경계(kill/submit/poll/resubmit)에서 감싼다. 중첩 시
-        이전 태그를 복원한다."""
-        prev = getattr(self._op_local, "tag", None)
-        self._op_local.tag = tag
-        try:
-            yield
-        finally:
-            self._op_local.tag = prev
 
     @property
     def _bjobs_fmt(self) -> str:
@@ -231,13 +208,10 @@ class LsfCommand:
         return sum(len(t) + 1 for t in cmd_tokens(path))
 
     def _run(self, argv: Sequence[str], timeout: float) -> CommandResult:
-        """runner 호출 + NFR-6 DEBUG 로깅 (명령 원문/stdout/stderr).
-        상위 명령 태그([submit]/[kill]/[poll]/...)를 붙여 어느 명령이 이
-        subprocess를 실행했는지 구분한다."""
-        op = self._op
-        log.debug("[%s] 실행: %s", op, " ".join(argv))
+        """runner 호출 + NFR-6 DEBUG 로깅 (명령 원문/stdout/stderr)."""
+        log.debug("실행: %s", " ".join(argv))
         res = self.runner(argv, timeout)
-        log.debug("[%s] rc=%d stdout=%r stderr=%r", op, res.returncode,
+        log.debug("rc=%d stdout=%r stderr=%r", res.returncode,
                   res.stdout[:500], res.stderr[:500])
         return res
 
