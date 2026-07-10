@@ -44,6 +44,39 @@ def test_detect_lost_marks_lost(qtbot, manager, fake_lsf, submitted):
 # ----------------------------------------------------------------------
 # merge (FR-5.5)
 # ----------------------------------------------------------------------
+def test_merge_restarts_polling_for_polled_sources(qtbot, manager, fake_lsf):
+    """폴링 중이던 소스를 merge하면 새 jobset이 폴링을 자동으로 이어받는다
+    (가장 짧은 interval) — 안 하면 RUN 중이던 job의 상태 갱신이 merge 후
+    동결된다 (사용자가 start_polling 재호출을 잊는 함정)."""
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        a = manager.submit(["echo a"], auto_poll=False)
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        b = manager.submit(["echo b"], auto_poll=False)
+    fake_lsf.set_all("RUN")                    # 전원 RUN — AUTO-2 미발동
+    manager.start_polling(a.id, 1.0)
+    manager.start_polling(b.id, 2.0)
+
+    merged = manager.merge_jobsets([a.id, b.id])
+
+    assert manager._poll_intervals.get(merged) == 1.0   # min을 이어받음
+    with qtbot.waitSignal(manager.jobset_updated, timeout=10000,
+                          check_params_cb=lambda j, _s: j == merged):
+        pass                                   # merged 폴링이 실제로 돈다
+
+
+def test_merge_no_polling_when_sources_never_polled(qtbot, manager, fake_lsf):
+    """폴링을 쓰지 않던 소스의 merge는 폴링을 시작하지 않는다 —
+    무자동 계약 유지 (resubmit의 polling 재개 규칙과 동일)."""
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        a = manager.submit(["echo a"], auto_poll=False)
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        b = manager.submit(["echo b"], auto_poll=False)
+
+    merged = manager.merge_jobsets([a.id, b.id])
+
+    assert merged not in manager._poll_intervals
+
+
 def test_merge_jobsets(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         a = manager.submit_bulk([JobSpec(command=f"a {i}") for i in range(5)])

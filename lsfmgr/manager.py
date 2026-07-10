@@ -740,6 +740,9 @@ class LsfJobManager(QObject):
             jobset_ids, sync_lsf=sync_lsf,
             keep_originals=keep_originals).jobset_id
         if not keep_originals:
+            # 소스 중 폴링을 쓰던 jobset의 interval 수집 (연속성 이관용)
+            intervals = [self._poll_intervals[j] for j in jobset_ids
+                         if j in self._poll_intervals]
             for old in jobset_ids:
                 # polling 중지 필수 — 삭제된 jobset을 계속 polling하면
                 # 매 주기 JobSetNotFoundError → error Signal 폭주
@@ -747,6 +750,14 @@ class LsfJobManager(QObject):
                 self.handlers.remove_all(old)
                 self._poll_intervals.pop(old, None)
                 self._invalidate_handle(old)
+            # 폴링 연속성 — 소스가 폴링 중이던 RUN/PEND job은 merge 후에도
+            # 계속 관찰돼야 한다(안 하면 사용자가 start_polling을 다시 불러야
+            # 하는 걸 잊고 상태가 동결됨). 가장 짧은 interval을 이어받는다.
+            # 전원 terminal이면 AUTO-2가 첫 사이클에 즉시 꺼주므로 과폴링
+            # 위험은 없다. keep_originals=True면 원본들이 계속 폴링 중이라
+            # 복사본까지 폴링하면 같은 job_id를 이중 조회 — 시작하지 않는다.
+            if intervals:
+                self.start_polling(new_id, min(intervals))
         return new_id
 
     def detect_lost(self, jobset_id: str) -> List[JobRecord]:
