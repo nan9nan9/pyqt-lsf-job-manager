@@ -40,7 +40,7 @@ def manager(qtbot, fake_lsf, config):
 
 def submit_cmds(mgr, commands, *, wrapper=False, count=None,
                 merge_ids=None, **opts):
-    """v9 흐름 축약 헬퍼 — create_jobset → create_jobs → submit.
+    """v9 흐름 축약 헬퍼 — create_jobset(commands=...) → submit.
 
     구 one-shot(mgr.submit(list)/submit_wrapper) 테스트를 단일 제출 경로로
     옮기는 용도. wrapper=False면 bsub 경로(구 submit(list)와 동일 의미),
@@ -49,7 +49,7 @@ def submit_cmds(mgr, commands, *, wrapper=False, count=None,
         commands = [commands] * (count or 1)
     label = opts.pop("label", "")
     tags = opts.pop("tags", ())
-    js = mgr.create_jobset(label=label, tags=tags)
-    mgr.create_jobs(js, list(commands), wrapper=wrapper, merge_ids=merge_ids)
+    js = mgr.create_jobset(list(commands), wrapper=wrapper,
+                           merge_ids=merge_ids, label=label, tags=tags)
     mgr.submit(js, **opts)
     return js

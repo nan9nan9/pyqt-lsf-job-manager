@@ -54,8 +54,7 @@ def main():
 
     cmds = [wrapper("customwrapper_sub", "-q", "normal", f"run_{i}.sp")
             for i in range(N_JOBS)]
-    js = mgr.create_jobset(label="mc-demo")
-    mgr.create_jobs(js, cmds)                    # wrapper 커맨드 그대로
+    js = mgr.create_jobset(cmds, label="mc-demo")        # wrapper 커맨드 그대로
     mgr.submit(js, auto_poll=False)
     mgr.start_polling(js, 1)
     print(f"제출: {N_JOBS} jobs → jobset {js.id}  "

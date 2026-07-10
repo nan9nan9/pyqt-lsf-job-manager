@@ -284,10 +284,9 @@ class Dashboard(QWidget):
         kw = self.form.call_kwargs()
         label = kw.pop("label", "")
         cmds = self.form.commands()
-        # v9: jobset 생성 → job 생성(CREATED) → jobset 기준 제출.
+        # v9: jobset 생성 시 job까지 함께 만들고 → jobset 기준 제출.
         # wrapper 커맨드는 그대로 실행되고 'Job <id>' 파싱으로 관리된다.
-        js = self.mgr.create_jobset(label=label)
-        self.mgr.create_jobs(js, cmds)
+        js = self.mgr.create_jobset(cmds, label=label)
         self.mgr.submit(js, **kw)
         self._add_row(js.id, label)
         self._active_submit = js.id

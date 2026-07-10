@@ -226,11 +226,10 @@ class LsfJobManager(QObject):
         can_submit(js)로 선확인. 리셋 후 재실행되므로 같은 jobset/job_key가
         전이된다(핸들·테이블 연속). 흐름:
 
-            js = mgr.create_jobset(label="sweep")
-            mgr.create_job(js, "customwrapper_sub -q normal run_0.sp",
-                           merge_id="run_0")     # job마다 다른 wrapper 가능
-            mgr.create_job(js, "customwrapper_sub -q long tb_1.v",
-                           merge_id="tb_1")
+            js = mgr.create_jobset(
+                ["customwrapper_sub -q normal run_0.sp",
+                 "customwrapper_sub -q long tb_1.v"],
+                merge_ids=["run_0", "tb_1"], label="sweep")
             mgr.submit(js, workers=8)
 
         pre_submit(commands)->bool: 지정 시 제출 전에 커맨드 리스트 전체를
@@ -458,56 +457,55 @@ class LsfJobManager(QObject):
         if jsid:                         # jobset 컨텍스트가 있을 때만 착수 통지
             self.kill_started.emit(jsid)   # killer 등록 후 (pull 일치)
 
-    def create_jobset(self, intended_count: int = 0, *, label: str = "",
-                      tags: Sequence[str] = (),
-                      parent: Optional[str] = None) -> JobSet:
-        """[sync] 빈 JobSet 생성 — 핸들 즉시 반환 (생성 시 CREATED 상태).
+    def create_jobset(self, commands: Sequence = (), *,
+                      merge_ids: Optional[Sequence[Optional[str]]] = None,
+                      ud_datas: Optional[Sequence[Optional[dict]]] = None,
+                      wrapper: bool = True,
+                      label: str = "", tags: Sequence[str] = (),
+                      parent: Optional[str] = None,
+                      intended_count: int = 0) -> JobSet:
+        """[sync] JobSet 생성 — job까지 함께 만들고 핸들 즉시 반환 (CREATED).
 
-        submit 이전(CREATE 단계)부터 jobset이 존재하므로 GUI가 처음부터 이
-        핸들에 테이블/신호를 바인딩한다. 흐름:
+        **job 생성은 이 함수 한 곳뿐이다** (v9). 생성 후 job을 더 넣는
+        유일한 방법은 **merge** — 별도 jobset을 만들어 `mgr.merge(js, src)`로
+        흡수한다. 흐름:
 
-            js = mgr.create_jobset(label="sweep")
-            mgr.create_job(js, "customwrapper_sub -i a.sp",
-                           merge_id="a", ud_data={"run": "..."})
+            js = mgr.create_jobset(
+                ["customwrapper_sub -i a.sp", "customwrapper_sub -i b.sp"],
+                merge_ids=["a", "b"], ud_datas=[{"run": "..."}, None],
+                label="sweep")
             if mgr.can_submit(js):
                 mgr.submit(js, workers=8)     # 전 job (재)제출
 
-        intended_count는 보통 0으로 두면 create_job이 늘려간다."""
-        if isinstance(tags, str):             # 편의: 단일 태그 문자열 허용
-            tags = [tags]
-        rec = self.jobsets.create_jobset(
-            intended_count, label=label, tags=tags, parent=parent)
-        return self.jobset(rec.jobset_id)
-
-    def create_job(self, jobset_id: str, command, *,
-                   merge_id: Optional[str] = None,
-                   ud_data: Optional[dict] = None,
-                   wrapper: bool = True) -> JobRecord:
-        """[sync] job 1건 생성(CREATED) — 바구니 누적 (FR-5.4 v9).
-
-        command 타입으로 제출 경로가 정해진다:
+        commands 각 항목의 타입으로 제출 경로가 정해진다:
           - JobSpec          → bsub 경로 (queue/resources 등 옵션 보존)
           - 토큰 리스트(argv) → wrapper 경로 (그대로 실행)
           - 문자열           → wrapper=True(기본)면 wrapper(공백 분해),
                                False면 bsub(JobSpec(command=...))
-        merge_id: 논리 키 — merge 시 같은 merge_id의 기존 job이 이 내용으로
-        replace된다. jobset 내 유일해야 한다(None 제외).
-        ud_data: 사용자 정의 dict (JSON 직렬화 가능) — 라이브러리는 보존만.
+        merge_ids: 각 job의 논리 키 — merge 시 같은 merge_id의 기존 job이
+        이 내용으로 replace된다. jobset 내 유일해야 한다(None 제외).
+        ud_datas: job별 사용자 정의 dict (JSON 직렬화 가능) — 보존만.
+        merge_ids/ud_datas는 commands와 같은 길이(생략 시 전부 None).
+        commands가 비면 **빈 jobset** — 이후 merge로만 채운다.
         생성 즉시 jobs_updated/jobset_updated가 발행돼 표가 갱신된다."""
-        jobset_id = self._jsid(jobset_id)
-        return self.create_jobs(jobset_id, [command], merge_ids=[merge_id],
-                                ud_datas=[ud_data], wrapper=wrapper)[0]
-
-    def create_jobs(self, jobset_id: str, commands: Sequence, *,
-                    merge_ids: Optional[Sequence[Optional[str]]] = None,
-                    ud_datas: Optional[Sequence[Optional[dict]]] = None,
-                    wrapper: bool = True) -> List[JobRecord]:
-        """[sync] job 일괄 생성(CREATED) — create_job의 배치 버전.
-        merge_ids/ud_datas는 commands와 같은 길이(생략 시 전부 None)."""
-        jobset_id = self._jsid(jobset_id)
+        if isinstance(tags, str):             # 편의: 단일 태그 문자열 허용
+            tags = [tags]
+        rec = self.jobsets.create_jobset(
+            intended_count, label=label, tags=tags, parent=parent)
+        jsid = rec.jobset_id
         items = list(commands)
-        if not items:
-            raise ValueError("create_jobs: commands가 비어 있습니다")
+        if items:
+            records = self._build_job_records(
+                jsid, items, merge_ids, ud_datas, wrapper)
+            out = self.jobsets.create_jobs(jsid, records)
+            self._relay_jobs_changed(jsid, list(out))     # 표 즉시 갱신
+        return self.jobset(jsid)
+
+    def _build_job_records(self, jsid: str, items: list,
+                           merge_ids: Optional[Sequence[Optional[str]]],
+                           ud_datas: Optional[Sequence[Optional[dict]]],
+                           wrapper: bool) -> List[JobRecord]:
+        """commands → CREATED JobRecord 목록 (create_jobset 내부용)."""
         mids = list(merge_ids) if merge_ids is not None else [None] * len(items)
         uds = list(ud_datas) if ud_datas is not None else [None] * len(items)
         if len(mids) != len(items) or len(uds) != len(items):
@@ -515,19 +513,19 @@ class LsfJobManager(QObject):
 
         # job_key 연번 — 기존 키의 최대 suffix 다음부터
         used = set()
-        for r in self.get_jobs(jobset_id):
-            m = re.match(rf"^{re.escape(jobset_id)}_(\d+)$", r.job_key)
+        for r in self.get_jobs(jsid):
+            m = re.match(rf"^{re.escape(jsid)}_(\d+)$", r.job_key)
             if m:
                 used.add(int(m.group(1)))
         nxt = (max(used) + 1) if used else 0
 
         records = []
         for item, mid, ud in zip(items, mids, uds):
-            key = f"{jobset_id}_{nxt}"
+            key = f"{jsid}_{nxt}"
             nxt += 1
             if isinstance(item, JobSpec):
                 records.append(JobRecord(
-                    job_id=None, array_index=None, jobset_id=jobset_id,
+                    job_id=None, array_index=None, jobset_id=jsid,
                     lsf_job_name=key, state=JobState.CREATED,
                     command=item.command, via_wrapper=False,
                     spec_json=spec_to_json(item), merge_id=mid, ud_data=ud))
@@ -535,7 +533,7 @@ class LsfJobManager(QObject):
             if isinstance(item, str):
                 if not wrapper:
                     records.append(JobRecord(
-                        job_id=None, array_index=None, jobset_id=jobset_id,
+                        job_id=None, array_index=None, jobset_id=jsid,
                         lsf_job_name=key, state=JobState.CREATED,
                         command=item, via_wrapper=False,
                         spec_json=spec_to_json(JobSpec(command=item)),
@@ -545,16 +543,13 @@ class LsfJobManager(QObject):
             else:
                 argv = [str(t) for t in item]
             if not argv:
-                raise ValueError("create_jobs: 빈 커맨드")
+                raise ValueError("create_jobset: 빈 커맨드")
             records.append(JobRecord(
-                job_id=None, array_index=None, jobset_id=jobset_id,
+                job_id=None, array_index=None, jobset_id=jsid,
                 lsf_job_name=key, state=JobState.CREATED,
                 command=shlex.join(argv), via_wrapper=True,
                 merge_id=mid, ud_data=ud))
-
-        out = self.jobsets.create_jobs(jobset_id, records)
-        self._relay_jobs_changed(jobset_id, list(out))   # 표 즉시 갱신
-        return out
+        return records
 
     def set_ud_data(self, jobset_id: str, ref, ud_data: Optional[dict]
                     ) -> JobRecord:

@@ -64,8 +64,7 @@ def test_submit_emits_submitting_immediately(qtbot, manager, fake_lsf):
     batches = []
     manager.jobs_updated.connect(
         lambda jsid, recs: batches.append([r.state for r in recs]))
-    js = manager.create_jobset()
-    manager.create_jobs(js, [f"r {i}" for i in range(3)], wrapper=False)
+    js = manager.create_jobset([f"r {i}" for i in range(3)], wrapper=False)
     assert batches and batches[0] == [JobState.CREATED] * 3   # 생성 즉시
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js)

@@ -201,15 +201,14 @@ mgr.kill_finished.connect(lambda jsid, rpt: bar.setVisible(False))
 ```python
 def on_submit_clicked(self):
     cmds = [f"customwrapper_sub -q normal run_{i}.sp" for i in range(5000)]
-    js = self.mgr.create_jobset(label="sweep")
-    self.mgr.create_jobs(js, cmds)            # wrapper 커맨드 그대로
+    js = self.mgr.create_jobset(cmds, label="sweep")   # wrapper 커맨드 그대로
     self.mgr.submit(js, workers=32, max_retry=3)
     self._current_jsid = js.id                # 이 JobSet을 테이블에 표시
     self.bar.setValue(0)
 ```
 
 일어나는 일 (자동):
-- `create_jobs` 직후 5000개가 `CREATED`로, `submit` 착수 직후 `SUBMITTING`
+- `create_jobset` 직후 5000개가 `CREATED`로, `submit` 착수 직후 `SUBMITTING`
   리셋이 `jobs_updated`에 한 번에 온다 → 표 즉시 채워짐.
 - 각 job이 bsub 완료되는 대로 `PEND`로 `jobs_updated` 점진 배치 → 표가 실시간 갱신.
 - `submit_progress`로 막대 진행. 끝나면 `submit_finished(jsid, SubmitReport)`.
@@ -273,10 +272,10 @@ def on_rerun_failed(self):
     failed = [r for r in js.jobs() if r.state.is_failed]
     if not failed or not self.mgr.can_submit(js):
         return                                 # 활성 job 있으면 먼저 kill
-    fix = self.mgr.create_jobset(label="rerun")
-    self.mgr.create_jobs(fix, [shlex.split(r.command) for r in failed],
-                         merge_ids=[r.merge_id for r in failed],
-                         ud_datas=[r.ud_data for r in failed])
+    fix = self.mgr.create_jobset(
+        [shlex.split(r.command) for r in failed],
+        merge_ids=[r.merge_id for r in failed],
+        ud_datas=[r.ud_data for r in failed], label="rerun")
     self.mgr.merge(js, fix)                    # 같은 merge_id → CREATED 교체
     self.mgr.submit(js)                        # 전 job 재제출
 ```
@@ -392,7 +391,7 @@ def closeEvent(self, e):
 ## 10. `mgr.*` vs `js.*` — 역할 분리 (v9)
 
 - **명령은 전부 `mgr.*`** — `mgr.submit(js)` / `mgr.kill(js)` /
-  `mgr.merge(a, b)` / `mgr.create_job(js, …)` … 핸들(또는 jobset_id)을
+  `mgr.merge(a, b)` / `mgr.create_jobset(…)` … 핸들(또는 jobset_id)을
   인자로 넘긴다. 핸들에는 명령 메서드가 없다 — API가 한 곳뿐이라
   "어디를 불러야 하나" 고민이 없다.
 - **조회(pull)와 Signal은 `js.*`가 편리** — `js.jobs()`/`js.summary`/

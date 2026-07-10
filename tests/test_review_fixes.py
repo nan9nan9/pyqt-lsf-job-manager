@@ -106,14 +106,15 @@ def test_manager_only_kwargs_validated(fake_lsf):
 # 버그 7: submit([]) — finished가 핸들 생성 전에 동기 emit되어 유실
 # ----------------------------------------------------------------------
 def test_empty_jobset_submit_rejected(manager, fake_lsf):
-    """v9: 빈 제출은 아예 불가 — create_jobs가 빈 목록을 거부하고,
-    job 없는 jobset의 submit은 LsfmgrError."""
-    js = manager.create_jobset()
-    with pytest.raises(ValueError):
-        manager.create_jobs(js, [])
-    with pytest.raises(LsfmgrError):
-        manager.submit(js)
+    """v9: 빈 jobset(commands 없이 생성)은 허용되지만 job이 없으니
+    submit은 LsfmgrError로 거부된다. job은 이후 merge로만 채운다."""
+    js = manager.create_jobset()          # 빈 jobset — 생성만 (허용)
     assert js.summary["total"] == 0
+    with pytest.raises(LsfmgrError):
+        manager.submit(js)                # job 없음 → 거부
+    # merge_ids/ud_datas 길이 불일치는 ValueError
+    with pytest.raises(ValueError):
+        manager.create_jobset(["a", "b"], merge_ids=["m1"])
 
 
 # ----------------------------------------------------------------------

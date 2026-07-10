@@ -59,8 +59,7 @@ def test_no_coredump_on_exit_without_shutdown(tmp_path):
         app = QApplication(sys.argv)
         mgr = LsfJobManager(store=InMemoryStore(),
                             config=LsfConfig(poll_interval_s=5), runner=FakeLsf())
-        js = mgr.create_jobset()
-        mgr.create_jobs(js, [f"r {i}" for i in range(20)], wrapper=False)
+        js = mgr.create_jobset([f"r {i}" for i in range(20)], wrapper=False)
         mgr.submit(js, auto_poll=False)
         mgr.start_polling(js.id, 0.2)    # 폴링 QThread 가동 중
         # shutdown() 미호출 + app.exec() 미실행 → 그냥 종료

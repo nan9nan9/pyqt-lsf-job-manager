@@ -98,6 +98,8 @@ def test_wrapper_kill_by_id(qtbot, manager, fake_lsf):
 
 
 def test_submit_wrapper_empty_raises(manager):
+    """v9: 빈 jobset 생성은 허용, job 없는 submit은 LsfmgrError로 거부."""
     import pytest
-    with pytest.raises(ValueError):
+    from lsfmgr.errors import LsfmgrError
+    with pytest.raises(LsfmgrError):
         submit_cmds(manager, [], wrapper=True)

@@ -101,8 +101,7 @@ def main():
     # --- 제출 + polling + handler 등록 ---
     cmds = [wrapper("customwrapper_sub", "-q", "normal", f"run_{i}.sp")
             for i in range(N_JOBS)]
-    js = mgr.create_jobset(label="handler-demo")
-    mgr.create_jobs(js, cmds)                    # wrapper 커맨드 그대로
+    js = mgr.create_jobset(cmds, label="handler-demo")   # wrapper 커맨드 그대로
     mgr.submit(js, auto_poll=False)
     mgr.start_polling(js, 1)           # 데모: 상태 전이를 촘촘히 관찰
     print(f"제출: {N_JOBS} jobs → jobset {js.id}")

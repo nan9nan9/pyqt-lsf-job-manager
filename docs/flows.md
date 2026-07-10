@@ -21,7 +21,7 @@ mgr.start_polling(js)───▶   polling QThread (전역 1개)
 
 ## 1. submit — `mgr.submit(js)` (유일한 제출 경로, v9)
 
-`create_jobset` → `create_jobs`(CREATED, 표 즉시 채움) 후 jobset 기준으로
+`create_jobset([...])`(CREATED, 표 즉시 채움) 후 jobset 기준으로
 전 job을 (재)제출한다. 가드: 전원 비활성(CREATED/terminal)이어야 한다.
 
 ```
@@ -100,7 +100,7 @@ mgr.kill(js)
 main (전부 앱이 직접 제어)
 ──────────────────────────────────────────
 ① (살아있으면) mgr.kill(js) → kill_finished 대기
-② fix = mgr.create_jobset() → mgr.create_job(fix, ..., merge_id=기존과 동일)
+② fix = mgr.create_jobset([...], merge_ids=[기존과 동일])   # 수정본 바구니
 ③ mgr.merge(js, fix)     # merge_id 일치분 CREATED 교체(물리 키 유지),
                          # 신규/None 은 추가. fix 소멸. 가드: 전원 비활성
 ④ mgr.submit(js)         # 전 job 리셋 후 재제출 — §1과 동일 흐름

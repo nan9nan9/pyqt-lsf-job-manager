@@ -11,14 +11,13 @@
 
 ---
 
-## 1. Quick Start — 4줄이면 끝
+## 1. Quick Start — 3줄이면 끝
 
 ```python
 from lsfmgr import LsfJobManager
 
 mgr = LsfJobManager()
-js = mgr.create_jobset(label="sweep")                       # 바구니 생성 (CREATED)
-mgr.create_jobs(js, [f"mytool run_{i}.sp" for i in range(5000)])
+js = mgr.create_jobset([f"mytool run_{i}.sp" for i in range(5000)], label="sweep")
 mgr.submit(js)                                              # jobset 기준 제출
 js.jobset_updated.connect(lambda s: print(f"RUN={s['RUN']} DONE={s['DONE']}/{s['total']}"))
 ```
@@ -90,15 +89,14 @@ mgr.submit(js, workers=8, max_retry=0, queue="short", auto_poll=False)
 ### 2.1 wrapper 커맨드로 제출 (예: `customwrapper_sub`)
 
 실제 환경처럼 job 마다 `customwrapper_sub` 같은 제출 wrapper(job마다 다른 wrapper/커맨드 혼합 가능)를
-쓰는 경우, `create_jobs`에 wrapper 커맨드들을 그대로 넘깁니다(기본
+쓰는 경우, `create_jobset`에 wrapper 커맨드 리스트를 그대로 넘깁니다(기본
 `wrapper=True`). lsfmgr는 각 커맨드를 **그대로 실행**하고 출력의 `Job <id>`를
 파싱해 **job_id 기반**으로 모니터링·kill 합니다(‑q/‑J/‑g 등 인자 조립·주입 없음).
 
 ```python
 mgr = LsfJobManager()          # bsub_path 지정 불필요
 
-js = mgr.create_jobset()
-mgr.create_jobs(js, [
+js = mgr.create_jobset([
     "customwrapper_sub -q normal run_0.sp",         # job 마다 다른 wrapper 가능
     ["customwrapper_sub", "-q", "long", "tb_1.v"],   # 문자열 또는 토큰 리스트
     "customwrapper_sub -q short run_2.sp",
@@ -136,7 +134,7 @@ job은 `CREATED`로 남습니다(기본은 `submit_finished(cancelled=N)`도 발
 > 재시도 시 재실행되므로 부수효과는 **멱등**이어야 합니다.
 
 > 작성 규칙·실행 방식(멀티 프로세스)·검증·트러블슈팅, 그리고 lsfmgr가 직접 bsub를
-> 조립하는 저수준 경로(`create_jobs(..., wrapper=False)`+`bsub_path`)는
+> 조립하는 저수준 경로(`create_jobset(..., wrapper=False)`+`bsub_path`)는
 > **[`docs/lsfmgr.md`](docs/lsfmgr.md)**
 > 에 정리되어 있습니다.
 
@@ -159,26 +157,30 @@ GUI는 제출 전(CREATE 단계)부터 jobset을 갖습니다 — `create_jobset
 갈라지지 않습니다.
 
 ```python
-js = mgr.create_jobset(label="sweep")         # 빈 jobset — 핸들 즉시 (CREATED)
-js.jobs_updated.connect(table.apply_changed)  # GUI 테이블(앱 코드)을 처음부터
-                                              # 이 핸들의 Signal에 연결
-
-mgr.create_job(js, "customwrapper_sub -i a.sp",   # CREATED 레코드 누적
-              merge_id="case-a",               # 논리 키 (merge 시 replace 기준)
-              ud_data={"run": "...", "rev": 3})  # 사용자 데이터 (라이브러리는 보존만)
-mgr.create_jobs(js, [...], merge_ids=[...], ud_datas=[...])   # 배치
+js = mgr.create_jobset(                        # 생성 시 job까지 함께 만든다
+    ["customwrapper_sub -i a.sp",              #   각 커맨드 = job 1건 (CREATED)
+     "customwrapper_sub -i b.sp"],
+    merge_ids=["case-a", "case-b"],           # 논리 키 (merge 시 replace 기준)
+    ud_datas=[{"run": "...", "rev": 3}, None],  # job별 사용자 데이터 (보존만)
+    label="sweep")
+js.jobs_updated.connect(table.apply_changed)  # GUI 테이블(앱 코드)을 이 핸들의
+                                              # Signal에 연결 (초기값은 js.jobs())
 
 if mgr.can_submit(js):                     # 전원 비활성 + job 존재?
     mgr.submit(js, workers=8)              # **전 job** (재)제출 — 이전
                                            # DONE/EXIT도 리셋 후 재실행
 ```
 
+> **job 생성은 `create_jobset` 한 곳뿐**입니다 (v9). 생성 후 job을 더 넣는
+> 유일한 방법은 **merge** — 별도 jobset을 만들어 `mgr.merge(js, src)`로
+> 흡수합니다 (아래 재실행 패턴).
+
 **재실행 패턴** (resubmit API 없음): 실패/수정 job을 같은 `merge_id`로 담은
 새 jobset을 만들어 흡수 → 다시 submit:
 
 ```python
-fix = mgr.create_jobset(label="fix")
-mgr.create_job(fix, "customwrapper_sub -i a_fixed.sp", merge_id="case-a")
+fix = mgr.create_jobset(["customwrapper_sub -i a_fixed.sp"],
+                        merge_ids=["case-a"], label="fix")
 if mgr.can_merge(js, fix):
     mgr.merge(js, fix)         # case-a만 CREATED로 교체 (다른 결과 유지,
                                # 물리 키 유지 — 테이블 행 연속), fix 소멸
@@ -382,8 +384,7 @@ mgr.remove_handler(js, "collect")          # 해제
 ### 4.1 진행률 + 완료 처리
 
 ```python
-js = mgr.create_jobset(label="tt_sweep", tags=["sweep", "rev2"])
-mgr.create_jobs(js, cmds)
+js = mgr.create_jobset(cmds, label="tt_sweep", tags=["sweep", "rev2"])
 mgr.submit(js)
 js.submit_progress.connect(lambda d, t: bar.setValue(int(d / t * 100)))
 js.submit_finished.connect(lambda rpt: statusbar.showMessage(
@@ -567,7 +568,7 @@ wrapper는 받은 인자를 그대로 같은 `bin/`의 `bsub`에 전달하고, b
 customwrapper_sub -q normal run1.sp   # == bsub -q normal run1.sp → "Job <id> ..."
 ```
 
-`create_jobs`에 이 커맨드들을 그대로 넘기고 `submit`하면 lsfmgr가 실행하고 `Job <id>`를
+`create_jobset`에 이 커맨드들을 그대로 넘기고 `submit`하면 lsfmgr가 실행하고 `Job <id>`를
 파싱해 job_id 기반으로 관리합니다. job 마다 다른 wrapper를 섞어 쓸 수 있습니다.
 
 실제 환경에서 wrapper를 작성·지정하는 방법은 **[`docs/lsfmgr.md`](docs/lsfmgr.md)**,
