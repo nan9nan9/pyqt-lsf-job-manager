@@ -531,6 +531,10 @@ worker 예외는 스레드를 죽이지 않고 로그 + `js.error_occurred` Sign
 - SQLite db를 NFS에 두기 → lock 신뢰 불가, 로컬 디스크 권장 (경고 로그 남음).
 - `js.jobs()`를 타이트 루프에서 반복 호출 → 스냅샷은 polling 주기로만
   갱신되므로 의미 없음. `jobset_updated` Signal 기반으로 반응하세요.
+- `submit_finished`/`kill_finished` 핸들러 **안에서** 진행 스냅샷 pull
+  (`submit_snapshot`/`kill_snapshot`) 호출 → 완료 시점이라 항상 None인 데다,
+  같은 스레드 재획득 경합의 소지가 있음. 최종값은 핸들러 인자
+  (`SubmitReport`/`KillReport`)에 이미 담겨 있으니 그걸 쓰세요.
 
 ---
 
