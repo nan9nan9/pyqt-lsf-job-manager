@@ -21,7 +21,12 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Un
 
 from .command import LsfCommand, Runner
 from .config import JobSpec, LsfConfig, spec_from_json, spec_to_json
-from .errors import JobNotFoundError, LsfmgrError
+from .errors import (
+    JobNotFoundError,
+    LsfmgrError,
+    MergeNotAllowedError,
+    SubmitNotAllowedError,
+)
 from .handle import JobSet
 from .handlers import HandlerContext, JobSetHandlerService, StateSpec
 from .jobset_core import JobSetManager
@@ -632,8 +637,9 @@ class LsfJobManager(QObject):
         sid = self._jsid(source_id)
         for jsid in (tid, sid):
             if self.submitter.is_active(jsid) or self.killer.is_active(jsid):
-                raise LsfmgrError(
-                    f"{jsid}: submit/kill 진행 중에는 merge할 수 없습니다")
+                raise MergeNotAllowedError(
+                    f"{jsid}: submit/kill 진행 중에는 merge할 수 없습니다",
+                    jobset_id=jsid)
         changed = self.jobsets.merge_from(tid, sid, force=force)
         # source 정리 — 삭제된 jobset을 계속 polling하면 error 폭주.
         # 폴링 연속성: target이 폴링을 안 쓰는데 source가 쓰고 있었다면
@@ -725,16 +731,19 @@ class LsfJobManager(QObject):
         jobset_id = self._jsid(js)
         if (self.submitter.is_active(jobset_id)
                 or self.killer.is_active(jobset_id)):
-            raise LsfmgrError(
-                f"{jobset_id}: submit/kill 진행 중에는 submit할 수 없습니다")
+            raise SubmitNotAllowedError(
+                f"{jobset_id}: submit/kill 진행 중에는 submit할 수 없습니다",
+                jobset_id=jobset_id)
         jobs = [r for r in self.get_jobs(jobset_id) if r.array_index is None]
         if not jobs:
-            raise LsfmgrError(f"{jobset_id}: 제출할 job이 없습니다")
+            raise SubmitNotAllowedError(
+                f"{jobset_id}: 제출할 job이 없습니다", jobset_id=jobset_id)
         busy = [r.job_key for r in jobs if not r.state.is_inactive]
         if busy:
-            raise LsfmgrError(
+            raise SubmitNotAllowedError(
                 f"{jobset_id}: 활성(진행 중) job이 있어 submit 불가 — "
-                f"{busy[:5]} (먼저 kill 하거나 완료를 기다리세요)")
+                f"{busy[:5]} (먼저 kill 하거나 완료를 기다리세요)",
+                jobset_id=jobset_id, job_keys=busy)
         # post_process 무장 — 이번 실행이 전원 terminal에 도달하면 1회 발화.
         # (게이트 거부/취소 시 job은 CREATED로 남아 terminal이 아니므로 안 뜬다)
         if post_process is not None:

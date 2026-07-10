@@ -16,7 +16,13 @@ from typing import Iterable, List, Optional, Sequence
 
 from .command import LsfCommand
 from .config import LsfConfig
-from .errors import JobNotFoundError, LsfmgrError
+from .errors import (
+    CloseNotAllowedError,
+    JobNotFoundError,
+    LsfmgrError,
+    MergeNotAllowedError,
+    RemoveNotAllowedError,
+)
 from .states import JobRecord, JobSetRecord, JobState
 from .store.base import JobSetStore
 
@@ -133,9 +139,10 @@ class JobSetManager:
                 busy = [r.job_key for r in tgt_jobs + src_jobs
                         if not r.state.is_inactive]
                 if busy:
-                    raise LsfmgrError(
+                    raise MergeNotAllowedError(
                         f"merge 불가 — 활성(진행 중) job {len(busy)}건: "
-                        f"{busy[:5]} (force=True로 레코드만 강제 교체 가능)")
+                        f"{busy[:5]} (force=True로 레코드만 강제 교체 가능)",
+                        jobset_id=target_id, job_keys=busy)
 
             by_mid = {r.merge_id: r for r in tgt_jobs
                       if r.merge_id is not None}
@@ -197,9 +204,10 @@ class JobSetManager:
                     f"merge_id={merge_id}, job_key={job_key})")
             busy = [r.job_key for r in targets if not r.state.is_inactive]
             if busy and not force:
-                raise LsfmgrError(
+                raise RemoveNotAllowedError(
                     f"삭제 불가 — 활성(진행 중) job: {busy[:5]} "
-                    f"(force=True로 레코드만 강제 삭제 가능)")
+                    f"(force=True로 레코드만 강제 삭제 가능)",
+                    jobset_id=jobset_id, job_keys=busy)
             for r in targets:
                 self.store.remove_job(jobset_id, r.job_key)
             js = self.store.get_jobset(jobset_id)
@@ -216,9 +224,10 @@ class JobSetManager:
             jobs = self.store.get_jobs(jobset_id)
             busy = [r.job_key for r in jobs if not r.state.is_inactive]
             if busy and not force:
-                raise LsfmgrError(
+                raise RemoveNotAllowedError(
                     f"clear 불가 — 활성(진행 중) job {len(busy)}건: "
-                    f"{busy[:5]} (force=True로 강제 가능)")
+                    f"{busy[:5]} (force=True로 강제 가능)",
+                    jobset_id=jobset_id, job_keys=busy)
             for r in jobs:
                 self.store.remove_job(jobset_id, r.job_key)
             js = self.store.get_jobset(jobset_id)
@@ -285,9 +294,11 @@ class JobSetManager:
         records = self.store.get_jobs(jobset_id)
         not_terminal = [r for r in records if not r.state.is_terminal]
         if not_terminal and not force:
-            raise LsfmgrError(
+            raise CloseNotAllowedError(
                 f"terminal이 아닌 job {len(not_terminal)}개 — close 불가 "
-                f"(force=True로 강제 가능)")
+                f"(force=True로 강제 가능)",
+                jobset_id=jobset_id,
+                job_keys=[r.job_key for r in not_terminal])
         if run_bgdel:
             for path in js.lsf_group_paths:
                 self.command.bgdel(path)

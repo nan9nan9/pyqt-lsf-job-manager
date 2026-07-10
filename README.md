@@ -220,6 +220,12 @@ mgr.submit(js)                 # 전체 재실행
 | `mgr.remove_job(js, ...)` / `mgr.clear(js)` | 대상 비활성 | 레코드만 강제 삭제 (〃) |
 | `mgr.kill(js)` | 예외 — 활성(RUN/PEND/SUBMITTING)만 대상, 종료분은 자동 skip | — |
 
+> 가드 위반 시 명령별 **전용 예외**가 납니다 — `SubmitNotAllowedError` /
+> `MergeNotAllowedError` / `RemoveNotAllowedError` / `CloseNotAllowedError`
+> (전부 `JobSetStateError` → `LsfmgrError` 하위라 `except LsfmgrError` 로도 잡힘).
+> 예외 객체의 `.jobset_id` · `.job_keys`(막은 job들)로 메시지 파싱 없이 원인을
+> 알 수 있습니다. 사전 확인은 `mgr.can_submit(js)` / `mgr.can_merge(a, b)`.
+
 ### 3.1 Signal (이 JobSet의 이벤트만 옴 — 필터링 불필요)
 
 이름은 `mgr.*` Signal과 동일하다(인자에서 `jsid`만 빠짐). 여러 JobSet을 한 곳에서

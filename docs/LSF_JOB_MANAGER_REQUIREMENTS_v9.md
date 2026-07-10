@@ -375,7 +375,9 @@ lsfmgr/
 ├── config.py            # LsfConfig, JobSpec (Qt 비의존)
 ├── states.py            # JobState(+is_inactive), JobRecord(+merge_id/user_data), JobSetRecord
 ├── reports.py           # SubmitReport/Progress, KillReport/Progress
-├── errors.py            # LsfmgrError, JobSet(Closed|NotFound)Error, JobNotFoundError, ...
+├── errors.py            # LsfmgrError 계층 — JobSet(Closed|NotFound)Error, JobNotFoundError,
+│                        #   LsfCommandError/SubmitError/ArgMaxExceededError, 그리고
+│                        #   JobSetStateError(전제 위반) → Submit/Merge/Remove/CloseNotAllowedError
 ├── command.py           # LsfCommand 래퍼 (Qt 비의존, chunking, ARG_MAX, chunk 격리)
 ├── store/               # base(ABC) / memory   (sqlite 제거)
 ├── submitter.py         # QThreadPool submit + retry + progress/cancel
