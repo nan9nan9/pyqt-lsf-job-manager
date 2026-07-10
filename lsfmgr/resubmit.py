@@ -63,6 +63,8 @@ class ResubmitCoordinator(QObject):
         return jobset_id in self._plans
 
     def start(self, plan: ResubmitPlan) -> None:
+        log.info("resubmit 착수 %s: %d건 (kill 대상 %d) — kill→재제출",
+                 plan.jobset_id, len(plan.keyed), len(plan.live_ids))
         self._plans[plan.jobset_id] = plan
         self._pool.start(_KillPhaseTask(self, plan))
 
@@ -109,6 +111,8 @@ class ResubmitCoordinator(QObject):
         # handler 재무장 — 재실행되는 job의 handler 진행 상태를 리셋해,
         # 새 실행에서도 start/end 주기가 다시 돌게 한다 (레코드 리셋과 같은
         # main 스레드 흐름이라 tick과 인터리브 없음)
+        log.info("resubmit kill 단계 완료 %s → 재제출 dispatch (%d건)",
+                 jobset_id, len(plan.keyed))
         self.mgr.handlers.rearm(jobset_id, [k for k, _ in plan.keyed])
         self.mgr.submitter.resubmit_existing(jobset_id, plan.keyed, plan.opts)
         # polling 재개 — 전원 terminal이었다면 AUTO-2가 polling을 꺼둔 상태라
@@ -167,10 +171,11 @@ class _KillPhaseTask(QRunnable):
                 # envpath 지정 시 그 클러스터 env를 source한 bkill —
                 # MC forward job은 로컬 bkill로 안 죽어, 안 그러면 원 job이
                 # 산 채로 새 job이 중복 제출된다
-                self._coord.mgr.command.bkill_by_ids(
-                    plan.live_ids, envpath=plan.envpath)
-                if plan.verify:
-                    self._await_dead(plan.live_ids)
+                with self._coord.mgr.command.operation("resubmit"):  # 태깅
+                    self._coord.mgr.command.bkill_by_ids(
+                        plan.live_ids, envpath=plan.envpath)
+                    if plan.verify:
+                        self._await_dead(plan.live_ids)
                 # 파이프라인 stage 1 가시화 — 죽인 job을 EXIT로 전이·발행한다.
                 # (이어지는 재제출이 CREATED로 리셋하기 전에 kill 결과를 표에
                 # 드러낸다: 살아있던 것만 EXIT, 이미 terminal/미제출은 안 건드림)

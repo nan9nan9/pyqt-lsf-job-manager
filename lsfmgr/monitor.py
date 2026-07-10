@@ -40,6 +40,13 @@ class JobsetQuerier:
         self.command = command
 
     def query(self, jobset_id: str) -> QueryResult:
+        # 상위 명령 태그 — 이 사이클의 모든 bjobs/bhist DEBUG 로그에 [poll].
+        # (query_once/reconcile/kill-verify도 query를 타지만 대다수가 폴링이라
+        # poll로 태깅 — 세분이 필요하면 caller가 operation()으로 덮어쓴다)
+        with self.command.operation("poll"):
+            return self._query(jobset_id)
+
+    def _query(self, jobset_id: str) -> QueryResult:
         js = self.store.get_jobset(jobset_id)
         # 조회 대상(is_on_lsf)만 SQL 단에서 걸러 가져온다 — 전체 스캔 대신
         # 인덱스(jobset_id,state)로. 대다수가 terminal인 대형 jobset에서 매
@@ -222,6 +229,13 @@ class JobsetQuerier:
         for rec in lost:
             log.error("job LOST 확정: %s (job_id=%s)", rec.job_key, rec.job_id)
         changed.extend(lost)
+
+        # 사이클 요약은 DEBUG — 정규 폴링은 매 주기라 INFO면 스팸(신호로 통지).
+        # 변화가 있을 때만 남겨 조용한 사이클은 로그를 안 늘린다.
+        if changed:
+            log.debug("poll %s: 대상 %d, 전이 %d (LOST %d, 보류 %d)",
+                      jobset_id, len(targets), len(changed), len(lost),
+                      len(deferred) if missing else 0)
 
         return QueryResult(jobset_id, self.store.summary(jobset_id),
                            tuple(changed), tuple(lost), len(targets))

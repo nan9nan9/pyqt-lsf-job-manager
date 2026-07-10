@@ -107,7 +107,8 @@ class _BaseSubmitTask(QRunnable):
             sub._task_cancelled(ctx, self.job_key)
             return
         try:
-            job_id = self._do_submit()
+            with sub.command.operation("submit"):     # DEBUG 로그 태깅
+                job_id = self._do_submit()
         except SubmitError as e:
             sub._task_failed(ctx, self.job_key, self.attempt, e,
                              self._retry_factory())
@@ -411,6 +412,9 @@ class BulkSubmitter(QObject):
                 for idx, item in enumerate(items)])
             if created:                  # 초기 SUBMITTING 즉시 발행 (표 채움)
                 self.jobs_changed.emit(jobset_id, list(created))
+            log.info("submit 착수 %s: %d건 (%s, workers=%d)", jobset_id,
+                     len(items), "wrapper" if via_wrapper else "bsub",
+                     options.workers)
             for idx, item in enumerate(items):
                 ctx.pool.start(make_task(ctx, f"{jobset_id}_{idx}", item))
 
@@ -457,6 +461,8 @@ class BulkSubmitter(QObject):
                 for i in range(1, n + 1)])
             if created:
                 self.jobs_changed.emit(jobset_id, list(created))
+            log.info("array submit 착수 %s: %d element (bsub 1회)",
+                     jobset_id, n)
             ctx.pool.start(_ArraySubmitTask(self, ctx, spec, 0))
 
         def make_failed(msg):
@@ -881,17 +887,18 @@ class _ArraySubmitTask(QRunnable):
         group = js.lsf_group_paths[0] if js.lsf_group_paths else None
         try:
             opts = ctx.options
-            array_id = sub.command.bsub(
-                command,
-                queue=(spec.queue if spec.queue is not None
-                       else (opts.queue or None)),
-                job_name=f"{jsid}[1-{n}]",            # array 지정
-                group_path=group,
-                resources=spec.resources or opts.resource_req,
-                outfile=spec.outfile, errfile=spec.errfile,
-                extra_args=spec.extra_args,
-                env=spec.env,
-                timeout_s=opts.submit_timeout_s)
+            with sub.command.operation("submit"):     # DEBUG 로그 태깅
+                array_id = sub.command.bsub(
+                    command,
+                    queue=(spec.queue if spec.queue is not None
+                           else (opts.queue or None)),
+                    job_name=f"{jsid}[1-{n}]",            # array 지정
+                    group_path=group,
+                    resources=spec.resources or opts.resource_req,
+                    outfile=spec.outfile, errfile=spec.errfile,
+                    extra_args=spec.extra_args,
+                    env=spec.env,
+                    timeout_s=opts.submit_timeout_s)
         except SubmitError as e:
             if (self.attempt < ctx.max_retry and not ctx.cancel_event.is_set()
                     and not sub._shutdown):

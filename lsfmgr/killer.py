@@ -120,13 +120,27 @@ class _KillTask(QRunnable):
 
     def run(self):
         self.killer._reg(self.jobset_id)     # pull 스냅샷 등록
+        target = (self.jobset_id or f"ids={len(self.job_ids or [])}")
+        mode = (f"only={self.only_state.value}" if self.only_state
+                else ("ids" if self.job_ids is not None else "전체"))
+        log.info("kill 착수 %s (%s%s)", target, mode,
+                 ", envpath" if self.envpath else "")
         try:
             try:
-                report = self._run()
+                with self.killer.command.operation("kill"):  # DEBUG 태깅
+                    report = self._run()
             except Exception as e:           # noqa: BLE001 — CS-5
                 log.exception("kill 실패: %s", self.jobset_id)
                 self.killer.error.emit(self.jobset_id, repr(e))
                 return
+            log.info("kill 완료 %s: 요청 %d / 확인 %d / 미확인 %d / 잔존 %s "
+                     "(전략 %s, LSF호출 %d회%s)",
+                     target, report.requested,
+                     report.requested - report.unconfirmed, report.unconfirmed,
+                     "미검증" if report.still_alive is None
+                     else report.still_alive,
+                     "+".join(report.strategies) or "-", report.command_calls,
+                     f", 오류 {len(report.errors)}건" if report.errors else "")
             # 완료 시 항상 100% 보장 (미확인이 남아도 작업은 끝) — submit과 대칭
             self.killer._set_progress(self.jobset_id, report.requested,
                                       report.requested)

@@ -504,6 +504,21 @@ logger.addHandler(my_file_handler)     # %(threadName)s 포함 포맷 권장
 레벨 규약: DEBUG=LSF 명령/stdout/stderr 원문, INFO=submit/kill/전이,
 WARNING=retry·부착물 실패, ERROR=SUBMIT_FAILED/LOST 확정·worker 예외(traceback).
 
+**명령별 로거·레벨** — 명령 흐름은 INFO만 켜도 로거별로 추적된다:
+
+| 명령 | INFO 로거 | 착수 | 완료 |
+|---|---|---|---|
+| submit | `lsfmgr.submit` | `submit 착수 <jsid>: N건 (bsub/wrapper)` | `submit 완료 …` |
+| kill | `lsfmgr.kill` | `kill 착수 <jsid> (전체/only/ids)` | `kill 완료 …: 요청/확인/미확인/잔존` |
+| resubmit | `lsfmgr.resubmit` | `resubmit 착수 …` | `resubmit kill 단계 완료 → 재제출 dispatch` |
+| polling | `lsfmgr.monitor` | (정규 사이클은 DEBUG — 신호로 통지) | 자동 중지 시 INFO |
+
+**DEBUG 명령 태그** — 모든 LSF subprocess 로그(`lsfmgr.command`)에 어느
+상위 명령이 실행했는지 태그가 붙는다: `[submit]`/`[kill]`/`[poll]`/
+`[resubmit]`. 예: `[kill] 실행: bkill 12345` / `[poll] rc=0 stdout=…`.
+`lsfmgr.command`만 DEBUG로 올려 원시 명령·stdout을 명령별로 걸러 볼 수 있다
+(예: wrapper의 `Job <id>` 파싱 문제 진단 — `[submit] rc=0 stdout=…` 확인).
+
 worker 예외는 스레드를 죽이지 않고 로그 + `js.error_occurred` Signal로 전달됩니다.
 앱 쪽 slot 예외까지 완전 수집하려면 `sys.excepthook`, `threading.excepthook`,
 `qInstallMessageHandler` 훅킹을 권장합니다 (상세는 docs/logging.md).
