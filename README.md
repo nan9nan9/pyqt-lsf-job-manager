@@ -136,15 +136,16 @@ job은 `CREATED`로 남습니다(기본은 `submit_finished(cancelled=N)`도 발
 > 재시도 시 재실행되므로 부수효과는 **멱등**이어야 합니다.
 
 > 작성 규칙·실행 방식(멀티 프로세스)·검증·트러블슈팅, 그리고 lsfmgr가 직접 bsub를
-> 조립하는 저수준 `submit`(+`bsub_path`)은 **[`docs/lsfmgr.md`](docs/lsfmgr.md)**
+> 조립하는 저수준 경로(`create_jobs(..., wrapper=False)`+`bsub_path`)는
+> **[`docs/lsfmgr.md`](docs/lsfmgr.md)**
 > 에 정리되어 있습니다.
 
 ---
 
 ## 3. JobSet — 모든 것의 중심
 
-`submit()`은 문자열 ID가 아니라 **JobSet**을 반환합니다.
-이 JobSet 하나로 해당 묶음의 모니터링/제어/조회를 전부 합니다.
+`create_jobset()`이 반환하는 **JobSet 핸들** 하나로 해당 묶음의
+모니터링/조회를 전부 합니다 (명령은 `mgr.*`에 이 핸들을 넘깁니다).
 
 ### 3.0 v9 기본 흐름 — jobset 선생성 + GUI 직접 제어
 
@@ -300,7 +301,7 @@ js.id                      # jobset_id 문자열 (로그/저장용)
 > 계속 두면 됩니다. 나중에 상태 패널을 다시 열 때는 그동안 놓친 Signal 대신
 > **pull로 현재 진행을 조회**합니다:
 > ```python
-> js = mgr.submit(cmds)              # 즉시 반환 — 아래는 언제든 호출 가능
+> mgr.submit(js)                     # 즉시 반환 — 아래는 언제든 호출 가능
 > if js.is_submitting:               # 아직 제출 중?
 >     s = js.submit_state            # SubmitProgress | None
 >     bar.setValue(int(s.fraction * 100))          # done/total 진행률
@@ -456,7 +457,7 @@ polling(자동):
 | 실패 알림 | `jobs_failed` / `job_lost` / `error_occurred` | 실패 계열만 구독 |
 
 ```python
-js = mgr.submit(cmds, label="sweep")
+js = mgr.create_jobset(label="sweep")
 js.jobs_updated.connect(table.apply_changed)     # 변경 행만 반영
 js.jobset_updated.connect(badge.set_counts)
 js.kill_started.connect(lambda: spinner.start("killing..."))
@@ -497,7 +498,7 @@ WARNING=retry·부착물 실패, ERROR=SUBMIT_FAILED/LOST 확정·worker 예외(
 
 | 명령 | INFO 로거 | 착수 | 완료 |
 |---|---|---|---|
-| submit | `lsfmgr.submit` | `submit 착수 <jsid>: N건 (bsub/wrapper)` | `submit 완료 …` |
+| submit | `lsfmgr.submit` | `submit 착수 <jsid>: N건` | `submit 완료 …` |
 | kill | `lsfmgr.kill` | `kill 착수 <jsid> (전체/only/ids)` | `kill 완료 …: 요청/확인/미확인/잔존` |
 | polling | `lsfmgr.monitor` | (정규 사이클은 DEBUG — 신호로 통지) | 자동 중지 시 INFO |
 
