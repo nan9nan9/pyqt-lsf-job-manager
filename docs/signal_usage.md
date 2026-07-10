@@ -1,11 +1,11 @@
 # Signal 사용 가이드 — 대량 job 명령을 "바로바로" 반영하기
 
-대량 job에 대한 **사용자 명령**(submit / kill / resubmit)은 폴링(bjobs) 주기를
+대량 job에 대한 **사용자 명령**(submit / kill / 재실행)은 폴링(bjobs) 주기를
 기다리지 않고 **명령 직후 ms 단위로** 테이블·프로그레스바에 반영됩니다. 이 문서는
 그렇게 되도록 어떤 Signal을 어떻게 연결하는지 정리합니다.
 
 실측 반응(mocklsf): submit `SUBMITTING` 1.5ms → PEND 점진 · kill `EXIT` ~100ms ·
-resubmit `EXIT→SUBMITTING→PEND` ~175ms.
+재실행(merge+submit) `SUBMITTING→PEND` ~175ms.
 
 ---
 
@@ -28,7 +28,7 @@ resubmit `EXIT→SUBMITTING→PEND` ~175ms.
 |---|---|---|---|---|
 | **submit(_wrapper/_bulk)** | `submit_progress` | `jobs_updated` | `jobset_updated` | `submit_finished` |
 | **kill** (대량 chunk) | `kill_progress` | `jobs_updated` | `jobset_updated` | `kill_finished` |
-| **resubmit** | `submit_progress` | `jobs_updated` | `jobset_updated` | `submit_finished` |
+| **재실행** (`mgr.submit(js)`) | `submit_progress` | `jobs_updated` | `jobset_updated` | `submit_finished` |
 
 공통: `error_occurred(jsid, msg)` (워커 예외), `job_lost(jsid, rec)` (LSF 소실).
 
@@ -38,9 +38,9 @@ resubmit `EXIT→SUBMITTING→PEND` ~175ms.
   `{"total", "PEND", "RUN", "DONE", "EXIT", "SUBMITTING", "SUBMIT_FAILED", ...}`.
 - **`*_progress(jsid, done, total)`** — 프로그레스바용. 마지막은 항상 `(total, total)`.
 
-> ⚠️ 개별 job 스트림(`jobs_updated`)은 **`mgr.*`에만** 있다. JobSet 핸들(`js.*`)엔
-> per-job이 없으니, **테이블은 단일 JobSet이라도 `mgr.jobs_updated`를 쓴다**
-> (필요하면 `if jsid == 내JobSet:` 로 거른다).
+> 개별 job 스트림은 `mgr.jobs_updated(jsid, records)` 와
+> `js.jobs_updated(records)` **둘 다** 있다 — 단일 JobSet 테이블은 `js.*`
+> (필터 불필요), 다중 JobSet 대시보드는 `mgr.*`(jsid로 분기).
 
 ---
 
@@ -78,10 +78,10 @@ poll_interval_s         = 10    # ② 폴링 주기(5~60)
 
 - `js.jobs_failed`는 `jobs_updated`에서 실패분(SUBMIT_FAILED/EXIT/LOST)만 걸러
   발화하므로 `jobs_updated`와 **같은 주기**다.
-- **전체 JobSet kill**(`js.kill()`)은 `bkill -g` 1회라 증분 없이 바로 완료 —
+- **전체 JobSet kill**(`mgr.kill(js)`)은 `bkill -g` 1회라 증분 없이 바로 완료 —
   `kill_progress`가 유의미한 건 **대량 chunk/부분 kill, MC `envpath`(chunk마다
   env source), `verify`(재조회 루프)** 일 때.
-- 폴링 주기는 생성 시 `poll_interval_s=` 또는 `js.start_polling(interval_s=…)`로,
+- 폴링 주기는 생성 시 `poll_interval_s=` 또는 `mgr.start_polling(js, …)`로,
   throttle은 `progress_min_interval_s`/`progress_min_step_ratio`로 조절(§8).
 
 ### pull 스냅샷 — 시그널을 놓친 뒤 "지금 상태"를 직접 조회
@@ -190,7 +190,7 @@ mgr.kill_finished.connect(lambda jsid, rpt: bar.setVisible(False))
 # 단일 JobSet: js.kill_progress.connect(lambda done, total: ...)
 ```
 
-- 전체 JobSet kill(`js.kill()`)은 `bkill -g` 1회라 진행 없이 바로 완료된다 —
+- 전체 JobSet kill(`mgr.kill(js)`)은 `bkill -g` 1회라 진행 없이 바로 완료된다 —
   `kill_progress`가 유용한 건 **대량 개별 kill/부분 kill/chunk fallback**일 때.
 - submit·kill이 같은 막대를 공유하면 두 `*_progress`를 같은 슬롯에 연결하면 된다.
 
@@ -225,20 +225,20 @@ def _on_submit_done(self, jsid, rep):         # SubmitReport
 
 ## 4. 대량 kill
 
-특정 JobSet의 선택 행만 죽일 때는 **`js.kill_jobs(job_keys)`** 를 쓴다 — jobset
-컨텍스트가 있어 optimistic EXIT(즉시 EXIT 반영) + 결과 중계가 모두 켜진다.
+특정 JobSet의 선택 행만 죽일 때는 **`mgr.kill_jobs(js, job_keys)`** 를 쓴다 —
+jobset 컨텍스트가 있어 optimistic EXIT(즉시 EXIT 반영) + 결과 중계가 모두 켜진다.
 
 ```python
 def on_kill_selected(self):
     js = self.mgr.jobset(self._current_jsid)
     keys = self.table.selected_job_keys()     # 선택 행의 job_key들
-    js.kill_jobs(keys)                        # → 즉시 EXIT가 jobs_updated로 옴
+    self.mgr.kill_jobs(js, keys)              # → 즉시 EXIT가 jobs_updated로 옴
 ```
 
 전체/상태별 kill:
 ```python
-js.kill()                          # 전체 (bkill -g 1회, 대량도 빠름)
-js.kill(only_state=JobState.PEND)  # PEND만
+mgr.kill(js)                           # 전체 (bkill -g 1회, 대량도 빠름)
+mgr.kill(js, only_state=JobState.PEND) # PEND만
 ```
 
 - 대량 chunk kill이면 `kill_progress`로 진행률(막대). 전체 group kill은 명령 1회라 바로 완료.
@@ -253,33 +253,38 @@ def _on_kill_done(self, jsid, rep):           # KillReport — 통계만
             f"{rep.unconfirmed} 미확인")
 ```
 
-> `mgr.kill_jobs([job_ids])` 를 `jobset_id` 없이 부르면 결과가 특정 JobSet으로
-> 중계되지 않는다. **`js.kill_jobs(keys)`** (또는 `mgr.kill_jobs(ids, jobset_id=...)`)를
-> 권장한다.
+> `mgr.kill_jobs([job_ids])` 를 jobset 컨텍스트 없이 부르면 결과가 특정
+> JobSet으로 중계되지 않는다. **`mgr.kill_jobs(js, keys)`** (또는
+> `mgr.kill_jobs(ids, jobset_id=...)`)를 권장한다.
 
 ---
 
-## 5. resubmit (파이프라인)
+## 5. 재실행 — merge + submit (v9, resubmit 제거)
+
+재실행은 별도 API가 아니라 **데이터 조작 + 일반 submit**이다 — 실패/수정
+job을 같은 `merge_id`로 담은 jobset을 만들어 흡수한 뒤 전체 재제출한다:
 
 ```python
-def on_resubmit_selected(self):
+def on_rerun_failed(self):
     js = self.mgr.jobset(self._current_jsid)
-    keys = self.table.selected_job_keys()
-    js.resubmit_jobs(keys)                     # 상태 기반 자동 분기
-    # 커맨드를 바꿔 재실행하려면:
-    # js.resubmit_jobs(keys, commands={key: "customwrapper_sub -q long a.sp"})
+    failed = [r for r in js.jobs() if r.state.is_failed]
+    if not failed or not self.mgr.can_submit(js):
+        return                                 # 활성 job 있으면 먼저 kill
+    fix = self.mgr.create_jobset(label="rerun")
+    self.mgr.create_jobs(fix, [shlex.split(r.command) for r in failed],
+                         merge_ids=[r.merge_id for r in failed],
+                         ud_datas=[r.ud_data for r in failed])
+    self.mgr.merge(js, fix)                    # 같은 merge_id → CREATED 교체
+    self.mgr.submit(js)                        # 전 job 재제출
 ```
 
-선택 job이 섞여 있어도 **조건별로** 처리되고, 그 과정이 `jobs_updated`로 단계별 발행:
-
-| 대상 job 상태 | kill? | 테이블에 보이는 순서 |
-|---|---|---|
-| 살아있음(PEND/RUN) | O | **EXIT** → **SUBMITTING** → **PEND** |
-| 이미 terminal(EXIT/DONE) | X | SUBMITTING → PEND |
-| 미제출(SUBMIT_FAILED/LOST) | X | SUBMITTING → PEND |
-
-즉 §2에서 `jobs_updated`만 연결해 두면 **추가 코드 없이** 파이프라인 단계가 그대로
-표에 나타난다. 최종은 submit과 동일하게 `submit_finished`.
+- `mgr.merge`의 replace는 **물리 key(job_key)를 유지**하므로 테이블 행이
+  그대로 이어진다(§6의 upsert 맵이 안 깨진다).
+- 살아있는 job이 남았으면 `mgr.submit`이 거부한다 — `mgr.kill(js)` 후
+  `kill_finished`에서 이어가거나 `can_submit`으로 버튼을 비활성화한다.
+- 테이블에 보이는 순서: 교체분 **CREATED** → submit 후 전원
+  **SUBMITTING → PEND** (§2에서 `jobs_updated`만 연결해 두면 자동).
+  최종은 submit과 동일하게 `submit_finished`.
 
 ---
 
@@ -381,14 +386,15 @@ def closeEvent(self, e):
 
 ---
 
-## 10. `mgr.*` vs `js.*`
+## 10. `mgr.*` vs `js.*` — 역할 분리 (v9)
 
-- **`mgr.*`** — 모든 JobSet 이벤트가 `jobset_id`와 함께. **개별 job(`jobs_updated`)은
-  여기에만 있으니 테이블은 항상 `mgr.*`.** 여러 JobSet 대시보드에 적합.
-- **`js.*`** — 특정 JobSet으로 좁힌 편의 계층(같은 이름, `jobset_id` 인자만 없음).
-  요약(`js.jobset_updated`)·완료(`js.submit_finished`/`js.kill_finished`)·진행
-  (`js.submit_progress`/`js.kill_progress`)·실패(`js.jobs_failed`)만 온다.
-  단일 JobSet 위젯의 요약/진행 표시에 편리.
+- **명령은 전부 `mgr.*`** — `mgr.submit(js)` / `mgr.kill(js)` /
+  `mgr.merge(a, b)` / `mgr.create_job(js, …)` … 핸들(또는 jobset_id)을
+  인자로 넘긴다. 핸들에는 명령 메서드가 없다 — API가 한 곳뿐이라
+  "어디를 불러야 하나" 고민이 없다.
+- **조회(pull)와 Signal은 `js.*`가 편리** — `js.jobs()`/`js.summary`/
+  `js.is_done`/`js.kill_state` + 신호 전부(핸들 신호는 jsid 인자만 없음).
+  다중 JobSet 대시보드면 `mgr.*` 신호를 jsid로 분기.
 
-정리: **개별 job 테이블 = `mgr.jobs_updated`(필요 시 jsid 필터), 요약/진행/완료 =
-아무거나 편한 쪽.**
+정리: **명령 = mgr, 상태·신호 = js.** 단일 JobSet 위젯은 js 신호에
+바인딩하고 버튼 핸들러에서 mgr를 부른다.

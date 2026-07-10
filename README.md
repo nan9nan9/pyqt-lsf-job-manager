@@ -240,7 +240,7 @@ mgr.close(js)                          # 종결 (전원 terminal일 때)
 
 > **MultiCluster forward job kill** (`envpath`): job이 다른 클러스터로
 > forward되어 로컬 `bkill`로 안 죽고 그 클러스터 LSF env를 source해야 죽는
-> 환경을 지원합니다. `js.kill()`/`js.kill_jobs()`에 `envpath="<cshrc 경로>"`를
+> 환경을 지원합니다. `mgr.kill(js)`/`mgr.kill_jobs(js, keys)`에 `envpath="<cshrc 경로>"`를
 > 주면 `tcsh -c "source <envpath> && exec bkill <ids>"` 로 실행됩니다.
 > job마다 forward된 클러스터가 다를 수 있으므로, `collect_clusters=True`로
 > 채워지는 `rec.forward_cluster`로 분류한 뒤 클러스터별로 나눠 각 `envpath`로
@@ -284,7 +284,7 @@ js.id                      # jobset_id 문자열 (로그/저장용)
 > 다릅니다.
 > ```python
 > if js.can_submit():       # 진행 중인 것 없음 → 전체 재수행 가능
->     js.submit()
+>     mgr.submit(js)
 > ```
 
 > **대량 제출을 백그라운드로 돌리기** (`is_submitting` / `submit_state`) —
@@ -367,7 +367,7 @@ js.remove_handler("collect")               # 해제
   `res.final`로 구분. 예외는 `res.error`에 담겨 옵니다(다른 job에 영향 없음).
 - **폴링이 돌고 있어야 동작**합니다(auto_poll 기본이면 자동). 첫 실행은 다음 폴링
   사이클이며, `js.refresh()`로 즉시 1회 유도 가능합니다.
-- `js.submit()`으로 전체 재실행하면 진행 상태가 자동 재무장되어 새 실행에서 다시 돕니다.
+- `mgr.submit(js)`로 전체 재실행하면 진행 상태가 자동 재무장되어 새 실행에서 다시 돕니다.
 - 실행 예제: `examples/handler_example.py`, 상세 규칙:
   [`docs/lsfmgr.md`](docs/lsfmgr.md) §2.5.
 

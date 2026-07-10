@@ -10,7 +10,7 @@ Signal이 언제 발행되는지를 도식으로 정리한다. GUI 연결 규칙
 main 스레드                  워커                           통지 (→ main, queued)
 ──────────────              ─────────────────────────      ─────────────────────
 mgr.submit()      ──────▶   submit pool (jobset당 1개,     progress / jobs_updated /
-mgr.kill_jobset() ──────▶   killer pool (전역 4스레드)      finished / error ...
+mgr.kill(js)      ──────▶   killer pool (전역 4스레드)      finished / error ...
 mgr.start_polling(js)───▶   polling QThread (전역 1개)
 ```
 
@@ -61,7 +61,7 @@ barrier 확인과 submit 등록이 한 lock 아래 원자적이라, "kill의 취
 ```
 main                              killer pool worker
 ──────────────────────────       ─────────────────────────────────────
-kill_jobset()
+mgr.kill(js)
  ├ cancel_submit()                # 응답성: 미착수 worker 즉시 중단 예약
  ├ abort_retries()                # RETRY_WAIT QTimer 부활 방지
  ├ kill_started 발행(동기) ◀━━ UI 스피너는 여기서 켠다
