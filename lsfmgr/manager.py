@@ -57,8 +57,8 @@ class LsfJobManager(QObject):
 
     # --- Low-level Facade Signal (v6 유지, 모두 jobset_id 포함) ---
     submit_started = Signal(str)               # jobset_id (게이트 통과 후)
-    pre_processing_started = Signal(str)                # jobset_id — pre_submit 게이트 시작
-    pre_processing_finished = Signal(str, bool)         # jobset_id, ok — 게이트 종료(True=통과)
+    pre_submit_started = Signal(str)                # jobset_id — pre_submit 게이트 시작
+    pre_submit_finished = Signal(str, bool)         # jobset_id, ok — 게이트 종료(True=통과)
     post_processing_started = Signal(str)               # jobset_id — 전원 terminal 후처리 시작
     post_processing_finished = Signal(str, object)      # jobset_id, result (예외 시 None)
     submit_progress = Signal(str, int, int)    # jobset_id, done, total
@@ -142,8 +142,8 @@ class LsfJobManager(QObject):
         self.submitter.error.connect(self.error_occurred)
         self.submitter.jobs_changed.connect(self._relay_jobs_changed)
         self.submitter.started.connect(self.submit_started)     # 게이트 통과 후
-        self.submitter.pre_processing_started.connect(self.pre_processing_started)
-        self.submitter.pre_processing_finished.connect(self.pre_processing_finished)
+        self.submitter.pre_submit_started.connect(self.pre_submit_started)
+        self.submitter.pre_submit_finished.connect(self.pre_submit_finished)
 
         self.polling = PollingService(self.querier, parent=self)
         self.polling.updated.connect(self._on_poll_updated)
@@ -174,7 +174,7 @@ class LsfJobManager(QObject):
         self._post_pool = QThreadPool(self)
         self._post_pool.setMaxThreadCount(2)
 
-        # pre_submit 게이트 경로의 AUTO-1 지연 — 게이트 통과(pre_processing_finished True)
+        # pre_submit 게이트 경로의 AUTO-1 지연 — 게이트 통과(pre_submit_finished True)
         # 후에야 polling을 켠다. 게이트가 오래 걸리면 레코드가 없어 AUTO-2가
         # polling을 조기 중지해 실제 job 전이를 놓치기 때문.
         self._pending_autopoll: Dict[str, float] = {}
@@ -191,9 +191,9 @@ class LsfJobManager(QObject):
         self.error_occurred.connect(self._handle_relay("error_occurred"))
         self.handler_finished.connect(self._handle_relay("handler_finished"))
         self.job_detail_ready.connect(self._handle_relay("job_detail_ready"))
-        self.pre_processing_started.connect(self._handle_relay("pre_processing_started"))
-        self.pre_processing_finished.connect(self._handle_relay("pre_processing_finished"))
-        self.pre_processing_finished.connect(self._on_pre_processing_finished)
+        self.pre_submit_started.connect(self._handle_relay("pre_submit_started"))
+        self.pre_submit_finished.connect(self._handle_relay("pre_submit_finished"))
+        self.pre_submit_finished.connect(self._on_pre_submit_finished)
         self.post_processing_started.connect(self._handle_relay("post_processing_started"))
         self.post_processing_finished.connect(self._handle_relay("post_processing_finished"))
         self.submit_finished.connect(self._h_finished)
@@ -246,7 +246,7 @@ class LsfJobManager(QObject):
 
         pre_submit(commands)->bool: 지정 시 제출 전에 커맨드 리스트 전체를
         게이트 워커에서 검사(FR-9) — **리셋 이전**이라 False/예외면 레코드
-        원상 유지. 신호: (pre_processing_started → pre_processing_finished(ok)) →
+        원상 유지. 신호: (pre_submit_started → pre_submit_finished(ok)) →
         submit_started → jobs_updated/progress → submit_finished.
 
         post_process(records)->Any: 지정 시 이 제출의 **전 job이 terminal**에
@@ -260,7 +260,7 @@ class LsfJobManager(QObject):
         return self._submit_jobset(js, pre_submit=pre_submit,
                                    post_process=post_process, **kwargs)
 
-    def _on_pre_processing_finished(self, jsid: str, ok: bool) -> None:
+    def _on_pre_submit_finished(self, jsid: str, ok: bool) -> None:
         """pre_submit 게이트 종료 — 통과 시 미뤄둔 rearm/AUTO-1 polling.
         rearm을 폴링 시작보다 먼저(같은 main slot) 해야 재실행 첫 tick에서
         핸들러가 새 주기로 돈다."""
@@ -753,7 +753,7 @@ class LsfJobManager(QObject):
             if opts.auto_poll:                    # AUTO-1
                 self.start_polling(jobset_id, opts.poll_interval_s)
         else:
-            # 게이트 경로 — rearm/폴링은 게이트 통과(pre_processing_finished True)
+            # 게이트 경로 — rearm/폴링은 게이트 통과(pre_submit_finished True)
             # 후에 한다: 거부되면 재실행이 없는데 rearm하면 terminal 레코드에
             # _PENDING 핸들러가 남아 end 핸들러가 중복 발화한다
             self._pending_rearm[jobset_id] = keys

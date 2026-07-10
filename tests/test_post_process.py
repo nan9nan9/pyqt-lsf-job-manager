@@ -2,7 +2,7 @@
 
 신호: post_processing_started → post_processing_finished(result).
 완료 감지(폴링/query_once) 시점에 발화하며, 성공/실패 혼재와 무관하게 전원
-terminal이면 실행된다. pre_submit(pre_processing)과 대칭.
+terminal이면 실행된다. pre_submit 게이트와 대칭(전자는 제출 전, 후자는 완료 후).
 """
 from __future__ import annotations
 

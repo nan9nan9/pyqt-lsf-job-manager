@@ -1,6 +1,6 @@
 """pre_submit 게이트 (FR-9) — 제출 전 커맨드 리스트 전체를 단일 워커에서 검사.
 
-신호 순서: pre_processing_started → pre_processing_finished(ok) → (ok일 때만) submit_started →
+신호 순서: pre_submit_started → pre_submit_finished(ok) → (ok일 때만) submit_started →
 submit_finished. False/예외 처리와 옵션(submit_finished_on_gate_reject) 검증.
 """
 from __future__ import annotations
@@ -12,8 +12,8 @@ from lsfmgr.states import JobState
 
 
 def _record(mgr, log):
-    mgr.pre_processing_started.connect(lambda j: log.append(("pre_processing_started", j)))
-    mgr.pre_processing_finished.connect(lambda j, ok: log.append(("pre_processing_finished", ok)))
+    mgr.pre_submit_started.connect(lambda j: log.append(("pre_submit_started", j)))
+    mgr.pre_submit_finished.connect(lambda j, ok: log.append(("pre_submit_finished", ok)))
     mgr.submit_started.connect(lambda j: log.append(("submit_started",)))
     mgr.submit_finished.connect(
         lambda j, r: log.append(("submit_finished", r.succeeded,
@@ -36,9 +36,9 @@ def test_gate_pass_order_and_commands(qtbot, manager, fake_lsf):
                             auto_poll=False, pre_submit=gate)
     assert got["cmds"] == ["echo a", "echo b"]
     kinds = [e[0] for e in log]
-    assert kinds == ["pre_processing_started", "pre_processing_finished", "submit_started",
+    assert kinds == ["pre_submit_started", "pre_submit_finished", "submit_started",
                      "submit_finished"]
-    assert log[1] == ("pre_processing_finished", True)
+    assert log[1] == ("pre_submit_finished", True)
     assert all(r.state is JobState.PEND for r in js.jobs())
 
 
@@ -54,8 +54,8 @@ def test_gate_reject_default_emits_finished(qtbot, manager, fake_lsf):
                             auto_poll=False, pre_submit=lambda c: False)
     kinds = [e[0] for e in log]
     assert "submit_started" not in kinds          # 게이트 미통과 → 제출 시작 안 함
-    assert log[0][0] == "pre_processing_started"
-    assert log[1] == ("pre_processing_finished", False)
+    assert log[0][0] == "pre_submit_started"
+    assert log[1] == ("pre_submit_finished", False)
     fin = [e for e in log if e[0] == "submit_finished"][0]
     assert fin == ("submit_finished", 0, 2, 0)    # cancelled=2
     # 레코드 미생성 → 요약은 N CREATED
@@ -65,7 +65,7 @@ def test_gate_reject_default_emits_finished(qtbot, manager, fake_lsf):
 
 
 # ----------------------------------------------------------------------
-# 거부 (False) + 옵션 off — submit_finished 미발화, pre_processing_finished(False)만
+# 거부 (False) + 옵션 off — submit_finished 미발화, pre_submit_finished(False)만
 # ----------------------------------------------------------------------
 def test_gate_reject_option_suppresses_finished(qtbot, fake_lsf, config):
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
@@ -73,12 +73,12 @@ def test_gate_reject_option_suppresses_finished(qtbot, fake_lsf, config):
     try:
         log = []
         _record(mgr, log)
-        with qtbot.waitSignal(mgr.pre_processing_finished, timeout=10000):
+        with qtbot.waitSignal(mgr.pre_submit_finished, timeout=10000):
             js = submit_cmds(mgr, ["echo a"], auto_poll=False,
                            pre_submit=lambda c: False)
         qtbot.wait(150)
         kinds = [e[0] for e in log]
-        assert kinds == ["pre_processing_started", "pre_processing_finished"]   # finished 없음
+        assert kinds == ["pre_submit_started", "pre_submit_finished"]   # finished 없음
         assert "submit_finished" not in kinds
         assert fake_lsf.calls_of("bsub") == []
     finally:
@@ -102,7 +102,7 @@ def test_gate_exception_always_reports(qtbot, fake_lsf, config):
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             js = submit_cmds(mgr, ["echo a", "echo b"],
                            auto_poll=False, pre_submit=boom)
-        assert log[1] == ("pre_processing_finished", False)
+        assert log[1] == ("pre_submit_finished", False)
         fin = [e for e in log if e[0] == "submit_finished"][0]
         assert fin == ("submit_finished", 0, 0, 2)    # failed=2
         assert any("전처리 실패" in m for m in errs)
@@ -162,13 +162,13 @@ def test_gate_array_reject(qtbot, manager, fake_lsf):
 
 
 # ----------------------------------------------------------------------
-# 핸들 신호 — js.pre_processing_started / js.pre_processing_finished 중계
+# 핸들 신호 — js.pre_submit_started / js.pre_submit_finished 중계
 # ----------------------------------------------------------------------
 def test_handle_ready_signals(qtbot, manager, fake_lsf):
     js = submit_cmds(manager, ["echo a"], auto_poll=False,
                         pre_submit=lambda c: True)
     got = []
-    js.pre_processing_finished.connect(lambda ok: got.append(ok))
+    js.pre_submit_finished.connect(lambda ok: got.append(ok))
     with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     assert got == [True]
@@ -183,7 +183,7 @@ def test_no_gate_no_ready_signals(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         submit_cmds(manager, ["echo a"], auto_poll=False)
     kinds = [e[0] for e in log]
-    assert "pre_processing_started" not in kinds
+    assert "pre_submit_started" not in kinds
     assert kinds[0] == "submit_started"
 
 
