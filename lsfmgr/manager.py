@@ -59,6 +59,8 @@ class LsfJobManager(QObject):
     submit_started = Signal(str)               # jobset_id (게이트 통과 후)
     pre_processing_started = Signal(str)                # jobset_id — pre_submit 게이트 시작
     pre_processing_finished = Signal(str, bool)         # jobset_id, ok — 게이트 종료(True=통과)
+    post_processing_started = Signal(str)               # jobset_id — 전원 terminal 후처리 시작
+    post_processing_finished = Signal(str, object)      # jobset_id, result (예외 시 None)
     submit_progress = Signal(str, int, int)    # jobset_id, done, total
     submit_finished = Signal(str, object)      # jobset_id, SubmitReport
     jobset_updated = Signal(str, dict)         # jobset_id, summary
@@ -165,6 +167,13 @@ class LsfJobManager(QObject):
         self._misc_pool.setMaxThreadCount(2)
         self._shutdown_done = False
 
+        # post_process — jobset이 전원 terminal에 도달하면 1회 실행되는 후처리
+        # 콜백. submit(post_process=fn)으로 무장, 완료 감지(_on_poll_updated)
+        # 시점에 worker에서 실행하고 post_processing_started/finished로 통지.
+        self._post_process: Dict[str, Callable] = {}
+        self._post_pool = QThreadPool(self)
+        self._post_pool.setMaxThreadCount(2)
+
         # pre_submit 게이트 경로의 AUTO-1 지연 — 게이트 통과(pre_processing_finished True)
         # 후에야 polling을 켠다. 게이트가 오래 걸리면 레코드가 없어 AUTO-2가
         # polling을 조기 중지해 실제 job 전이를 놓치기 때문.
@@ -185,6 +194,8 @@ class LsfJobManager(QObject):
         self.pre_processing_started.connect(self._handle_relay("pre_processing_started"))
         self.pre_processing_finished.connect(self._handle_relay("pre_processing_finished"))
         self.pre_processing_finished.connect(self._on_pre_processing_finished)
+        self.post_processing_started.connect(self._handle_relay("post_processing_started"))
+        self.post_processing_finished.connect(self._handle_relay("post_processing_finished"))
         self.submit_finished.connect(self._h_finished)
         self.submit_finished.connect(self._emit_summary_after_submit)
         self.kill_finished.connect(self._emit_updates_after_kill)
@@ -218,6 +229,7 @@ class LsfJobManager(QObject):
     # ------------------------------------------------------------------
     def submit(self, js, *,
                pre_submit: Optional[Callable[[List[str]], bool]] = None,
+               post_process: Optional[Callable[[list], Any]] = None,
                **kwargs: Any) -> JobSet:
         """[async→Signal] jobset 제출 — **유일한 제출 경로** (v9).
 
@@ -236,10 +248,17 @@ class LsfJobManager(QObject):
         게이트 워커에서 검사(FR-9) — **리셋 이전**이라 False/예외면 레코드
         원상 유지. 신호: (pre_processing_started → pre_processing_finished(ok)) →
         submit_started → jobs_updated/progress → submit_finished.
-        ※ 게이트 콜백은 worker 스레드 실행 — GUI 접근 금지.
+
+        post_process(records)->Any: 지정 시 이 제출의 **전 job이 terminal**에
+        도달하면(폴링/query_once로 완료 감지) worker에서 1회 실행. 인자는 최종
+        JobRecord 목록(성공/실패 혼재 가능 — DONE/EXIT/SUBMIT_FAILED/LOST 무관
+        전원 terminal이면 실행). 반환값은 post_processing_finished로 전달.
+        신호: post_processing_started → post_processing_finished(result).
+        ※ pre_submit·post_process 콜백 모두 worker 스레드 실행 — GUI 접근 금지.
         옵션(kwargs): workers/max_retry/rate_limit_per_s/auto_poll/
         poll_interval_s/queue/submit_timeout_s 등 (§1.2)."""
-        return self._submit_jobset(js, pre_submit=pre_submit, **kwargs)
+        return self._submit_jobset(js, pre_submit=pre_submit,
+                                   post_process=post_process, **kwargs)
 
     def _on_pre_processing_finished(self, jsid: str, ok: bool) -> None:
         """pre_submit 게이트 종료 — 통과 시 미뤄둔 rearm/AUTO-1 polling.
@@ -620,6 +639,7 @@ class LsfJobManager(QObject):
         # 폴링 연속성: target이 폴링을 안 쓰는데 source가 쓰고 있었다면
         # 가장 짧은 interval로 target에 이어받는다.
         src_iv = self._poll_intervals.pop(sid, None)
+        self._post_process.pop(sid, None)        # source 소멸 — 후처리 무장 해제
         self.polling.stop_polling(sid)
         self.handlers.remove_all(sid)
         self._invalidate_handle(sid)
@@ -699,6 +719,7 @@ class LsfJobManager(QObject):
 
     def _submit_jobset(self, js: "JobSet",
                        pre_submit: Optional[Callable[[List[str]], bool]] = None,
+                       post_process: Optional[Callable[[list], Any]] = None,
                        **kwargs: Any) -> JobSet:
         """jobset 전 job (재)제출 — mgr.submit(js, ...)의 구현."""
         jobset_id = self._jsid(js)
@@ -714,6 +735,12 @@ class LsfJobManager(QObject):
             raise LsfmgrError(
                 f"{jobset_id}: 활성(진행 중) job이 있어 submit 불가 — "
                 f"{busy[:5]} (먼저 kill 하거나 완료를 기다리세요)")
+        # post_process 무장 — 이번 실행이 전원 terminal에 도달하면 1회 발화.
+        # (게이트 거부/취소 시 job은 CREATED로 남아 terminal이 아니므로 안 뜬다)
+        if post_process is not None:
+            self._post_process[jobset_id] = post_process
+        else:
+            self._post_process.pop(jobset_id, None)   # 재제출 시 이전 무장 해제
         opts = self.resolve_options(kwargs, context="submit")
         keyed = [(r.job_key, self._record_to_item(r)) for r in jobs]
         keys = [k for k, _ in keyed]
@@ -774,6 +801,7 @@ class LsfJobManager(QObject):
         self.polling.stop_polling(jobset_id)
         self.handlers.remove_all(jobset_id)
         self._poll_intervals.pop(jobset_id, None)
+        self._post_process.pop(jobset_id, None)
         self._invalidate_handle(jobset_id)
         if js.lsf_group_paths:
             paths = list(js.lsf_group_paths)
@@ -828,6 +856,7 @@ class LsfJobManager(QObject):
         for name, fn in (("handlers", self.handlers.shutdown),
                          ("submitter", self.submitter.shutdown),
                          ("misc_pool", lambda: self._misc_pool.waitForDone(-1)),
+                         ("post_pool", lambda: self._post_pool.waitForDone(-1)),
                          ("polling", self.polling.shutdown),
                          ("killer", self.killer.shutdown),
                          ("store", self.store.close)):
@@ -849,6 +878,25 @@ class LsfJobManager(QObject):
         if changed:
             self.jobs_updated.emit(jobset_id, changed)
         self.handlers.tick(jobset_id)
+        self._maybe_post_process(jobset_id)
+
+    def _maybe_post_process(self, jobset_id: str) -> None:
+        """전원 terminal 도달 시 등록된 post_process를 worker에서 1회 실행.
+        폴링/query_once 완료 감지의 공통 지점에서 호출된다 — 감지 즉시 무장을
+        해제(pop)하므로 이어지는 폴링 사이클에서 중복 발화하지 않는다."""
+        fn = self._post_process.get(jobset_id)
+        if fn is None:
+            return
+        try:
+            recs = self.store.get_jobs(jobset_id)
+        except LsfmgrError:
+            self._post_process.pop(jobset_id, None)   # jobset 소멸 — 무장 해제
+            return
+        if not recs or not all(r.state.is_terminal for r in recs):
+            return
+        self._post_process.pop(jobset_id, None)       # 한 번만
+        self.post_processing_started.emit(jobset_id)
+        self._post_pool.start(_PostProcessTask(self, jobset_id, fn, recs))
 
     def _relay_jobs_changed(self, jsid: str, records: list) -> None:
         """상태 전이분(배치)을 즉시 jobs_updated + jobset_updated로 발행 —
@@ -943,6 +991,31 @@ class _CallTask(QRunnable):
             self._fn()
         except Exception:                    # noqa: BLE001 — CS-5
             log.exception("백그라운드 작업 실패")
+
+
+class _PostProcessTask(QRunnable):
+    """전원 terminal 도달 후처리 콜백을 worker 스레드에서 1회 실행.
+    반환값은 post_processing_finished로, 예외는 error_occurred +
+    post_processing_finished(None)으로 통지 (CS-5 격리)."""
+
+    def __init__(self, mgr: "LsfJobManager", jsid: str, fn, records: list):
+        super().__init__()
+        self.setAutoDelete(True)
+        self.mgr = mgr
+        self.jsid = jsid
+        self.fn = fn
+        self.records = records
+
+    def run(self):
+        try:
+            result = self.fn(self.records)
+        except Exception as e:               # noqa: BLE001 — CS-5
+            log.exception("post_process 예외: %s", self.jsid)
+            self.mgr.error_occurred.emit(self.jsid, f"post_process: {e!r}")
+            self.mgr.post_processing_finished.emit(self.jsid, None)
+            return
+        log.info("post_process 완료 %s", self.jsid)
+        self.mgr.post_processing_finished.emit(self.jsid, result)
 
 
 def _with_pattern(js: JobSetRecord, pattern: str) -> JobSetRecord:

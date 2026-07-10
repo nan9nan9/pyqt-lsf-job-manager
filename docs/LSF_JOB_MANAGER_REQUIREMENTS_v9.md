@@ -6,7 +6,7 @@
 > ③ 재실행 = merge + submit (resubmit API 제거)
 > ④ 저장소 InMemory 단일(SQLite/영속·세션복원 제거)
 > ⑤ one-shot/array 제출·`mode` 옵션·`add_job` 제거
-> ⑥ pre_submit 게이트(FR-9)·kill 우선권 구조(SubmitGate) 신설
+> ⑥ pre_submit 게이트(FR-9)·post_process 후처리(FR-10)·kill 우선권 구조(SubmitGate) 신설
 > **형태**: Qt 전용 Python 라이브러리 — **qtpy** 기반, PyQt5 / PySide2 / PyQt6 / PySide6 호환
 > **환경**: Linux, NFS 다중 사용자(~300명), LSF cluster, 폐쇄망
 
@@ -131,7 +131,7 @@ mgr.can_submit(js) -> bool
 mgr.close(js)                                # 종결 (전원 terminal일 때)
 
 # --- 실행 (async→Signal) ---
-mgr.submit(js, *, pre_submit=None, **opts) -> JobSet   # 전 job (재)제출 (유일 경로)
+mgr.submit(js, *, pre_submit=None, post_process=None, **opts) -> JobSet  # 전 job (재)제출 (유일 경로)
 mgr.kill(js, *, only_state=None, verify=None, envpath="")
 mgr.kill_jobs(js, job_keys, *, verify=None, envpath="")  # 선택 job만
 mgr.cancel_submit(js)                        # 진행 중 submit 중단
@@ -164,6 +164,7 @@ class JobSet(QObject):
     handler_finished= Signal(str, object)      # name, HandlerResult
     job_detail_ready= Signal(str, str)         # job_key, text
     pre_processing_started/pre_processing_finished        # pre_submit 게이트 (FR-9)
+    post_processing_started/post_processing_finished      # post_process 후처리 (FR-10)
     error_occurred  = Signal(str)
 
     # 조회 (전부 sync — Store 스냅샷, LSF 호출 없음)
@@ -207,9 +208,15 @@ class JobState(Enum):
     PEND; RUN; DONE; EXIT; PSUSP; USUSP; SSUSP; UNKWN; ZOMBI  # LSF native
 ```
 
-- 헬퍼: `is_terminal` {DONE, EXIT, SUBMIT_FAILED, LOST} / `is_failed` /
-  `is_on_lsf` {PEND/RUN/SUSP*/UNKWN/ZOMBI} /
-  **`is_inactive`** = CREATED 또는 terminal (submit/merge/remove의 공통 "비활성" 술어)
+- **`terminal`(최종 상태)** = 더 이상 전이하지 않는 상태 — **성공만이 아니라
+  끝나는 모든 방식**을 포괄한다. `is_terminal` = {`DONE`(정상 종료 exit 0),
+  `EXIT`(비정상 종료 exit≠0), `SUBMIT_FAILED`(제출 재시도 소진), `LOST`(손실 확정)}.
+  "전원 terminal"은 **모두 성공(DONE)이 아니라 모두 끝남**을 뜻한다(post_process
+  발화 조건, FR-10).
+- 그 밖: `is_failed` {EXIT, SUBMIT_FAILED, LOST} / `is_on_lsf` {PEND/RUN/SUSP*/
+  UNKWN/ZOMBI} / **`is_inactive`** = CREATED **또는** terminal (submit/merge/remove의
+  공통 "비활성" 술어 — terminal보다 넓다: CREATED는 "아직 제출 안 함"이라 terminal은
+  아니지만 inactive).
 - 전이: `CREATED → SUBMITTING → PEND → RUN → DONE|EXIT`,
   실패 시 `RETRY_WAIT`(n<N) 또는 `SUBMIT_FAILED`(n==N), 조회 전부 실패 없이
   미발견 → `LOST`. cancel/kill(미제출) 시 `SUBMITTING/RETRY_WAIT → CREATED`.
@@ -308,6 +315,15 @@ JobSetStore(ABC) ── InMemoryStore
   `pre_processing_started → pre_processing_finished(ok) → (ok일 때만) submit_started → … → submit_finished`.
   게이트 통과 후에 rearm/AUTO-1 polling. 콜백은 worker 스레드 실행(GUI 접근 금지,
   멱등 권장).
+- **FR-10 post_process 후처리**: `mgr.submit(js, post_process=fn)` — 이 제출의
+  **전 job이 terminal**(DONE/EXIT/SUBMIT_FAILED/LOST — §3의 `is_terminal`)에 도달하면
+  worker에서 **1회** 실행. 완료 감지는 폴링/`query_once`의 공통 지점(§FR-4)에서
+  이뤄지며, 감지 즉시 무장 해제해 중복 발화하지 않는다. **성공/실패 무관** — 전원
+  terminal이면 실행하고, 콜백이 최종 JobRecord 목록을 받아 결과를 분류한다(“이
+  실행이 끝났다”는 시점이지 “전부 성공”이 아니다). 신호: `post_processing_started
+  → post_processing_finished(result)`(반환값, 예외 시 `None` + `error_occurred`).
+  한 제출당 1회, 완료 전 `post_process` 없이 재제출하면 이전 무장 해제. pre_submit
+  게이트(제출 **전**)와 대칭인 완료 **후** 훅.
 
 > v7 대비 삭제: **FR-6**(SQLite 세션 복원) — 저장소 단일화로 제거.
 > **FR-8**(resubmit_jobs) — 재실행은 `mgr.merge(js, fix) + mgr.submit(js)` 패턴으로 대체.
@@ -364,6 +380,7 @@ lsfmgr/
 ├── store/               # base(ABC) / memory   (sqlite 제거)
 ├── submitter.py         # QThreadPool submit + retry + progress/cancel
 │                        #   + resubmit_existing (레코드 리셋 재제출) + pre_submit 게이트
+├── manager.py 내: _PostProcessTask — 전원 terminal 후처리 (FR-10)
 ├── lifecycle.py         # SubmitGate / KillScope — kill 우선권 barrier (CS-11)
 ├── monitor.py           # PollingService (QThread+QTimer) + query_once + chunk 격리/회로차단
 ├── killer.py            # kill 전략 + verify + 확인 재시도 + slot ledger
@@ -405,6 +422,9 @@ Qt 비의존 유지: options/config/states/command/store/jobset_core (Qt 없이 
     원 제출 옵션(spec_json)·merge_id·user_data 보존
 20. **pre_submit 게이트 (FR-9)**: False/예외 시 레코드 원상, 신호 순서 보장,
     통과 후에만 rearm/AUTO-1
+21. **post_process 후처리 (FR-10)**: 전원 terminal(성공/실패 무관) 시 1회 실행,
+    최종 레코드 전달, 미완료 시 미발화, 완료 후 재발화 없음, 예외 격리
+    (error_occurred + finished(None))
 
 ---
 
@@ -418,4 +438,4 @@ Qt 비의존 유지: options/config/states/command/store/jobset_core (Qt 없이 
 | 재실행 | `resubmit_jobs` (FR-8) | **merge + submit** |
 | 제출 방식 | bulk/array 자동선택(`mode`, AUTO-4) | **jobset 전 job 재제출**(array 제출 없음) |
 | 저장소 | InMemory + SQLite(영속·복원) | **InMemory 단일** |
-| 신설 | — | **pre_submit 게이트(FR-9)**, **kill 우선권 SubmitGate**, merge_id/user_data, chunk 격리·회로차단 |
+| 신설 | — | **pre_submit 게이트(FR-9)**, **post_process 후처리(FR-10)**, **kill 우선권 SubmitGate**, merge_id/user_data, chunk 격리·회로차단 |

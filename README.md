@@ -133,6 +133,30 @@ job은 `CREATED`로 남습니다(기본은 `submit_finished(cancelled=N)`도 발
 > ⚠️ 콜백은 **worker 스레드**에서 돕니다 — Qt 위젯 등 **GUI 객체 접근 금지**.
 > 재시도 시 재실행되므로 부수효과는 **멱등**이어야 합니다.
 
+#### 완료 후처리 (`post_process`)
+
+제출한 jobset의 **전 job이 끝나면(전원 terminal)** 결과 수집·정리 등을 자동
+실행하려면 `mgr.submit(js, post_process=...)` 콜백을 넘깁니다. 완료는 폴링
+(`auto_poll` 기본) 또는 `mgr.query_once(js)`로 감지되며, 감지 시점에 **단일
+worker 스레드**에서 1회 실행됩니다. 성공/실패가 섞여도(EXIT/SUBMIT_FAILED/LOST
+포함) **전원 terminal이면** 실행되므로, 콜백에서 결과를 분류하면 됩니다.
+
+```python
+def collect(records) -> dict:                  # 최종 JobRecord 목록
+    done = [r for r in records if r.state.name == "DONE"]
+    return {"ok": len(done), "failed": len(records) - len(done)}
+
+mgr.submit(js, post_process=collect)           # pre_submit과 함께 써도 됨
+```
+
+신호 순서는 **`post_processing_started` → `post_processing_finished(result)`**
+(`result`는 콜백 반환값, 예외 시 `None`). 콜백이 **예외**를 던지면
+`error_occurred` + `post_processing_finished(None)`로 보고합니다. `pre_submit`
+게이트와 대칭입니다(전자는 제출 **전**, 후자는 완료 **후**).
+
+> ⚠️ 이 콜백도 **worker 스레드** 실행 — GUI 객체 접근 금지. 한 제출당 1회만
+> 발화하며, 완료 전 재제출(`post_process` 없이)하면 이전 무장은 해제됩니다.
+
 > 작성 규칙·실행 방식(멀티 프로세스)·검증·트러블슈팅, 그리고 lsfmgr가 직접 bsub를
 > 조립하는 저수준 경로(`create_jobset(..., wrapper=False)`+`bsub_path`)는
 > **[`docs/lsfmgr.md`](docs/lsfmgr.md)**
@@ -211,6 +235,8 @@ mgr.submit(js)                 # 전체 재실행
 | `kill_progress` | `(done, total)` | 대량 chunk kill 진행 (throttled, 마지막 100%) |
 | `kill_finished` | `KillReport` | kill 완료 |
 | `handler_finished` | `(name, HandlerResult)` | 등록한 handler 1회 실행 완료마다 (§3.5) |
+| `post_processing_started` | — | `post_process` 지정 시 전원 terminal 후처리 착수 |
+| `post_processing_finished` | `object` | 후처리 콜백 완료 (반환값, 예외 시 `None`) |
 | `error_occurred` | `str` | worker 예외 등 |
 
 요약 dict 예:
@@ -429,6 +455,8 @@ submit (mgr.submit(js) — 재제출 포함):
   → submit_progress + jobs_updated(변경분)    # 스로틀 배치 (0.5s 또는 1%)
   → submit_finished(SubmitReport)           # 반드시 마지막 배치 뒤에 도착
   → jobset_updated(최종 요약)
+  ⋯ (이후 폴링으로 전원 terminal 도달 시, post_process 지정했으면)
+  → post_processing_started → post_processing_finished(result)
 
 kill:
   → kill_started                            # 접수 즉시(동기) — 스피너 켜는 지점

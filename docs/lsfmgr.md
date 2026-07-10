@@ -81,7 +81,9 @@ Signal 은 두 계층이다.
 | `kill_progress` | `(jobset_id, done, total)` | chunk kill 진행 중(대량 id/부분/chunk fallback, throttled) |
 | `kill_finished` | `(jobset_id, KillReport)` | `kill(js)` · `kill_jobs` |
 | `handler_finished` | `(jobset_id, handler_name, HandlerResult)` | `add_handler` 로 등록한 handler 1회 실행 완료 시 |
-| `error_occurred` | `(jobset_id, message)` | 모든 async 경로의 워커 예외(submit · polling · kill) |
+| `post_processing_started` | `(jobset_id)` | `submit(post_process=fn)` 지정 시 전원 terminal 후처리 착수 |
+| `post_processing_finished` | `(jobset_id, result)` | 후처리 콜백 완료 (반환값, 예외 시 `None`) |
+| `error_occurred` | `(jobset_id, message)` | 모든 async 경로의 워커 예외(submit · polling · kill · post_process) |
 
 ### 2.2 JobSet Signal (`js.*`) — Manager 이벤트의 이중 발행
 
@@ -100,6 +102,8 @@ JobSet 을 한 곳에서 보면 `mgr.*` 를 쓴다.
 | `js.kill_progress` | `(done, total)` | `kill_progress` | chunk kill 진행(throttled, 마지막은 100%) |
 | `js.kill_finished` | `(KillReport)` | `kill_finished` | `mgr.kill(js)` · `mgr.kill_jobs(js, keys)` |
 | `js.handler_finished` | `(handler_name, HandlerResult)` | `handler_finished` | `mgr.add_handler(js, ...)` 로 등록한 handler |
+| `js.post_processing_started` | `()` | `post_processing_started` | `mgr.submit(js, post_process=fn)` — 전원 terminal 후처리 착수 |
+| `js.post_processing_finished` | `(result)` | `post_processing_finished` | 후처리 콜백 완료 (반환값, 예외 시 None) |
 | `js.error_occurred` | `(message)` | `error_occurred` | 워커 예외 |
 
 - `js.jobs_failed` 는 별도 트리거가 아니라 **파생 Signal** 이다 — 제출 최종 결과에
@@ -245,6 +249,31 @@ mgr.remove_handler(js, "collect")        # 해제
 >   (worker 스레드 수행 — GUI 안 멎음). 동기 버전 `mgr.job_detail(js, job_key)`
 >   는 blocking 주의. 제출 실패 job 에 호출하면 저장된 fail_message 를
 >   돌려주므로 클릭 핸들러 하나로 모든 실패 상태를 처리할 수 있다.
+
+### 2.6 완료 후처리 — `submit(post_process=fn)`
+
+제출한 jobset 의 **전 job 이 terminal** 에 도달하면 결과 수집·정리 등을 자동
+실행한다. `pre_submit` 게이트(제출 **전**)와 대칭인 완료 **후** 훅이다.
+
+```python
+def collect(records):                    # 최종 JobRecord 목록 (worker 스레드)
+    done = [r for r in records if r.state is JobState.DONE]
+    return {"ok": len(done), "failed": len(records) - len(done)}
+
+mgr.post_processing_finished.connect(
+    lambda jsid, result: print("후처리 결과", result))
+
+mgr.submit(js, post_process=collect)     # pre_submit 과 함께 지정 가능
+```
+
+- **발화 시점**: 완료 감지(폴링 또는 `mgr.query_once(js)`) 시 전원 terminal 이면
+  worker 에서 1회 실행. `auto_poll`(기본)이면 자동 감지된다.
+- **결과 무관**: DONE/EXIT/SUBMIT_FAILED/LOST 가 섞여도 **전원 terminal** 이면
+  실행된다 — 콜백에서 성공/실패를 분류한다.
+- **신호**: `post_processing_started` → `post_processing_finished(result)`
+  (`result` = 콜백 반환값, 예외 시 `None` + `error_occurred`).
+- **한 제출당 1회**. 완료 전에 `post_process` 없이 재제출하면 이전 무장은 해제된다.
+- 콜백은 **worker 스레드** 실행 — GUI 객체 접근 금지.
 
 ---
 

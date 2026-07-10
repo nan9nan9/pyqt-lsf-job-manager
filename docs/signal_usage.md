@@ -72,6 +72,7 @@ poll_interval_s         = 10    # ② 폴링 주기(5~60)
 | `job_lost` | 폴링에서 LOST 확정된 **레코드마다** | ② |
 | `handler_finished` | **폴링 사이클마다** job당 1회 (+종료 직후 final 보충 1회) | ② |
 | `submit_started`/`pre_processing_started`/`pre_processing_finished` | **일회성** | 이벤트 |
+| `post_processing_started`/`post_processing_finished` | **일회성** (전원 terminal 후처리, `post_process` 지정 시) | 이벤트 |
 | `submit_finished` / `kill_finished` | **일회성** (retry 포함 최종) | 이벤트 |
 | `error_occurred` | worker 예외 **발생 시마다** | 이벤트 |
 | `job_detail_ready` | `fetch_job_detail()` 호출당 **1회** | 온디맨드 |

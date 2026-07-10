@@ -37,6 +37,8 @@ class JobSet(QObject):
     job_detail_ready = Signal(str, str)      # job_key, 상세 텍스트 (fetch_job_detail)
     pre_processing_started = Signal()           # pre_submit 게이트 시작
     pre_processing_finished = Signal(bool)      # 게이트 종료 (True=통과)
+    post_processing_started = Signal()          # 전원 terminal 후처리 시작
+    post_processing_finished = Signal(object)   # 후처리 결과 (예외 시 None)
 
     def __init__(self, manager: "LsfJobManager", jobset_id: str):
         super().__init__(manager)
