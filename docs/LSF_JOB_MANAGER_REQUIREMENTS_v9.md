@@ -226,6 +226,48 @@ class JobState(Enum):
 
 ---
 
+## 3.5 예외 계층 (도메인 오류 계약)
+
+모든 예외는 `LsfmgrError`를 base로 하며(순수 Python, Qt 비의존), 앱은 한 곳
+(`except LsfmgrError`)에서 다 잡거나 세분화된 타입으로 개별 처리한다. 입력이
+잘못된 **프로그래밍 오류**(길이 불일치·빈 커맨드·merge_id 중복·job 이름 충돌·
+범위 위반)는 `ValueError`/`TypeError`로 별도 신호한다 — 도메인 상태 오류와 구분.
+
+```
+Exception
+├── ValueError / TypeError            # 잘못된 인자 (OPT-2/3, create_jobset 검증 등)
+└── LsfmgrError                       # lsfmgr 모든 예외의 base
+    ├── JobSetNotFoundError           # 존재하지 않는 jobset_id 접근
+    ├── JobSetClosedError             # close/삭제된 JobSet 핸들 접근
+    ├── JobNotFoundError              # jobset 내 없는 job(job_id/merge_id/job_key)
+    ├── LsfCommandError               # LSF 명령 실행 실패 (bsub 제외)
+    │       .returncode / .stderr
+    ├── SubmitError                   # bsub **실행** 실패 (JobRecord.fail_reason 기록)
+    │       .fail_reason / .returncode / .stderr / .stdout / .retryable / .diagnostic()
+    ├── ArgMaxExceededError           # 단일 chunk가 ARG_MAX 초과 (NFR-5)
+    └── JobSetStateError              # **전제조건 위반** — "지금은 이 명령 불가"
+            .jobset_id / .job_keys    #   막은 원인을 구조화(메시지 파싱 불필요)
+        ├── SubmitNotAllowedError     # 활성 job / 제출할 job 없음 / submit·kill 진행 중
+        ├── MergeNotAllowedError      # 양쪽 활성 job / submit·kill 진행 중
+        ├── RemoveNotAllowedError     # remove_job·clear 대상이 활성 (force=True로 강제)
+        └── CloseNotAllowedError      # 전원 terminal 아님 (force=True로 강제)
+```
+
+- **ERR-1 단일 base**: 모든 예외는 `LsfmgrError` 하위 — `except LsfmgrError`로
+  라이브러리 오류를 전부 포착할 수 있다.
+- **ERR-2 상태 vs 입력 구분**: 현재 상태에서 허용되지 않는 명령은
+  `JobSetStateError` 계열(도메인), 잘못된 인자는 `ValueError`/`TypeError`.
+  전자는 `can_submit()`/`can_merge()`로 사전 회피 가능.
+- **ERR-3 구조화 정보**: `JobSetStateError`는 `.jobset_id`와 걸린 `.job_keys`를
+  담아, GUI가 메시지 문자열을 파싱하지 않고 어느 job이 막았는지 알 수 있다.
+- **ERR-4 이름 구분**: `SubmitError`(bsub 실행 실패)와 `SubmitNotAllowedError`
+  (제출 전제 위반)는 별개다 — 혼동 금지.
+- **ERR-5 worker 예외는 예외가 아니라 Signal**: worker 스레드(submit/polling/
+  kill/handler/post_process) 내부 예외는 raise되지 않고 `error_occurred` Signal
+  + `logger.exception`으로 전달된다 (CS-5, 스레드 보호).
+
+---
+
 ## 4. Qt 스레딩 — GUI Freeze 방지
 
 - **QT-0 (API 계약)**: 명령 API는 **모두 즉시 반환하는 비동기**, 결과는 Signal로만.
