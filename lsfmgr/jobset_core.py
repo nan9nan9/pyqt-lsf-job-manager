@@ -104,30 +104,6 @@ class JobSetManager:
             self.command.bmod_group([rec.job_id], js.lsf_group_paths[0])
         return rec
 
-    def add_pending_jobs(self, jobset_id: str,
-                         records: Sequence[JobRecord]) -> List[JobRecord]:
-        """제출 전(CREATED) 레코드 일괄 추가 — 바구니 누적용 (FR-5.4 확장).
-
-        add_job의 건당 호출은 대량 누적에서 O(N²)(건당 전체 스캔 + meta 갱신)
-        이라, 중복 키 선검사 + store.add_jobs(단일 트랜잭션) + intended_count
-        1회 갱신으로 배치화한다. LSF 동기화 없음(아직 제출 전이므로)."""
-        records = list(records)
-        if not records:
-            return []
-        with self._meta_lock:
-            existing = {r.job_key for r in self.store.get_jobs(jobset_id)}
-            for rec in records:
-                if rec.job_key in existing:
-                    raise ValueError(
-                        f"job 이름 중복: {jobset_id}/{rec.job_key}")
-                existing.add(rec.job_key)
-            out = self.store.add_jobs(records)
-            js = self.store.get_jobset(jobset_id)
-            n = len(existing)
-            if n > js.intended_count:
-                self.store.update_jobset(replace(js, intended_count=n))
-        return out
-
     def remove_job(self, jobset_id: str, job_key: str) -> JobRecord:
         """job을 jobset에서 제외하고 제거된 레코드를 반환 (add_job의 역연산).
         제거한 몫만큼 intended_count도 줄여 요약 불변식(총합 == intended_count,

@@ -13,15 +13,13 @@ from __future__ import annotations
 import atexit
 import logging
 import os
-import re
 import shlex
 from dataclasses import replace as dc_replace
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from .command import LsfCommand, Runner
-from .config import (ArrayJobSpec, JobSpec, LsfConfig, spec_from_json,
-                     spec_to_json)
+from .config import ArrayJobSpec, JobSpec, LsfConfig, spec_from_json
 from .errors import JobNotFoundError, LsfmgrError
 from .handle import JobSet
 from .handlers import HandlerContext, JobSetHandlerService, StateSpec
@@ -587,130 +585,12 @@ class LsfJobManager(QObject):
     # ------------------------------------------------------------------
     # JobSet 관리 (FR-5)
     # ------------------------------------------------------------------
-    def create_jobset(self, intended_count: int = 0, *, label: str = "",
+    def create_jobset(self, intended_count: int, *, label: str = "",
                       tags: Sequence[str] = (),
-                      parent: Optional[str] = None) -> JobSet:
-        """[sync] 빈 JobSet(바구니) 생성 — 핸들 즉시 반환.
-
-        submit 이전(CREATE 단계)부터 jobset이 존재하므로 GUI가 처음부터 이
-        핸들에 테이블/신호를 바인딩할 수 있다 — 제출 시점에 핸들이 바뀌지
-        않아 테이블 리셋·None 분기가 없다. 흐름:
-
-            js = mgr.create_jobset(label="sweep")   # 바구니
-            js.add_pending([...])                   # CREATED 레코드 누적
-            js.submit(workers=8)                    # 누적분 제출 (같은 jobset)
-
-        intended_count는 보통 0으로 두면 add_pending이 늘려간다 (수동 편입
-        시나리오에서만 선지정). CREATE 상태의 바구니끼리 merge_with도 가능."""
-        rec = self.jobsets.create_jobset(
-            intended_count, label=label, tags=tags, parent=parent)
-        return self.jobset(rec.jobset_id)
-
-    def add_pending(self, jobset_id: str, commands, *,
-                    wrapper: bool = True) -> List[JobRecord]:
-        """[sync] 제출 전 job을 바구니에 누적 — CREATED 레코드 생성 (FR-5.4).
-
-        commands 항목 타입으로 제출 경로가 정해진다 (resubmit과 동일 규칙):
-          - JobSpec           → bsub 경로 (queue/resources 등 옵션 보존)
-          - 토큰 리스트(argv)  → wrapper 경로 (그대로 실행)
-          - 문자열            → wrapper=True(기본)면 wrapper(공백 분해),
-                                False면 bsub(JobSpec(command=...))
-        추가 즉시 jobs_updated/jobset_updated가 발행돼 표가 갱신된다."""
-        items = ([commands] if isinstance(commands, (str, JobSpec))
-                 else list(commands))
-        if not items:
-            raise ValueError("add_pending: commands가 비어 있습니다")
-        # job_key 연번 — 기존 키의 최대 suffix 다음부터 (remove 후 재사용 방지)
-        existing = self.get_jobs(jobset_id)
-        used = set()
-        for r in existing:
-            m = re.match(rf"^{re.escape(jobset_id)}_(\d+)$", r.job_key)
-            if m:
-                used.add(int(m.group(1)))
-        nxt = (max(used) + 1) if used else 0
-
-        records = []
-        for item in items:
-            if isinstance(item, JobSpec):
-                records.append(JobRecord(
-                    job_id=None, array_index=None, jobset_id=jobset_id,
-                    lsf_job_name=f"{jobset_id}_{nxt}", state=JobState.CREATED,
-                    command=item.command, via_wrapper=False,
-                    spec_json=spec_to_json(item)))
-            else:
-                if isinstance(item, str):
-                    if not wrapper:
-                        records.append(JobRecord(
-                            job_id=None, array_index=None,
-                            jobset_id=jobset_id,
-                            lsf_job_name=f"{jobset_id}_{nxt}",
-                            state=JobState.CREATED, command=item,
-                            via_wrapper=False,
-                            spec_json=spec_to_json(JobSpec(command=item))))
-                        nxt += 1
-                        continue
-                    argv = shlex.split(item)
-                else:
-                    argv = [str(t) for t in item]
-                if not argv:
-                    raise ValueError("add_pending: 빈 커맨드")
-                records.append(JobRecord(
-                    job_id=None, array_index=None, jobset_id=jobset_id,
-                    lsf_job_name=f"{jobset_id}_{nxt}", state=JobState.CREATED,
-                    command=shlex.join(argv), via_wrapper=True))
-            nxt += 1
-
-        out = self.jobsets.add_pending_jobs(jobset_id, records)
-        # 표 즉시 갱신 — CREATED 행이 누적되는 것이 보이도록 (main 스레드 sync)
-        self._relay_jobs_changed(jobset_id, list(out))
-        return out
-
-    def submit_pending(self, jobset_id: str, **kwargs: Any) -> None:
-        """[async→Signal] 바구니의 CREATED job 전부 제출 — 결과는
-        submit_finished. 같은 jobset/job_key가 CREATED→SUBMITTING→PEND로
-        전이되므로 핸들·테이블이 그대로 이어진다.
-
-        이미 제출된 job(PEND/RUN/terminal)은 건드리지 않는다 — 부분 재실행은
-        resubmit_jobs를 쓴다. 옵션(kwargs)은 submit과 동일 카탈로그
-        (workers/max_retry/auto_poll/poll_interval_s 등)."""
-        if (self.submitter.is_active(jobset_id)
-                or self._resubmitter.is_active(jobset_id)
-                or self.killer.is_active(jobset_id)):
-            raise LsfmgrError(
-                f"{jobset_id}: submit/resubmit/kill 진행 중에는 "
-                f"submit_pending을 호출할 수 없습니다")
-        pending = [r for r in self.get_jobs(jobset_id)
-                   if r.state is JobState.CREATED and r.array_index is None]
-        if not pending:
-            raise LsfmgrError(f"{jobset_id}: 제출할 CREATED job이 없습니다")
-        opts = self.resolve_options(kwargs, context="submit")
-        keyed = [(r.job_key, self._record_to_item(r)) for r in pending]
-        self.submit_started.emit(jobset_id)
-        self.submitter.resubmit_existing(jobset_id, keyed, opts)
-        if opts.auto_poll:                        # AUTO-1 (submit과 동일)
-            self.start_polling(jobset_id, opts.poll_interval_s)
-
-    @staticmethod
-    def _record_to_item(r: JobRecord, new_cmd: Optional[str] = None):
-        """레코드 → 제출 item 재구성 (submit_pending/resubmit_jobs 공용).
-        경로는 job 단위 속성(rec.via_wrapper)으로 결정 — jobset 부착물로
-        판별하면 merge된 혼합 jobset에서 오판한다."""
-        if r.via_wrapper:
-            return shlex.split(new_cmd if new_cmd is not None else r.command)
-        # bsub 경로 — 원 제출 옵션(queue/resources/outfile/env) 복원.
-        # command만 다시 만들면 이 옵션들이 기본값으로 조용히 소실된다
-        try:
-            spec = (spec_from_json(r.spec_json) if r.spec_json
-                    else JobSpec(command=r.command))
-        except (ValueError, TypeError) as e:
-            # 손상/신버전 spec_json (전방 호환) — 옵션은 포기하고
-            # command만으로 진행. 여기서 죽으면 재제출 전체가 막힌다
-            log.warning("spec_json 복원 실패(%s) — 옵션 없이 제출: %s",
-                        e, r.job_key)
-            spec = JobSpec(command=r.command)
-        if new_cmd is not None:
-            spec = dc_replace(spec, command=new_cmd)
-        return spec
+                      parent: Optional[str] = None) -> str:
+        """[sync] 수동 JobSet 생성 — jobset_id 반환."""
+        return self.jobsets.create_jobset(
+            intended_count, label=label, tags=tags, parent=parent).jobset_id
 
     def add_job(self, jobset_id: str, record: JobRecord, *,
                 sync_lsf: bool = True) -> JobRecord:
@@ -782,8 +662,30 @@ class LsfJobManager(QObject):
         live_ids = sorted({r.job_id for r in live if r.job_id is not None})
         live_keys = [r.job_key for r in live]
 
-        keyed = [(r.job_key, self._record_to_item(r, cmds.get(r.job_key)))
-                 for r in targets]
+        # 재제출 경로는 job 단위 속성(rec.via_wrapper)으로 결정 — jobset 부착물
+        # 유무로 판별하면 merge된 혼합 jobset에서 wrapper job을 bsub로(이중
+        # 제출), bsub job을 로컬 실행으로(오실행) 보내는 오판이 생긴다
+        def to_item(r: JobRecord):
+            new_cmd = cmds.get(r.job_key)
+            if r.via_wrapper:
+                return shlex.split(new_cmd if new_cmd is not None
+                                   else r.command)
+            # bsub 경로 — 원 제출 옵션(queue/resources/outfile/env) 복원.
+            # command만 다시 만들면 이 옵션들이 기본값으로 조용히 소실된다
+            try:
+                spec = (spec_from_json(r.spec_json) if r.spec_json
+                        else JobSpec(command=r.command))
+            except (ValueError, TypeError) as e:
+                # 손상/신버전 spec_json (전방 호환) — 옵션은 포기하고
+                # command만으로 진행. 여기서 죽으면 재제출 전체가 막힌다
+                log.warning("spec_json 복원 실패(%s) — 옵션 없이 재제출: %s",
+                            e, r.job_key)
+                spec = JobSpec(command=r.command)
+            if new_cmd is not None:
+                spec = dc_replace(spec, command=new_cmd)
+            return spec
+
+        keyed = [(r.job_key, to_item(r)) for r in targets]
 
         if pre_submit is None:                 # 게이트면 통과 후 코디네이터가 발화
             self.submit_started.emit(jobset_id)

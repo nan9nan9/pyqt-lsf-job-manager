@@ -104,7 +104,7 @@ def test_array_cancel_before_bsub_returns_created(qtbot, manager, fake_lsf):
     from lsfmgr.submitter import _ArraySubmitTask, _SubmitContext
     from lsfmgr.util import TokenBucketLimiter
 
-    jsid = manager.create_jobset(2).id
+    jsid = manager.create_jobset(2)
     manager.store.add_jobs([
         JobRecord(job_id=None, array_index=i, jobset_id=jsid,
                   lsf_job_name=f"{jsid}[{i}]", state=JobState.SUBMITTING,
@@ -143,7 +143,7 @@ class _StubScope:
 def test_overlapping_kills_keep_snapshot_registered(qtbot, manager, fake_lsf):
     """같은 jobset에 kill이 겹칠 때, 먼저 끝난 kill이 진행 중인 다른 kill의
     스냅샷 등록을 지우지 않는다 — kill 1건당 slot 1개 (겹침 안전)."""
-    jsid = manager.create_jobset(1).id
+    jsid = manager.create_jobset(1)
     gate = threading.Event()
     try:
         blocked = _StubScope(gate=gate)      # kill A — acquire에서 블록 유지
@@ -252,7 +252,7 @@ def test_revert_to_created_clears_failure_residue(qtbot, manager, fake_lsf):
     from lsfmgr.submitter import _SubmitContext
     from lsfmgr.util import TokenBucketLimiter
 
-    jsid = manager.create_jobset(1).id
+    jsid = manager.create_jobset(1)
     key = f"{jsid}_0"
     manager.store.add_jobs([JobRecord(
         job_id=None, array_index=None, jobset_id=jsid, lsf_job_name=key,
@@ -301,12 +301,12 @@ def test_barrier_wait_releases_killer_pool_slot(qtbot, manager, fake_lsf):
     gate = threading.Event()
     try:
         # kill 4건을 acquire에서 블록시켜 pool 4슬롯을 점유 상태로 만든다
-        blocked = [manager.create_jobset(1).id for _ in range(4)]
+        blocked = [manager.create_jobset(1) for _ in range(4)]
         for jsid in blocked:
             manager.killer.kill_jobset(
                 jsid, scope=_StubScope(gate=gate))
 
-        target = manager.create_jobset(1).id  # 5번째 — 즉시 처리돼야 함
+        target = manager.create_jobset(1)     # 5번째 — 즉시 처리돼야 함
         with qtbot.waitSignal(manager.kill_finished, timeout=5000) as blocker:
             manager.killer.kill_jobset(target)
         assert blocker.args[0] == target      # 블록 4건보다 먼저 완료

@@ -70,7 +70,7 @@ def test_merge_during_active_submit_rejected(qtbot, config):
 # 2. add_job 동일 job_key 거부
 # ----------------------------------------------------------------------
 def test_add_job_duplicate_key_rejected(manager):
-    jsid = manager.create_jobset(1, label="dup").id
+    jsid = manager.create_jobset(1, label="dup")
     rec = JobRecord(job_id=111, array_index=None, jobset_id=jsid,
                     lsf_job_name="manual_1", state=JobState.RUN,
                     command="echo a")

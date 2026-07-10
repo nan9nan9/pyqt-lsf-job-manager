@@ -133,20 +133,6 @@ class JobSet(QObject):
         new_id = self._manager.merge_jobsets(ids, sync_lsf=sync_lsf)
         return self._manager.jobset(new_id)
 
-    def add_pending(self, commands, *, wrapper: bool = True) -> List[JobRecord]:
-        """[sync] 제출 전 job을 바구니에 누적 — CREATED 레코드 생성.
-        JobSpec → bsub 경로, argv 리스트 → wrapper, 문자열 → wrapper 기본
-        (wrapper=False면 bsub). 추가 즉시 jobs_updated로 표가 갱신된다."""
-        self._check_open()
-        return self._manager.add_pending(self._jobset_id, commands,
-                                         wrapper=wrapper)
-
-    def submit(self, **opts: object) -> None:
-        """[async→Signal] 바구니의 CREATED job 전부 제출 — 결과는
-        submit_finished. 같은 jobset이 전이되므로 핸들·테이블이 그대로."""
-        self._check_open()
-        self._manager.submit_pending(self._jobset_id, **opts)
-
     def add_job(self, record: JobRecord, sync_lsf: bool = True) -> JobRecord:
         """[sync] job 편입 (FR-5.4). sync_lsf=True면 bmod -g 동기화."""
         self._check_open()
