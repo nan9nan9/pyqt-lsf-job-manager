@@ -158,8 +158,9 @@ GUI는 제출 전(CREATE 단계)부터 jobset을 갖습니다 — `create_jobset
 갈라지지 않습니다.
 
 ```python
-js = mgr.create_jobset(label="sweep")     # 빈 jobset — 핸들 즉시 (CREATED)
-table.bind(js)                            # 테이블은 처음부터 이 핸들에
+js = mgr.create_jobset(label="sweep")         # 빈 jobset — 핸들 즉시 (CREATED)
+js.jobs_updated.connect(table.apply_changed)  # GUI 테이블(앱 코드)을 처음부터
+                                              # 이 핸들의 Signal에 연결
 
 mgr.create_job(js, "customwrapper_sub -i a.sp",   # CREATED 레코드 누적
               merge_id="case-a",               # 논리 키 (merge 시 replace 기준)
