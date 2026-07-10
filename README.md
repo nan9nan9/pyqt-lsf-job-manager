@@ -154,6 +154,33 @@ js.resubmit_jobs([job_key, ...], pre_submit=prepare)
 `submit()`은 문자열 ID가 아니라 **JobSet**을 반환합니다.
 이 JobSet 하나로 해당 묶음의 모니터링/제어/조회를 전부 합니다.
 
+### 3.0 바구니 흐름 — 제출 전부터 JobSet을 갖기 (GUI 권장)
+
+`submit()`은 호출 시점에 JobSet을 만들지만, GUI는 보통 **제출 전(CREATE
+단계)부터** 목록을 쌓아 보여줘야 합니다. 그때는 빈 바구니를 먼저 만드세요:
+
+```python
+js = mgr.create_jobset(label="sweep")     # 빈 JobSet(바구니) — 핸들 즉시
+table.bind(js)                            # 테이블은 처음부터 이 핸들에
+
+js.add_pending(["customwrapper_sub -i a.sp",      # CREATED 레코드 누적 —
+                ["customwrapper_sub", "-i", "b.sp"],   # jobs_updated로 표에
+                JobSpec(command="make sim", queue="normal")])  # 바로 쌓임
+js.remove_job(key)                        # 담은 것 빼기 (intended 정합 유지)
+
+js.submit(workers=8)                      # 누적된 CREATED 전부 제출 —
+                                          # 같은 jobset/job_key가 전이되므로
+                                          # 핸들 교체·테이블 리셋이 없다
+```
+
+- `add_pending` 항목: **JobSpec** → bsub 경로(옵션 보존) / **argv 리스트** →
+  wrapper / **문자열** → wrapper 기본(`wrapper=False`면 bsub).
+- `js.submit()`은 CREATED만 제출합니다 — 제출 후 또 `add_pending` →
+  `submit()` 하면 **새로 담은 것만** 증분 제출됩니다 (기존 PEND/RUN 불변).
+- CREATE 상태의 바구니끼리 `merge_with`도 됩니다 — 누적 목록 합치기.
+- 한 번에 던질 스크립트에선 기존 `mgr.submit(...)`/`submit_wrapper(...)`
+  한 줄이 여전히 가장 짧습니다 (내부적으로 같은 구조).
+
 ### 3.1 Signal (이 JobSet의 이벤트만 옴 — 필터링 불필요)
 
 이름은 `mgr.*` Signal과 동일하다(인자에서 `jsid`만 빠짐). 여러 JobSet을 한 곳에서

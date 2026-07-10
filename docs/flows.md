@@ -21,6 +21,12 @@ js.start_polling()──────▶   polling QThread (전역 1개)
 
 ## 1. submit (bulk / wrapper / array)
 
+진입 경로는 둘이다 — 도식의 본체는 동일하다:
+  - `mgr.submit(...)` / `submit_wrapper(...)`: jobset 생성 + 레코드 선생성 + 제출을 한 번에
+  - **바구니**: `mgr.create_jobset()` → `js.add_pending(...)`(CREATED 누적,
+    표 즉시 갱신) → `js.submit()`(CREATED 전부 제출 — 같은 jobset 전이,
+    핸들·테이블 연속). GUI의 CREATE 단계가 있는 앱은 이 경로를 쓴다.
+
 ```
 main                          submit pool worker (job당 1 task)
 ────────────────────────      ──────────────────────────────────
