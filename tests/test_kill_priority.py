@@ -140,6 +140,60 @@ class _StubScope:
         self.released.set()
 
 
+def test_overlapping_kills_keep_snapshot_registered(qtbot, manager, fake_lsf):
+    """같은 jobset에 kill이 겹칠 때, 먼저 끝난 kill이 진행 중인 다른 kill의
+    스냅샷 등록을 지우지 않는다 — kill 1건당 slot 1개 (겹침 안전)."""
+    jsid = manager.create_jobset(1)
+    gate = threading.Event()
+    try:
+        blocked = _StubScope(gate=gate)      # kill A — acquire에서 블록 유지
+        manager.killer.kill_jobset(jsid, scope=blocked)
+        assert manager.killer.is_active(jsid)      # 호출 스레드 등록 — 즉시
+
+        with qtbot.waitSignal(manager.kill_finished, timeout=10000):
+            manager.killer.kill_jobset(jsid)       # kill B — 즉시 완료
+
+        # B가 끝나도 A의 등록은 남아야 한다 (기존 버그: 무조건 pop → False)
+        assert manager.killer.is_active(jsid) is True
+        assert manager.kill_snapshot(jsid) is not None
+    finally:
+        gate.set()
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000):
+        pass                                       # A 완료
+    assert manager.killer.is_active(jsid) is False # 전부 끝나면 해제
+
+
+def test_kill_started_pull_consistency(qtbot, manager, fake_lsf):
+    """kill_started slot에서 pull API(is_killing/kill_state)를 조회하면
+    이미 True/값이어야 한다 — 신호와 pull의 착수측 일치 계약."""
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
+
+    pulled = {}
+    js.kill_started.connect(lambda: pulled.update(
+        killing=js.is_killing, snap=js.kill_state is not None))
+
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000):
+        js.kill()
+
+    assert pulled == {"killing": True, "snap": True}, pulled
+
+
+def test_kill_finished_emitted_on_worker_exception(qtbot, manager, fake_lsf):
+    """killer worker 예외 시에도 kill_finished가 발행된다(착수/완료 짝 계약)
+    — 안 하면 kill_started로 스피너를 켠 UI가 영구 고착된다."""
+    errors = []
+    manager.error_occurred.connect(lambda _j, m: errors.append(m))
+
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
+        manager.kill_jobset("no_such_jobset")      # get_jobset 예외 유발
+
+    _jsid, report = blocker.args
+    assert report.errors and "internal" in report.errors[0]
+    assert errors                                  # error_occurred도 발행
+    assert manager.killer.is_active("no_such_jobset") is False  # 등록 해제
+
+
 def test_quiesce_timeout_recorded_in_kill_report(qtbot, manager, fake_lsf):
     """barrier 정지 대기 초과는 KillReport.errors에 남고 optimistic EXIT
     표시도 억제된다 — 유출 가능성이 '전부 정리됨'으로 오보되지 않는다.
@@ -149,7 +203,7 @@ def test_quiesce_timeout_recorded_in_kill_report(qtbot, manager, fake_lsf):
 
     stub = _StubScope(quiesced=False)        # 대기 초과 재현
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
-        manager.killer.kill_jobset(js.id, scope=lambda: stub)
+        manager.killer.kill_jobset(js.id, scope=stub)
     _jsid, report = blocker.args
 
     assert any("quiesce" in e for e in report.errors), report.errors
@@ -221,7 +275,7 @@ def test_barrier_wait_releases_killer_pool_slot(qtbot, manager, fake_lsf):
         blocked = [manager.create_jobset(1) for _ in range(4)]
         for jsid in blocked:
             manager.killer.kill_jobset(
-                jsid, scope=lambda: _StubScope(gate=gate))
+                jsid, scope=_StubScope(gate=gate))
 
         target = manager.create_jobset(1)     # 5번째 — 즉시 처리돼야 함
         with qtbot.waitSignal(manager.kill_finished, timeout=5000) as blocker:
@@ -251,10 +305,11 @@ def test_submit_during_kill_barrier_is_born_cancelled(qtbot, manager,
         n_lsf = len(fake_lsf.jobs)
         with qtbot.waitSignal(manager.submit_finished,
                               timeout=10000) as blocker:
-            manager.submitter.resubmit_existing(
+            launched = manager.submitter.resubmit_existing(
                 js.id, [(rec.job_key, JobSpec(command="echo again"))],
                 Options())
         _jsid, report = blocker.args
+        assert launched is False             # caller가 rearm 등을 생략하는 근거
 
         assert report.cancelled == 1 and report.succeeded == 0
         assert len(fake_lsf.jobs) == n_lsf   # LSF 제출 0

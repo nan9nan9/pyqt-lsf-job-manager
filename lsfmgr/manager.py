@@ -554,14 +554,16 @@ class LsfJobManager(QObject):
             self.submitter.cancel_submit(jobset_id)
             self._resubmitter.cancel(jobset_id)
             self.submitter.abort_retries(jobset_id)
-            scope = lambda: self._gate.kill_scope(jobset_id)  # noqa: E731
-        # 접수 즉시(동기) 착수 통지 — quiesce(진행 중 bsub 완료 대기)로
-        # kill_finished가 수십 초 늦어지는 케이스에서도 UI가 '접수됨'을
-        # 바로 표시할 수 있다 (submit의 ready_started/submit_started와 대칭)
-        self.kill_started.emit(jobset_id)
+            scope = self._gate.kill_scope(jobset_id)
         self.killer.kill_jobset(jobset_id, only_state=only_state,
                                 verify=verify, envpath=envpath,
                                 scope=scope)
+        # 접수 즉시(동기) 착수 통지 — quiesce(진행 중 bsub 완료 대기)로
+        # kill_finished가 수십 초 늦어지는 케이스에서도 UI가 '접수됨'을
+        # 바로 표시할 수 있다. killer.kill_jobset(동기 — 등록+task 큐잉만)
+        # **이후**에 발행해야 kill_started slot에서 is_killing()/
+        # kill_snapshot()을 pull해도 True/값이 나온다 (신호-pull 일치).
+        self.kill_started.emit(jobset_id)
 
     def kill_jobs(self, job_ids: Sequence, *,
                   jobset_id: Optional[str] = None,
@@ -575,10 +577,10 @@ class LsfJobManager(QObject):
         클러스터가 다르면 클러스터별로 나눠 각 envpath로 호출한다."""
         if verify is None:
             verify = bool(self._defaults.get("verify_kill", False))
-        if jobset_id:                    # jobset 컨텍스트가 있을 때만 착수 통지
-            self.kill_started.emit(jobset_id)
         self.killer.kill_jobs(job_ids, verify=verify,
                               jobset_id=jobset_id or "", envpath=envpath)
+        if jobset_id:                    # jobset 컨텍스트가 있을 때만 착수 통지
+            self.kill_started.emit(jobset_id)   # killer 등록 후 (pull 일치)
 
     # ------------------------------------------------------------------
     # JobSet 관리 (FR-5)

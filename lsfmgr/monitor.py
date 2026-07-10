@@ -70,10 +70,11 @@ class JobsetQuerier:
         probe_failed = False
         for what, fn in probes:
             probe_failed |= not self._try(lambda fn=fn: collect(fn()), what)
-        # array probe — bjobs_by_ids는 격리형(예외 대신 실패 id 집합 반환).
-        # 단일 id 조회라 실패 집합이 비어있지 않음 == 그 probe의 실패다.
-        for a in js.array_job_ids:
-            sts, arr_failed = self.command.bjobs_by_ids([a])
+        # array probe — 전체 id를 1회 chunked 조회로 배치(id당 subprocess
+        # 1회씩 띄우지 않는다). bjobs_by_ids는 격리형(예외 대신 실패 id 집합
+        # 반환)이라 실패 집합이 비어있지 않음 == probe 실패다.
+        if js.array_job_ids:
+            sts, arr_failed = self.command.bjobs_by_ids(js.array_job_ids)
             collect(sts)
             probe_failed |= bool(arr_failed)
 
@@ -159,10 +160,10 @@ class JobsetQuerier:
                 update_specs.append(
                     (rec.job_key, st.state, unchanged(rec), fields))
 
+        deferred: List[str] = []             # 이번 사이클 판단 보류 job_key
         if missing:
             hist: Dict = {}
             bhist_failed: set = set()        # bhist 조회 실패한 job_id (chunk 격리)
-            deferred: List[str] = []         # 이번 사이클 판단 보류 job_key
             ids = sorted({r.job_id for r in missing if r.job_id is not None})
             if ids:
                 try:
@@ -228,7 +229,7 @@ class JobsetQuerier:
         if changed:
             log.debug("poll %s: 대상 %d, 전이 %d (LOST %d, 보류 %d)",
                       jobset_id, len(targets), len(changed), len(lost),
-                      len(deferred) if missing else 0)
+                      len(deferred))
 
         return QueryResult(jobset_id, self.store.summary(jobset_id),
                            tuple(changed), tuple(lost), len(targets))

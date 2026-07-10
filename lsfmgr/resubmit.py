@@ -108,13 +108,19 @@ class ResubmitCoordinator(QObject):
             # shutdown 중 queued 발화 — 여기서 재제출을 시작하면 shutdown이
             # 기다려주지 않는 좀비 pool/프로세스가 생긴다 (CS-8)
             return
+        log.info("resubmit kill 단계 완료 %s → 재제출 dispatch (%d건)",
+                 jobset_id, len(plan.keyed))
+        if not self.mgr.submitter.resubmit_existing(jobset_id, plan.keyed,
+                                                    plan.opts):
+            # born-cancelled(kill barrier 중) / shutdown — 재실행이 없으므로
+            # rearm·polling 재개도 하지 않는다. 여기서 rearm하면 terminal
+            # 레코드에 _PENDING 핸들러가 남아, 재실행 없이 다음 폴링 tick에서
+            # end 핸들러가 중복 발화한다
+            return
         # handler 재무장 — 재실행되는 job의 handler 진행 상태를 리셋해,
         # 새 실행에서도 start/end 주기가 다시 돌게 한다 (레코드 리셋과 같은
         # main 스레드 흐름이라 tick과 인터리브 없음)
-        log.info("resubmit kill 단계 완료 %s → 재제출 dispatch (%d건)",
-                 jobset_id, len(plan.keyed))
         self.mgr.handlers.rearm(jobset_id, [k for k, _ in plan.keyed])
-        self.mgr.submitter.resubmit_existing(jobset_id, plan.keyed, plan.opts)
         # polling 재개 — 전원 terminal이었다면 AUTO-2가 polling을 꺼둔 상태라
         # 재실행된 job의 전이를 아무도 안 본다. polling을 쓰던 jobset에 한해
         # 마지막 interval로 다시 켠다 (한 번도 안 켰다면 v6 무자동 계약 유지)
@@ -211,9 +217,16 @@ class _KillPhaseTask(QRunnable):
         interval = max(0.2, self._coord.mgr.config.poll_interval_s / 5)
         for _ in range(5):
             statuses, failed = self._coord.mgr.command.bjobs_by_ids(ids)
-            # 조회 실패 chunk가 있으면 그 job들의 종료를 확인 못 한 것 —
-            # '없음'으로 오판하지 않고 다음 라운드에서 재확인한다
-            if not failed and not any(s.state.is_on_lsf for s in statuses):
+            if failed:
+                # 조회 실패 — 종료를 확인할 수단이 없다. best-effort 검증이므로
+                # 라운드를 더 돌지 않고 즉시 진행한다(구 fail-fast와 동일 지연
+                # 프로파일). 계속 돌면 전면 장애에서 5라운드 × 조회 timeout이
+                # 직렬로 쌓여 코디네이터 pool을 분 단위로 점유한다.
+                log.warning("resubmit_jobs verify: 조회 실패 %d건 — 종료 "
+                            "미확인으로 진행: %s", len(failed),
+                            sorted(failed)[:10])
+                return
+            if not any(s.state.is_on_lsf for s in statuses):
                 return
             time.sleep(interval)
         log.warning("resubmit_jobs verify: 일부 job이 아직 종료 안 됨 (진행): %s",

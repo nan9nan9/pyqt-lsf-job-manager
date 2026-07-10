@@ -251,7 +251,7 @@ class BulkSubmitter(QObject):
             via_wrapper=True, pre_submit=pre_submit)
 
     def resubmit_existing(self, jobset_id: str,
-                          keyed_items: Sequence, options: Options) -> None:
+                          keyed_items: Sequence, options: Options) -> bool:
         """[async→Signal] 기존 레코드 재제출 (resubmit_jobs 용).
 
         keyed_items: [(job_key, JobSpec | argv토큰리스트), ...] — item 타입으로
@@ -259,24 +259,27 @@ class BulkSubmitter(QObject):
         merge로 wrapper/bsub job이 한 jobset에 섞여 있어도 정확히 동작한다.
         새 CREATED 레코드를 만들지 않고 **이미 존재하는 레코드**를 리셋(이전
         job_id/exit_code/실행시간 초기화 + command 갱신) 후 같은 job_key로
-        재submit한다. 결과는 finished(SubmitReport)."""
+        재submit한다. 결과는 finished(SubmitReport).
+
+        반환: 제출이 실제 착수됐으면 True. shutdown/born-cancelled(kill
+        barrier 중 시작 — 레코드 원상 유지, 전원 취소 정산)면 False —
+        caller는 rearm/polling 재개 등 착수 전제 후속 작업을 생략해야 한다."""
         if self._shutdown:
             # shutdown 후 queued 경로로 도달할 수 있다 — 새 pool/프로세스를
             # 만들면 아무도 기다려주지 않는 좀비가 된다 (CS-8)
             log.warning("shutdown 후 재제출 요청 무시: %s", jobset_id)
-            return
+            return False
         keyed = list(keyed_items)
         ctx = self._new_context(jobset_id, len(keyed), options)
         if ctx.cancel_event.is_set():
             # born-cancelled (kill barrier 중 시작) — 아래 리셋은 기존
             # job_id/이력을 소거하는 파괴적 연산이라, 시작 전 취소면 레코드를
-            # 아예 건드리지 않고 전원 취소로만 계상한다 (원상 유지)
-            for _ in keyed:
-                self._count(ctx, cancelled=True)
-            if not keyed:
-                QTimer.singleShot(0,
-                                  lambda: self._finish_if_done(ctx, force=True))
-            return
+            # 아예 건드리지 않고 전원 취소로 정산한다 (원상 유지).
+            # _gate_reject가 같은 일(cancelled=total 일괄 + finished 1회 +
+            # _drop_ctx)을 O(1)로 한다 — 건당 _count 루프는 대형 재제출에서
+            # main 스레드가 O(N)회 lock/신호 발화를 하게 되므로 금지.
+            self._gate_reject(ctx, finish=True)
+            return False
         # 기존 레코드 리셋 — 이전 실행의 흔적(job_id/exit_code/실행시간/위치)을
         # 지우고 새 command 반영. 지우지 않으면 재제출 실패 시 죽은 옛 job_id·
         # 이전 실행의 start/finish/working_dir가 새 커맨드의 것처럼 잔존한다.
@@ -315,6 +318,7 @@ class BulkSubmitter(QObject):
             ctx.pool.start(self._make_resubmit_task(ctx, key, item))
         if not launch:
             QTimer.singleShot(0, lambda: self._finish_if_done(ctx, force=True))
+        return True
 
     @staticmethod
     def _item_command(item) -> str:

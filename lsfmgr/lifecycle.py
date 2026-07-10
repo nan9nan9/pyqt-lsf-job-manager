@@ -54,16 +54,37 @@ class SubmitGate:
         return act
 
     def unregister(self, jobset_id: str, act: _Activity) -> None:
-        """활동 종료 — 멱등(이미 제거됐으면 no-op)."""
+        """활동 종료 — 멱등(이미 제거됐으면 no-op). identity로 제거한다 —
+        equality 매칭(remove)은 겹친 활동의 필드가 우연히 같으면 남의
+        등록을 지울 수 있다."""
         with self._lock:
             acts = self._activities.get(jobset_id)
-            if acts and act in acts:
-                acts.remove(act)
-                if not acts:
-                    del self._activities[jobset_id]
+            if not acts:
+                return
+            for i, a in enumerate(acts):
+                if a is act:
+                    del acts[i]
+                    break
+            if not acts:
+                del self._activities[jobset_id]
 
     def kill_scope(self, jobset_id: str) -> "KillScope":
         return KillScope(self, jobset_id)
+
+    # --- barrier 조작 — lock 규율을 이 클래스 한 곳에 모은다 -------------
+    def _barrier_up(self, jobset_id: str) -> List[_Activity]:
+        """barrier ↑ + 그 시점 활동 목록 반환 (원자적)."""
+        with self._lock:
+            self._barriers[jobset_id] = self._barriers.get(jobset_id, 0) + 1
+            return list(self._activities.get(jobset_id, ()))
+
+    def _barrier_down(self, jobset_id: str) -> None:
+        with self._lock:
+            n = self._barriers.get(jobset_id, 0) - 1
+            if n > 0:
+                self._barriers[jobset_id] = n
+            else:
+                self._barriers.pop(jobset_id, None)
 
 
 class KillScope:
@@ -82,11 +103,7 @@ class KillScope:
     def acquire(self) -> bool:
         """반환: 시간 내 전부 정지 여부 — False면 caller(killer)가
         KillReport.errors로 보고한다 (스냅샷 이후 제출 완료분 유출 가능)."""
-        g = self._gate
-        with g._lock:
-            g._barriers[self.jobset_id] = g._barriers.get(self.jobset_id,
-                                                          0) + 1
-            acts = list(g._activities.get(self.jobset_id, ()))
+        acts = self._gate._barrier_up(self.jobset_id)
         for a in acts:                       # 취소 신호는 전부 먼저 —
             a.cancel_event.set()             # 대기가 병렬로 짧아진다
         ok = True
@@ -95,10 +112,4 @@ class KillScope:
         return ok
 
     def release(self) -> None:
-        g = self._gate
-        with g._lock:
-            n = g._barriers.get(self.jobset_id, 0) - 1
-            if n > 0:
-                g._barriers[self.jobset_id] = n
-            else:
-                g._barriers.pop(self.jobset_id, None)
+        self._gate._barrier_down(self.jobset_id)

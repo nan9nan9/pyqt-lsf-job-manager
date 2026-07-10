@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .command import LsfCommand
 from .errors import LsfmgrError
@@ -38,61 +38,88 @@ class Killer(QObject):
         self.querier = querier
         self._pool = QThreadPool()
         self._pool.setMaxThreadCount(4)
-        # 진행 중 kill의 pull 스냅샷 — jobset_id -> [done, total] (throttle 무관
-        # 최신값). worker(update)와 조회 스레드(snapshot)가 공유해 lock으로 보호.
-        self._active: Dict[str, List[int]] = {}
+        # 진행 중 kill의 pull 스냅샷 — jobset_id → kill별 slot([done,total])
+        # 리스트. 같은 jobset에 kill이 겹칠 수 있으므로(예: 선택 kill 직후
+        # 전체 kill) 단일 엔트리 덮어쓰기가 아니라 kill 1건당 slot 1개를
+        # 등록·해제한다 — 먼저 끝난 kill이 진행 중인 다른 kill의 등록을
+        # 지우지 못한다. worker(update)와 조회 스레드(snapshot)가 공유.
+        self._active: Dict[str, List[List[int]]] = {}
         self._active_lock = threading.Lock()
 
     def is_active(self, jobset_id: str) -> bool:
         """이 jobset에 진행 중인 kill이 있는지 (pull)."""
         with self._active_lock:
-            return jobset_id in self._active
+            return bool(self._active.get(jobset_id))
 
     def progress_snapshot(self, jobset_id: str) -> Optional[KillProgress]:
-        """진행 중 kill의 실시간 스냅샷 — 없으면 None."""
+        """진행 중 kill의 실시간 스냅샷 — 없으면 None.
+        겹친 kill은 합산해 하나의 진행으로 보인다."""
         with self._active_lock:
-            dt = self._active.get(jobset_id)
-            if dt is None:
+            slots = self._active.get(jobset_id)
+            if not slots:
                 return None
-            return KillProgress(jobset_id=jobset_id, done=dt[0], total=dt[1])
+            return KillProgress(jobset_id=jobset_id,
+                                done=sum(s[0] for s in slots),
+                                total=sum(s[1] for s in slots))
 
-    def _reg(self, jobset_id: str) -> None:
-        if jobset_id:                    # 전역 kill(jsid 없음)은 스냅샷 대상 아님
-            with self._active_lock:
-                self._active[jobset_id] = [0, 0]
+    def _reg(self, jobset_id: str) -> Optional[List[int]]:
+        """kill 1건 등록 — 반환 slot으로만 갱신/해제한다."""
+        if not jobset_id:                # 전역 kill(jsid 없음)은 스냅샷 대상 아님
+            return None
+        slot = [0, 0]
+        with self._active_lock:
+            self._active.setdefault(jobset_id, []).append(slot)
+        return slot
 
-    def _set_progress(self, jobset_id: str, done: int, total: int) -> None:
-        if jobset_id:
+    def _set_progress(self, slot: Optional[List[int]],
+                      done: int, total: int) -> None:
+        if slot is not None:
             with self._active_lock:
-                dt = self._active.get(jobset_id)
-                if dt is not None:
-                    dt[0], dt[1] = done, total
+                slot[0], slot[1] = done, total
 
-    def _unreg(self, jobset_id: str) -> None:
-        if jobset_id:
-            with self._active_lock:
-                self._active.pop(jobset_id, None)
+    def _unreg(self, jobset_id: str, slot: Optional[List[int]]) -> None:
+        """slot 해제 — 멱등(이미 제거됐으면 no-op).
+        반드시 identity로 제거한다 — list.remove는 equality 매칭이라 겹친
+        kill의 slot 값이 같으면([0,0] 등) 남의 slot을 지운다."""
+        if slot is None:
+            return
+        with self._active_lock:
+            slots = self._active.get(jobset_id)
+            if not slots:
+                return
+            for i, s in enumerate(slots):
+                if s is slot:
+                    del slots[i]
+                    break
+            if not slots:
+                del self._active[jobset_id]
 
     # ------------------------------------------------------------------
     def kill_jobset(self, jobset_id: str, *,
                     only_state: Optional[JobState] = None,
                     verify: bool = False, envpath: str = "",
-                    scope: Optional[Callable[[], object]] = None) -> None:
-        """scope: KillScope 팩토리 (kill 우선권, manager가 SubmitGate로 배선).
-        지정 시 worker에서 scope().acquire()로 barrier를 올려 진행 중 submit을
-        취소·대기하고, kill 완료까지 새 submit 시작을 막는다."""
+                    scope: Optional[object] = None) -> None:
+        """scope: KillScope (kill 우선권, manager가 SubmitGate로 배선).
+        지정 시 worker에서 scope.acquire()로 barrier를 올려 진행 중 submit을
+        취소·대기하고, kill 완료까지 새 submit 시작을 막는다.
+
+        진행 스냅샷 등록(_reg)은 여기(호출 스레드)에서 한다 — 반환 시점에
+        is_killing()/kill_snapshot()이 즉시 True/값을 주도록 (caller가 직후
+        발행하는 kill_started와 pull API가 일치해야 한다)."""
+        slot = self._reg(jobset_id)
         self._pool.start(_KillTask(
             self, jobset_id=jobset_id, only_state=only_state, verify=verify,
-            envpath=envpath, scope=scope))
+            envpath=envpath, scope=scope, slot=slot))
 
     def kill_jobs(self, job_ids: Sequence, *, verify: bool = False,
                   jobset_id: str = "", envpath: str = "") -> None:
         """job_ids: int(job 전체) 또는 "id[idx]" 문자열(array element 1개).
         envpath 지정 시 그 LSF env를 source한 bkill (MC forward job — 클러스터별로
         나눠 각 envpath로 호출)."""
+        slot = self._reg(jobset_id)
         self._pool.start(_KillTask(
             self, jobset_id=jobset_id, job_ids=list(job_ids), verify=verify,
-            envpath=envpath))
+            envpath=envpath, slot=slot))
 
     def shutdown(self) -> None:
         self._pool.waitForDone(-1)
@@ -104,7 +131,8 @@ class _KillTask(QRunnable):
                  only_state: Optional[JobState] = None,
                  job_ids: Optional[List] = None, verify: bool = False,
                  envpath: str = "",
-                 scope: Optional[Callable[[], object]] = None):
+                 scope: Optional[object] = None,
+                 slot: Optional[List[int]] = None):
         super().__init__()
         self.setAutoDelete(True)
         self.killer = killer
@@ -113,13 +141,13 @@ class _KillTask(QRunnable):
         self.job_ids = job_ids
         self.verify = verify
         self.envpath = envpath
-        self.scope_factory = scope
+        self.scope = scope
+        self.slot = slot                     # 진행 스냅샷 slot (killer._reg 발급)
         cfg = killer.command.config          # chunk progress throttle (submit 대칭)
         self._prog = EmitThrottler(cfg.progress_min_interval_s,
                                    cfg.progress_min_step_ratio)
 
     def run(self):
-        self.killer._reg(self.jobset_id)     # pull 스냅샷 등록
         target = (self.jobset_id or f"ids={len(self.job_ids or [])}")
         mode = (f"only={self.only_state.value}" if self.only_state
                 else ("ids" if self.job_ids is not None else "전체"))
@@ -131,31 +159,37 @@ class _KillTask(QRunnable):
             except Exception as e:           # noqa: BLE001 — CS-5
                 log.exception("kill 실패: %s", self.jobset_id)
                 self.killer.error.emit(self.jobset_id, repr(e))
+                # 착수/완료 짝 계약 — 예외에도 kill_finished는 발행한다.
+                # 안 하면 kill_started로 스피너를 켠 UI가 영구 고착된다.
+                report = KillReport(
+                    jobset_id=self.jobset_id, requested=0,
+                    errors=[f"internal: {e!r}"])
+                self.killer._unreg(self.jobset_id, self.slot)
+                self.killer.finished.emit(self.jobset_id, report)
                 return
-            log.info("kill 완료 %s: 요청 %d / 확인 %d / 미확인 %d / 잔존 %s "
+            log.info("kill 완료 %s: 요청 %d / 미확인 %d / 잔존 %s "
                      "(전략 %s, LSF호출 %d회%s)",
-                     target, report.requested,
-                     report.requested - report.unconfirmed, report.unconfirmed,
+                     target, report.requested, report.unconfirmed,
                      "미검증" if report.still_alive is None
                      else report.still_alive,
                      "+".join(report.strategies) or "-", report.command_calls,
                      f", 오류 {len(report.errors)}건" if report.errors else "")
             # 완료 시 항상 100% 보장 (미확인이 남아도 작업은 끝) — submit과 대칭
-            self.killer._set_progress(self.jobset_id, report.requested,
+            self.killer._set_progress(self.slot, report.requested,
                                       report.requested)
             self.killer.progress.emit(self.jobset_id, report.requested,
                                       report.requested)
             # finished보다 먼저 등록 해제 — queued 신호를 받은 slot이
             # is_killing을 pull하면 반드시 False여야 한다 (결정적 계약).
-            # finally의 중복 해제는 pop이라 무해(멱등).
-            self.killer._unreg(self.jobset_id)
+            # finally의 중복 해제는 멱등이라 무해.
+            self.killer._unreg(self.jobset_id, self.slot)
             self.killer.finished.emit(self.jobset_id, report)
         finally:
-            self.killer._unreg(self.jobset_id)
+            self.killer._unreg(self.jobset_id, self.slot)
 
     def _emit_progress(self, done: int, total: int) -> None:
         """chunk 진행 통지 (throttled) + pull 스냅샷 갱신(throttle 무관 최신)."""
-        self.killer._set_progress(self.jobset_id, done, total)
+        self.killer._set_progress(self.slot, done, total)
         if total > 0 and self._prog.should_emit(done, total):
             self.killer.progress.emit(self.jobset_id, done, total)
 
@@ -164,7 +198,7 @@ class _KillTask(QRunnable):
         # kill 우선권 barrier는 kill이 끝날 때까지 유지한다 — 그동안 새
         # submit 등록은 SubmitGate가 거부(born-cancelled)하므로 'kill 진행 중
         # 도착한 제출/재제출은 취소된다'가 타이밍이 아닌 규칙이 된다.
-        scope = self.scope_factory() if self.scope_factory else None
+        scope = self.scope
         try:
             return self._run_kill(scope)
         finally:
