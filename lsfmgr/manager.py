@@ -722,15 +722,20 @@ class LsfJobManager(QObject):
                       sync_lsf: bool = False,
                       keep_originals: bool = False) -> str:
         """[sync] 병합 — 새 jobset_id 반환. 원본 미보존 시 해당 핸들 파괴."""
-        # submit/resubmit 진행 중인 소스는 거부 — 허용하면 소스 삭제로
+        # submit/resubmit/kill 진행 중인 소스는 거부 — 허용하면 소스 삭제로
         # worker가 크래시하고(존재하지 않는 jobset에 전이 시도), 진행 중
         # 스냅샷이 복사돼 merged jobset에 SUBMITTING 좀비 레코드가 영구
-        # 잔존한다 (keep_originals=True여도 복사본은 갱신되지 않으므로 동일)
+        # 잔존한다 (keep_originals=True여도 복사본은 갱신되지 않으므로 동일).
+        # kill도 같은 이유 — 스냅샷 이후 소스가 삭제되면 optimistic EXIT
+        # 전이가 옛 jobset id로 실패해 kill이 오류로 끝나고, 복사된 레코드는
+        # kill 결과를 반영받지 못한다.
         for jsid in jobset_ids:
             if (self.submitter.is_active(jsid)
-                    or self._resubmitter.is_active(jsid)):
+                    or self._resubmitter.is_active(jsid)
+                    or self.killer.is_active(jsid)):
                 raise LsfmgrError(
-                    f"{jsid}: submit/resubmit 진행 중에는 merge할 수 없습니다")
+                    f"{jsid}: submit/resubmit/kill 진행 중에는 "
+                    f"merge할 수 없습니다")
         new_id = self.jobsets.merge_jobsets(
             jobset_ids, sync_lsf=sync_lsf,
             keep_originals=keep_originals).jobset_id

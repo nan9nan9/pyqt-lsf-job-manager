@@ -163,6 +163,35 @@ def test_overlapping_kills_keep_snapshot_registered(qtbot, manager, fake_lsf):
     assert manager.killer.is_active(jsid) is False # 전부 끝나면 해제
 
 
+def test_merge_during_active_kill_rejected(qtbot, manager, fake_lsf):
+    """kill 진행 중인 jobset은 merge를 거부한다 — 소스 삭제로 optimistic
+    EXIT 전이가 옛 jobset id로 실패하고, 복사된 레코드가 kill 결과를 반영
+    못 받는 것을 막는다 (submit 중 merge 거부와 대칭)."""
+    import pytest
+
+    from lsfmgr.errors import LsfmgrError
+
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        a = manager.submit(["echo a"], mode="bulk", auto_poll=False)
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        b = manager.submit(["echo b"], mode="bulk", auto_poll=False)
+
+    gate = threading.Event()
+    try:
+        manager.killer.kill_jobset(a.id, scope=_StubScope(gate=gate))
+        assert manager.killer.is_active(a.id)      # kill 진행 중
+
+        with pytest.raises(LsfmgrError):
+            manager.merge_jobsets([a.id, b.id])
+    finally:
+        gate.set()
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000):
+        pass                                       # kill 완료
+
+    merged = manager.merge_jobsets([a.id, b.id])   # 완료 후엔 정상
+    assert manager.summary(merged)["total"] == 2
+
+
 def test_kill_started_pull_consistency(qtbot, manager, fake_lsf):
     """kill_started slot에서 pull API(is_killing/kill_state)를 조회하면
     이미 True/값이어야 한다 — 신호와 pull의 착수측 일치 계약."""
