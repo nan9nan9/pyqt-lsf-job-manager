@@ -573,5 +573,10 @@ customwrapper_sub -q normal run1.sp   # == bsub -q normal run1.sp → "Job <id> 
 
 실제 환경에서 wrapper를 작성·지정하는 방법은 **[`docs/lsfmgr.md`](docs/lsfmgr.md)**,
 대량 job 명령(submit/kill)을 GUI에 **바로바로 반영**하는 Signal 사용법은
-**[`docs/signal_usage.md`](docs/signal_usage.md)**, mocklsf 자체는
+**[`docs/signal_usage.md`](docs/signal_usage.md)**, 명령별 내부 동작 흐름은
+[`docs/flows.md`](docs/flows.md), mocklsf 자체는
 [`docs/mocklsf.md`](docs/mocklsf.md)를 참고하세요.
+
+라이브러리의 **요구사항 명세(FR/QT/CS/NFR)와 v7→v9 변경 요약**은
+**[`docs/LSF_JOB_MANAGER_REQUIREMENTS_v9.md`](docs/LSF_JOB_MANAGER_REQUIREMENTS_v9.md)**
+에 정리되어 있습니다.
