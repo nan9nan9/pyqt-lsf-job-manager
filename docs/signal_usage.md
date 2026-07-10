@@ -275,7 +275,7 @@ def on_rerun_failed(self):
     fix = self.mgr.create_jobset(
         [shlex.split(r.command) for r in failed],
         merge_ids=[r.merge_id for r in failed],
-        ud_datas=[r.ud_data for r in failed], label="rerun")
+        user_datas=[r.user_data for r in failed], label="rerun")
     self.mgr.merge(js, fix)                    # 같은 merge_id → CREATED 교체
     self.mgr.submit(js)                        # 전 job 재제출
 ```

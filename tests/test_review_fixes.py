@@ -112,7 +112,7 @@ def test_empty_jobset_submit_rejected(manager, fake_lsf):
     assert js.summary["total"] == 0
     with pytest.raises(LsfmgrError):
         manager.submit(js)                # job 없음 → 거부
-    # merge_ids/ud_datas 길이 불일치는 ValueError
+    # merge_ids/user_datas 길이 불일치는 ValueError
     with pytest.raises(ValueError):
         manager.create_jobset(["a", "b"], merge_ids=["m1"])
 

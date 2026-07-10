@@ -1,4 +1,4 @@
-"""v9 jobset 계약 — create_jobset(commands·merge_id·ud_data로 job까지 생성)/
+"""v9 jobset 계약 — create_jobset(commands·merge_id·user_data로 job까지 생성)/
 merge_from(in-place replace)/remove·clear(force 가드)/can_*/submit(전체 재제출).
 
 GUI가 job control을 직접 갖는 구조: 라이브러리는 CRUD+submit+kill+poll만
@@ -30,18 +30,18 @@ def test_create_jobset_empty_returns_handle_in_created_state(manager):
     assert js.summary["total"] == 0                 # CREATED 상태, job 없음
 
 
-def test_create_jobset_with_merge_id_and_ud_data(qtbot, manager, fake_lsf):
+def test_create_jobset_with_merge_id_and_user_data(qtbot, manager, fake_lsf):
     batches = []
     manager.jobs_updated.connect(lambda _j, recs: batches.append(recs))
 
     js = manager.create_jobset(
         ["customwrapper_sub -i a.sp"], merge_ids=["job-a"],
-        ud_datas=[{"run": "customwrapper_sub -i a.sp", "n": 1}])
+        user_datas=[{"run": "customwrapper_sub -i a.sp", "n": 1}])
 
     rec = js.jobs()[0]
     assert rec.state is JobState.CREATED
     assert rec.merge_id == "job-a"
-    assert rec.ud_data == {"run": "customwrapper_sub -i a.sp", "n": 1}
+    assert rec.user_data == {"run": "customwrapper_sub -i a.sp", "n": 1}
     assert rec.via_wrapper is True
     assert batches and batches[0][0].job_key == rec.job_key   # 표 즉시 갱신
     assert js.summary["total"] == 1            # intended 자동 증가
@@ -79,22 +79,22 @@ def test_create_jobset_length_mismatch_rejected(manager):
     with pytest.raises(ValueError, match="길이"):
         manager.create_jobset(["a", "b"], merge_ids=["m1"])
     with pytest.raises(ValueError, match="길이"):
-        manager.create_jobset(["a", "b"], ud_datas=[{"x": 1}])
+        manager.create_jobset(["a", "b"], user_datas=[{"x": 1}])
 
 
-def test_set_ud_data_by_refs(qtbot, manager, fake_lsf):
+def test_set_user_data_by_refs(qtbot, manager, fake_lsf):
     js = manager.create_jobset(["customwrapper_sub a.sp"], merge_ids=["m1"])
 
-    manager.set_ud_data(js, js.jobs()[0].job_key, {"v": 1})   # job_key로
-    assert js.jobs()[0].ud_data == {"v": 1}
-    manager.set_ud_data(js, "m1", {"v": 2})              # merge_id로
-    assert js.jobs()[0].ud_data == {"v": 2}
+    manager.set_user_data(js, js.jobs()[0].job_key, {"v": 1})   # job_key로
+    assert js.jobs()[0].user_data == {"v": 1}
+    manager.set_user_data(js, "m1", {"v": 2})              # merge_id로
+    assert js.jobs()[0].user_data == {"v": 2}
 
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
     jid = js.jobs()[0].job_id
-    manager.set_ud_data(js, jid, {"v": 3})               # job_id(int)로
-    assert js.jobs()[0].ud_data == {"v": 3}
+    manager.set_user_data(js, jid, {"v": 3})               # job_id(int)로
+    assert js.jobs()[0].user_data == {"v": 3}
 
 
 # ----------------------------------------------------------------------
@@ -102,14 +102,14 @@ def test_set_ud_data_by_refs(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_merge_from_replace_keeps_physical_key(qtbot, manager, fake_lsf):
     """같은 merge_id → replace: 물리 키(job_key)는 target 것 유지(테이블 행
-    연속), 내용(command/ud_data)은 source 것으로 교체."""
+    연속), 내용(command/user_data)은 source 것으로 교체."""
     a = manager.create_jobset(
         ["customwrapper_sub v1.sp", "customwrapper_sub keep.sp"],
-        merge_ids=["m1", "keep"], ud_datas=[{"ver": 1}, None], label="target")
+        merge_ids=["m1", "keep"], user_datas=[{"ver": 1}, None], label="target")
     old = next(r for r in a.jobs() if r.merge_id == "m1")
     b = manager.create_jobset(
         ["customwrapper_sub v2.sp"], merge_ids=["m1"],
-        ud_datas=[{"ver": 2}], label="source")
+        user_datas=[{"ver": 2}], label="source")
 
     changed = manager.merge(a, b)
 
@@ -117,7 +117,7 @@ def test_merge_from_replace_keeps_physical_key(qtbot, manager, fake_lsf):
     rep = by_mid["m1"]
     assert rep.job_key == old.job_key           # 물리 키 유지
     assert rep.command == "customwrapper_sub v2.sp"   # 내용은 source
-    assert rep.ud_data == {"ver": 2}
+    assert rep.user_data == {"ver": 2}
     assert by_mid["keep"].command == "customwrapper_sub keep.sp"
     assert a.summary["total"] == 2
     assert any(r.merge_id == "m1" for r in changed)
@@ -234,7 +234,7 @@ def test_submit_resubmits_all_inactive(qtbot, manager, fake_lsf):
     """DONE/EXIT 포함 전 job이 리셋 후 재제출된다 — 같은 job_key 유지."""
     js = manager.create_jobset(
         ["customwrapper_sub a.sp", JobSpec(command="make sim", queue="priority")],
-        merge_ids=["m1", None], ud_datas=[{"keep": True}, None])
+        merge_ids=["m1", None], user_datas=[{"keep": True}, None])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
     _finish_all(manager, fake_lsf, js)
@@ -249,7 +249,7 @@ def test_submit_resubmits_all_inactive(qtbot, manager, fake_lsf):
     assert all(r.state is JobState.PEND for r in js.jobs())
     assert {r.job_id for r in js.jobs()}.isdisjoint(old_ids)  # 새 실행
     by_mid = {r.merge_id: r for r in js.jobs()}
-    assert by_mid["m1"].ud_data == {"keep": True}      # ud_data 보존
+    assert by_mid["m1"].user_data == {"keep": True}      # user_data 보존
     # bsub 경로 옵션(queue) 보존
     spec_rec = next(r for r in js.jobs() if not r.via_wrapper)
     assert fake_lsf.jobs[str(spec_rec.job_id)].queue == "priority"

@@ -11,6 +11,7 @@
 | `lsfmgr.monitor` | polling 시작/중지, 조회 실패, LOST 확정 |
 | `lsfmgr.kill` | kill 전략 선택/실패 |
 | `lsfmgr.jobset` | JobSet 생성/merge/close/손실 복구 |
+| `lsfmgr.handler` | job별 handler(FR-7) 실행/예외 |
 | `lsfmgr.manager` | shutdown 등 수명 이벤트 |
 
 ## 2. 레벨 규약 (NFR-6)
@@ -46,7 +47,7 @@ logger.addHandler(handler)
 **라이브러리가 보장하는 것 (CS-5):**
 
 - worker 스레드(submit/polling/kill) 안의 예외는 스레드를 죽이지
-  않고 → `logger.exception()`(traceback 포함 ERROR 로그) + `js.error` /
+  않고 → `logger.exception()`(traceback 포함 ERROR 로그) + `js.error_occurred` /
   `mgr.error_occurred` Signal로 전달됩니다.
 
 **앱에서 추가로 훅킹을 권장하는 것:**

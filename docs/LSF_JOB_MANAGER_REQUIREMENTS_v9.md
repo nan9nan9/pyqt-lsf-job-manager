@@ -2,7 +2,7 @@
 
 > **버전**: v9 (2026-07-11) — v7 대비 **대규모 단순화**:
 > ① 명령 일원화(모든 명령은 `mgr.*` 한 곳, JobSet 핸들은 조회+Signal 전용 뷰)
-> ② job 생성은 `create_jobset` 한 곳(이후 추가는 merge만) — `merge_id`/`ud_data` 도입
+> ② job 생성은 `create_jobset` 한 곳(이후 추가는 merge만) — `merge_id`/`user_data` 도입
 > ③ 재실행 = merge + submit (resubmit API 제거)
 > ④ 저장소 InMemory 단일(SQLite/영속·세션복원 제거)
 > ⑤ one-shot/array 제출·`mode` 옵션·`add_job` 제거
@@ -59,7 +59,7 @@ mgr = LsfJobManager()
 js = mgr.create_jobset(
     ["customwrapper_sub -i a.sp", "customwrapper_sub -i b.sp"],
     merge_ids=["case-a", "case-b"],            # 논리 키 (merge 시 replace 기준)
-    ud_datas=[{"rev": 3}, None],               # job별 사용자 데이터 (보존만)
+    user_datas=[{"rev": 3}, None],               # job별 사용자 데이터 (보존만)
     label="sweep")
 
 js.jobset_updated.connect(lambda s: ...)       # 이 핸들의 Signal에 GUI 바인딩
@@ -120,13 +120,13 @@ if mgr.can_submit(js):
 
 ```python
 # --- 생성/구성 (sync) ---
-mgr.create_jobset(commands=(), *, merge_ids=None, ud_datas=None, wrapper=True,
+mgr.create_jobset(commands=(), *, merge_ids=None, user_datas=None, wrapper=True,
                   label="", tags=(), parent=None, intended_count=0) -> JobSet
 mgr.merge(target, source, *, force=False) -> list[JobRecord]  # in-place 흡수
 mgr.can_merge(target, source) -> bool
 mgr.remove_job(js, *, job_id=None, merge_id=None, job_key=None, force=False)
 mgr.clear(js, *, force=False)
-mgr.set_ud_data(js, ref, ud_data)            # ref = job_key | merge_id | job_id
+mgr.set_user_data(js, ref, user_data)            # ref = job_key | merge_id | job_id
 mgr.can_submit(js) -> bool
 mgr.close(js)                                # 종결 (전원 terminal일 때)
 
@@ -186,7 +186,7 @@ class JobSet(QObject):
 |---|---|---|
 | **JobSet** | `jobset_id`, `JobSet` 객체 | 논리적 job 묶음. 모든 기능의 기본 단위 |
 | **merge_id** | `JobRecord.merge_id` | job의 **논리 키** — merge 시 같은 merge_id 기존 job을 replace |
-| **ud_data** | `JobRecord.ud_data` | 사용자 정의 dict(JSON-able). 라이브러리는 **보존만** |
+| **user_data** | `JobRecord.user_data` | 사용자 정의 dict(JSON-able). 라이브러리는 **보존만** |
 | **LSF Job Group** | `lsf_group_path` | LSF native (`bsub -g`). 1회 호출 최적화 **수단** |
 | **LSF Job Name** | `lsf_job_name`(=job_key) | LSF native (`bsub -J`). 패턴 조회/kill **수단**, fallback |
 | **Array Job** | `array_index` | wrapper 제출 산물로만 존재하는 element(직접 array 제출 없음) |
@@ -214,7 +214,7 @@ class JobState(Enum):
   실패 시 `RETRY_WAIT`(n<N) 또는 `SUBMIT_FAILED`(n==N), 조회 전부 실패 없이
   미발견 → `LOST`. cancel/kill(미제출) 시 `SUBMITTING/RETRY_WAIT → CREATED`.
 - 전이는 Store 경유만(원자적 `transition`).
-- `JobRecord`(+`merge_id`/`ud_data`)/`JobSetRecord`: frozen dataclass.
+- `JobRecord`(+`merge_id`/`user_data`)/`JobSetRecord`: frozen dataclass.
 - **불변식: 요약 상태별 합계 == intended_count** (remove/merge도 유지).
 
 ---
@@ -287,7 +287,7 @@ JobSetStore(ABC) ── InMemoryStore
 - **FR-5 JobSet 관리**:
   - **FR-5.1** 요약(불변식 합계==intended_count), **FR-5.2** intended_count 정합,
   - **FR-5.3** 손실 감지(name 패턴 복구 시도 후 LOST),
-  - **FR-5.4** 생성(`create_jobset` 한 곳: commands/merge_ids/ud_datas) — **이후 추가는
+  - **FR-5.4** 생성(`create_jobset` 한 곳: commands/merge_ids/user_datas) — **이후 추가는
     merge만**,
   - **FR-5.5** merge(`merge_from`): in-place 흡수(target 핸들/테이블 유지, source 소멸),
     merge_id 일치=replace(물리 키 유지)/불일치·None=추가, 가드=양쪽 전원 비활성
@@ -357,7 +357,7 @@ lsfmgr/
 ├── qt.py                # qtpy re-export 단일 지점
 ├── options.py           # Options(frozen), resolve_options(), 검증(OPT-1~4)
 ├── config.py            # LsfConfig, JobSpec (Qt 비의존)
-├── states.py            # JobState(+is_inactive), JobRecord(+merge_id/ud_data), JobSetRecord
+├── states.py            # JobState(+is_inactive), JobRecord(+merge_id/user_data), JobSetRecord
 ├── reports.py           # SubmitReport/Progress, KillReport/Progress
 ├── errors.py            # LsfmgrError, JobSet(Closed|NotFound)Error, JobNotFoundError, ...
 ├── command.py           # LsfCommand 래퍼 (Qt 비의존, chunking, ARG_MAX, chunk 격리)
@@ -402,7 +402,7 @@ Qt 비의존 유지: options/config/states/command/store/jobset_core (Qt 없이 
 18. **생성/merge (FR-5.4/5.5)**: create_jobset가 유일 생성 경로, 추가는 merge만,
     merge_id replace 시 물리 키 유지·요약 불변식, force는 레코드만
 19. **재실행**: `mgr.merge(js, fix) + mgr.submit(js)`로 실패분 교체 후 전체 재실행,
-    원 제출 옵션(spec_json)·merge_id·ud_data 보존
+    원 제출 옵션(spec_json)·merge_id·user_data 보존
 20. **pre_submit 게이트 (FR-9)**: False/예외 시 레코드 원상, 신호 순서 보장,
     통과 후에만 rearm/AUTO-1
 
@@ -418,4 +418,4 @@ Qt 비의존 유지: options/config/states/command/store/jobset_core (Qt 없이 
 | 재실행 | `resubmit_jobs` (FR-8) | **merge + submit** |
 | 제출 방식 | bulk/array 자동선택(`mode`, AUTO-4) | **jobset 전 job 재제출**(array 제출 없음) |
 | 저장소 | InMemory + SQLite(영속·복원) | **InMemory 단일** |
-| 신설 | — | **pre_submit 게이트(FR-9)**, **kill 우선권 SubmitGate**, merge_id/ud_data, chunk 격리·회로차단 |
+| 신설 | — | **pre_submit 게이트(FR-9)**, **kill 우선권 SubmitGate**, merge_id/user_data, chunk 격리·회로차단 |

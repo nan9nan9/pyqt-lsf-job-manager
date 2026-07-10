@@ -109,7 +109,7 @@ main (전부 앱이 직접 제어)
 - ③의 replace 는 레코드만 교체한다 — force=True 로 활성 job 을 교체해도
   LSF 의 실제 job 은 그대로다(정리는 앱 책임, 먼저 kill 권장).
 - ④의 리셋: job_id/exit_code/실행시간/fail_message/클러스터 소거,
-  spec_json(제출 옵션)·merge_id·ud_data 보존. handler 자동 재무장.
+  spec_json(제출 옵션)·merge_id·user_data 보존. handler 자동 재무장.
 
 ## 4. cancel (`mgr.cancel_submit(js)`)
 

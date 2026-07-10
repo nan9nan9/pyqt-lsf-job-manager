@@ -159,7 +159,7 @@ if mgr.can_submit(js):
   SUBMIT_FAILED/LOST)이어야 하며 활성(RUN/PEND/SUBMITTING)이 있으면
   LsfmgrError. `can_submit()` 으로 선확인.
 - 리셋이 이전 실행 흔적(job_id/exit_code/실행시간/fail_message/클러스터)을
-  지우고, 원 제출 옵션(spec_json)과 `ud_data`/`merge_id` 는 보존한다.
+  지우고, 원 제출 옵션(spec_json)과 `user_data`/`merge_id` 는 보존한다.
 - 재실행되는 job 의 handler(§2.5)는 **자동 재무장**된다.
 - polling: `auto_poll`(기본) 옵션으로 submit 시 자동 시작.
 

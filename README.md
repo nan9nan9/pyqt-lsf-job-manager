@@ -161,7 +161,7 @@ js = mgr.create_jobset(                        # 생성 시 job까지 함께 만
     ["customwrapper_sub -i a.sp",              #   각 커맨드 = job 1건 (CREATED)
      "customwrapper_sub -i b.sp"],
     merge_ids=["case-a", "case-b"],           # 논리 키 (merge 시 replace 기준)
-    ud_datas=[{"run": "...", "rev": 3}, None],  # job별 사용자 데이터 (보존만)
+    user_datas=[{"run": "...", "rev": 3}, None],  # job별 사용자 데이터 (보존만)
     label="sweep")
 js.jobs_updated.connect(table.apply_changed)  # GUI 테이블(앱 코드)을 이 핸들의
                                               # Signal에 연결 (초기값은 js.jobs())
@@ -345,7 +345,7 @@ js2 = mgr.jobset(jobset_id)            # ID로 JobSet 재획득
 mgr.remove_job(js, merge_id="m1")      # 삭제 — job_id/merge_id/job_key 기준
 mgr.remove_job(js, job_id=12345, force=True)  # 활성이면 force 필요 (레코드만)
 mgr.clear(js)                          # 전 job 삭제 (동일 가드)
-mgr.set_ud_data(js, "m1", {"note": "..."})  # 사용자 데이터 교체
+mgr.set_user_data(js, "m1", {"note": "..."})  # 사용자 데이터 교체
 ```
 
 ### 3.5 job별 handler — 폴링 사이클마다 실행 (파싱 + 최종 수집)

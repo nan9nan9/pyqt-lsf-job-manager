@@ -459,7 +459,7 @@ class LsfJobManager(QObject):
 
     def create_jobset(self, commands: Sequence = (), *,
                       merge_ids: Optional[Sequence[Optional[str]]] = None,
-                      ud_datas: Optional[Sequence[Optional[dict]]] = None,
+                      user_datas: Optional[Sequence[Optional[dict]]] = None,
                       wrapper: bool = True,
                       label: str = "", tags: Sequence[str] = (),
                       parent: Optional[str] = None,
@@ -472,7 +472,7 @@ class LsfJobManager(QObject):
 
             js = mgr.create_jobset(
                 ["customwrapper_sub -i a.sp", "customwrapper_sub -i b.sp"],
-                merge_ids=["a", "b"], ud_datas=[{"run": "..."}, None],
+                merge_ids=["a", "b"], user_datas=[{"run": "..."}, None],
                 label="sweep")
             if mgr.can_submit(js):
                 mgr.submit(js, workers=8)     # 전 job (재)제출
@@ -484,8 +484,8 @@ class LsfJobManager(QObject):
                                False면 bsub(JobSpec(command=...))
         merge_ids: 각 job의 논리 키 — merge 시 같은 merge_id의 기존 job이
         이 내용으로 replace된다. jobset 내 유일해야 한다(None 제외).
-        ud_datas: job별 사용자 정의 dict (JSON 직렬화 가능) — 보존만.
-        merge_ids/ud_datas는 commands와 같은 길이(생략 시 전부 None).
+        user_datas: job별 사용자 정의 dict (JSON 직렬화 가능) — 보존만.
+        merge_ids/user_datas는 commands와 같은 길이(생략 시 전부 None).
         commands가 비면 **빈 jobset** — 이후 merge로만 채운다.
         생성 즉시 jobs_updated/jobset_updated가 발행돼 표가 갱신된다."""
         if isinstance(tags, str):             # 편의: 단일 태그 문자열 허용
@@ -496,20 +496,20 @@ class LsfJobManager(QObject):
         items = list(commands)
         if items:
             records = self._build_job_records(
-                jsid, items, merge_ids, ud_datas, wrapper)
+                jsid, items, merge_ids, user_datas, wrapper)
             out = self.jobsets.create_jobs(jsid, records)
             self._relay_jobs_changed(jsid, list(out))     # 표 즉시 갱신
         return self.jobset(jsid)
 
     def _build_job_records(self, jsid: str, items: list,
                            merge_ids: Optional[Sequence[Optional[str]]],
-                           ud_datas: Optional[Sequence[Optional[dict]]],
+                           user_datas: Optional[Sequence[Optional[dict]]],
                            wrapper: bool) -> List[JobRecord]:
         """commands → CREATED JobRecord 목록 (create_jobset 내부용)."""
         mids = list(merge_ids) if merge_ids is not None else [None] * len(items)
-        uds = list(ud_datas) if ud_datas is not None else [None] * len(items)
+        uds = list(user_datas) if user_datas is not None else [None] * len(items)
         if len(mids) != len(items) or len(uds) != len(items):
-            raise ValueError("merge_ids/ud_datas 길이가 commands와 다릅니다")
+            raise ValueError("merge_ids/user_datas 길이가 commands와 다릅니다")
 
         # job_key 연번 — 기존 키의 최대 suffix 다음부터
         used = set()
@@ -528,7 +528,7 @@ class LsfJobManager(QObject):
                     job_id=None, array_index=None, jobset_id=jsid,
                     lsf_job_name=key, state=JobState.CREATED,
                     command=item.command, via_wrapper=False,
-                    spec_json=spec_to_json(item), merge_id=mid, ud_data=ud))
+                    spec_json=spec_to_json(item), merge_id=mid, user_data=ud))
                 continue
             if isinstance(item, str):
                 if not wrapper:
@@ -537,7 +537,7 @@ class LsfJobManager(QObject):
                         lsf_job_name=key, state=JobState.CREATED,
                         command=item, via_wrapper=False,
                         spec_json=spec_to_json(JobSpec(command=item)),
-                        merge_id=mid, ud_data=ud))
+                        merge_id=mid, user_data=ud))
                     continue
                 argv = shlex.split(item)
             else:
@@ -548,17 +548,17 @@ class LsfJobManager(QObject):
                 job_id=None, array_index=None, jobset_id=jsid,
                 lsf_job_name=key, state=JobState.CREATED,
                 command=shlex.join(argv), via_wrapper=True,
-                merge_id=mid, ud_data=ud))
+                merge_id=mid, user_data=ud))
         return records
 
-    def set_ud_data(self, jobset_id: str, ref, ud_data: Optional[dict]
+    def set_user_data(self, jobset_id: str, ref, user_data: Optional[dict]
                     ) -> JobRecord:
-        """[sync] job의 ud_data 교체 — ref는 job_key(str) 또는 merge_id(str,
+        """[sync] job의 user_data 교체 — ref는 job_key(str) 또는 merge_id(str,
         job_key 미매칭 시) 또는 job_id(int). 갱신 레코드를 jobs_updated로
         발행한다."""
         jobset_id = self._jsid(jobset_id)
         rec = self._find_job(jobset_id, ref)
-        new = self.store.update_job(dc_replace(rec, ud_data=ud_data))
+        new = self.store.update_job(dc_replace(rec, user_data=user_data))
         self._relay_jobs_changed(jobset_id, [new])
         return new
 

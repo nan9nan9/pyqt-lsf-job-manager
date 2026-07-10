@@ -94,14 +94,14 @@ class DemoWindow(QWidget):
     # --- 사용자 명령 (비동기 — 결과는 전부 Signal로) ----------------------
     def add_jobs(self):
         """CREATE 단계 — job은 별도 jobset을 만들어 **merge로 흡수**한다
-        (v9: 생성 후 추가는 merge로만). merge_id(논리 키)와 ud_data(실제
+        (v9: 생성 후 추가는 merge로만). merge_id(논리 키)와 user_data(실제
         실행 정보)를 함께 싣는다. 흡수된 CREATED 행이 표에 바로 쌓인다."""
         n = len(self.js.jobs())
         batch = self.mgr.create_jobset(
             [wrapper(DEFAULT_WRAPPER, "-q", "normal", f"run_{n + i}.sp")
              for i in range(N_JOBS)],
             merge_ids=[f"run_{n + i}" for i in range(N_JOBS)],
-            ud_datas=[{"case": f"run_{n + i}.sp"} for i in range(N_JOBS)])
+            user_datas=[{"case": f"run_{n + i}.sp"} for i in range(N_JOBS)])
         if not self.mgr.can_merge(self.js, batch):
             self.mgr.close(batch)             # 활성 job 존재 — 흡수 불가
             self.status.setText("추가 불가 — 활성 job 존재 (먼저 완료/kill)")
@@ -130,7 +130,7 @@ class DemoWindow(QWidget):
         fix = self.mgr.create_jobset(
             [shlex.split(r.command) for r in failed],
             merge_ids=[r.merge_id for r in failed],
-            ud_datas=[r.ud_data for r in failed], label="rerun-fix")
+            user_datas=[r.user_data for r in failed], label="rerun-fix")
         self.mgr.merge(self.js, fix)              # 같은 merge_id → CREATED로 교체
         self.mgr.submit(self.js, auto_poll=False)      # 전체 재실행
         self.mgr.start_polling(self.js, 1.0)

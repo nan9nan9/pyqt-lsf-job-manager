@@ -109,11 +109,11 @@ class JobRecord:
     # 레코드 내용으로 replace한다(물리 키 job_key는 유지 → 테이블 행 연속).
     # None이면 merge에서 항상 신규 추가. jobset 내 유일해야 한다(None 제외).
     merge_id: Optional[str] = None
-    # ud_data: 사용자 정의 데이터(dict, JSON 직렬화 가능해야 함) — 실제
+    # user_data: 사용자 정의 데이터(dict, JSON 직렬화 가능해야 함) — 실제
     # run command 등 GUI가 임의 정보를 싣는 용도. 라이브러리는 해석하지
     # 않고 보존만 한다. frozen 레코드 안의 dict이므로 내용을 제자리에서
-    # 고치지 말고 set_ud_data로 교체할 것.
-    ud_data: Optional[dict] = None
+    # 고치지 말고 set_user_data로 교체할 것.
+    user_data: Optional[dict] = None
 
     @property
     def job_key(self) -> str:
