@@ -74,36 +74,8 @@ class JobSetManager:
                     js, array_job_ids=js.array_job_ids + [array_job_id]))
 
     # ------------------------------------------------------------------
-    # job 추가 (FR-5.4)
+    # job 추가 (FR-5.4) — 생성은 create_jobs, 이후 추가는 merge_from만
     # ------------------------------------------------------------------
-    def add_job(self, jobset_id: str, record: JobRecord, *,
-                sync_lsf: bool = True) -> JobRecord:
-        """job을 jobset에 편입. sync_lsf=True면 bmod -g로 LSF group도 동기화."""
-        if record.jobset_id != jobset_id:
-            record = replace(record, jobset_id=jobset_id)
-        with self._meta_lock:
-            js = self.store.get_jobset(jobset_id)
-            # 동일 job_key 중복 거부 — store.add_job은 upsert라 조용히
-            # 기존 레코드를 덮어쓴다(merge의 충돌 선검사와 동일 이유)
-            try:
-                self.store.get_job(jobset_id, record.job_key)
-            except JobNotFoundError:
-                pass
-            else:
-                raise ValueError(
-                    f"job 이름 중복: {jobset_id}/{record.job_key} — "
-                    f"기존 레코드를 덮어쓸 수 없습니다 (먼저 remove_job)")
-            rec = self.store.add_job(record)
-            # 수동 추가는 intended_count도 증가 (불변식 유지, FR-5.2)
-            jobs_n = len(self.store.get_jobs(jobset_id))
-            if jobs_n > js.intended_count:
-                self.store.update_jobset(
-                    replace(self.store.get_jobset(jobset_id),
-                            intended_count=jobs_n))
-        if sync_lsf and rec.job_id is not None and js.lsf_group_paths:
-            self.command.bmod_group([rec.job_id], js.lsf_group_paths[0])
-        return rec
-
     def create_jobs(self, jobset_id: str,
                     records: Sequence[JobRecord]) -> List[JobRecord]:
         """제출 전(CREATED) 레코드 일괄 생성 — 바구니 누적 (FR-5.4 확장).
@@ -253,22 +225,6 @@ class JobSetManager:
             if js.intended_count != 0:
                 self.store.update_jobset(replace(js, intended_count=0))
         return jobs
-
-    def remove_job(self, jobset_id: str, job_key: str) -> JobRecord:
-        """job을 jobset에서 제외하고 제거된 레코드를 반환 (add_job의 역연산).
-        제거한 몫만큼 intended_count도 줄여 요약 불변식(총합 == intended_count,
-        FR-5.2)을 유지한다 — 줄이지 않으면 빈 슬롯이 유령 CREATED로 되살아난다.
-        LSF의 실제 job은 죽이지 않는다(저장소 추적에서만 제외)."""
-        with self._meta_lock:
-            js = self.store.get_jobset(jobset_id)
-            rec = self.store.remove_job(jobset_id, job_key)   # 없으면 예외
-            jobs_n = len(self.store.get_jobs(jobset_id))
-            new_intended = max(jobs_n, js.intended_count - 1)
-            if new_intended != js.intended_count:
-                self.store.update_jobset(replace(
-                    self.store.get_jobset(jobset_id),
-                    intended_count=new_intended))
-        return rec
 
     # ------------------------------------------------------------------
     # 손실 감지 (FR-5.3)

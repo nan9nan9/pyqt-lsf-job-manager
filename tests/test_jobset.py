@@ -6,7 +6,6 @@ import pytest
 from lsfmgr import JobSpec, JobState
 from tests.conftest import submit_cmds
 from lsfmgr.errors import LsfmgrError
-from lsfmgr.states import JobRecord
 
 
 @pytest.fixture
@@ -68,25 +67,8 @@ def test_close_after_terminal(qtbot, manager, fake_lsf, submitted):
 
 
 # ----------------------------------------------------------------------
-# add_job (FR-5.4)
+# remove_job — intended_count 정합 (유령 CREATED 방지)
 # ----------------------------------------------------------------------
-def test_add_job_with_lsf_sync(qtbot, manager, fake_lsf, submitted):
-    # 외부에서 submit된 job을 편입
-    cmd = manager.command
-    ext_id = cmd.bsub("external job", job_name="ext_1")
-    rec = JobRecord(job_id=ext_id, array_index=None, jobset_id=submitted,
-                    lsf_job_name="ext_1", state=JobState.PEND,
-                    command="external job")
-    manager.add_job(submitted, rec, sync_lsf=True)
-
-    js = manager.store.get_jobset(submitted)
-    assert js.intended_count == 11             # 불변식 유지 위해 증가
-    assert len(manager.get_jobs(submitted)) == 11
-    # bmod -g 호출됨
-    assert any("-g" in c for c in fake_lsf.calls_of("bmod"))
-    assert fake_lsf.jobs[str(ext_id)].group == js.lsf_group_paths[0]
-
-
 def test_remove_job_decrements_intended_count(qtbot, manager, fake_lsf, submitted):
     # 10건 중 1건 제거 → intended_count 감소, 유령 CREATED 없이 합계 유지
     victim = manager.get_jobs(submitted)[0]
@@ -100,15 +82,9 @@ def test_remove_job_decrements_intended_count(qtbot, manager, fake_lsf, submitte
     assert rec.job_key == victim.job_key       # 제거된 레코드 반환
 
     s = manager.summary(submitted)
-    assert s["total"] == 9                      # add_job의 역연산 — intended 감소
+    assert s["total"] == 9                      # intended 함께 감소
     assert len(manager.get_jobs(submitted)) == 9
     assert sum(v for k, v in s.items() if k != "total") == 9  # 유령 CREATED 없음
-
-    # 제거 후 재추가 → 왕복 일관성 (다시 10)
-    manager.add_job(submitted, victim, sync_lsf=False)
-    s2 = manager.summary(submitted)
-    assert s2["total"] == 10
-    assert sum(v for k, v in s2.items() if k != "total") == 10
 
 
 # ----------------------------------------------------------------------

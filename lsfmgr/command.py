@@ -1,4 +1,4 @@
-"""LsfCommand — bsub/bjobs/bkill/bhist/bmod/bgdel subprocess 래퍼.
+"""LsfCommand — bsub/bjobs/bkill/bhist/bgdel subprocess 래퍼.
 
 Qt 비의존 순수 Python (§8 원칙). shell 미경유, runner 주입으로 mock 테스트 가능
 (NFR-8). chunking + ARG_MAX 검사 내장 (NFR-5).
@@ -696,11 +696,11 @@ class LsfCommand:
         return self._run_or_nomatch(argv, self.config.kill_timeout_s) is not None
 
     # ------------------------------------------------------------------
-    # bmod / bgdel
+    # bgdel (close 시 group 정리)
     # ------------------------------------------------------------------
     def _run_lenient(self, argv: List[str], what: str) -> None:
         """부가 작업용 실행 — timeout 포함 어떤 실패도 경고 로그만 남기고
-        호출자에게 전파하지 않는다 (bmod/bgdel은 실패해도 본 작업과 무관)."""
+        호출자에게 전파하지 않는다 (bgdel은 실패해도 본 작업과 무관)."""
         try:
             res = self._run(argv, self.config.kill_timeout_s)
         except subprocess.TimeoutExpired:
@@ -708,16 +708,6 @@ class LsfCommand:
             return
         if res.returncode != 0:
             log.warning("%s 실패 (무시): %s", what, res.stderr.strip())
-
-    def bmod_group(self, job_ids: Sequence[int], group_path: str) -> None:
-        """기존 job을 LSF group에 편입 (FR-5.4 sync_lsf)."""
-        ids = [str(i) for i in job_ids]
-        base = self._prog_len(self.config.bmod_path) + len(group_path) + 10
-        for chunk in chunk_args(ids, self.config.chunk_size,
-                                self.config.arg_max, base):
-            self._run_lenient(
-                cmd_tokens(self.config.bmod_path) + ["-g", group_path] + chunk,
-                "bmod -g")
 
     def bgdel(self, group_path: str) -> None:
         """LSF group 삭제 (FR-5.7 close)."""

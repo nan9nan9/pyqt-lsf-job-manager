@@ -154,7 +154,6 @@ def mocklsf_paths(wrapper: str = DEFAULT_WRAPPER) -> dict:
         "bjobs_path": os.path.join(BIN, "bjobs"),
         "bkill_path": os.path.join(BIN, "bkill"),
         "bhist_path": os.path.join(BIN, "bhist"),
-        "bmod_path": os.path.join(BIN, "bmod"),
         "bgdel_path": os.path.join(BIN, "bgdel"),
     }
 

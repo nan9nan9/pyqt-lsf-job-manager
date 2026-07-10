@@ -236,9 +236,9 @@ def test_transition_rejects_key_fields(store):
 
 
 # ----------------------------------------------------------------------
-# R3-15: bmod/bgdel timeout이 호출자로 전파되던 문제 — 경고 후 진행
+# R3-15: bgdel timeout이 호출자로 전파되던 문제 — 경고 후 진행
 # ----------------------------------------------------------------------
-def test_bmod_bgdel_timeout_swallowed(fake_lsf):
+def test_bgdel_timeout_swallowed(fake_lsf):
     import subprocess
     from lsfmgr.command import LsfCommand
     from lsfmgr.config import LsfConfig
@@ -247,5 +247,4 @@ def test_bmod_bgdel_timeout_swallowed(fake_lsf):
         raise subprocess.TimeoutExpired(argv, timeout)
 
     cmd = LsfCommand(LsfConfig(), timeout_runner)
-    cmd.bmod_group([1, 2], "/g/x")               # 예외 없이 경고만
-    cmd.bgdel("/g/x")
+    cmd.bgdel("/g/x")                            # 예외 없이 경고만

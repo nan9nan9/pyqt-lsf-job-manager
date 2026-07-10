@@ -25,8 +25,7 @@ CALL_ONLY_KEYS = frozenset({"label", "tags", "description"})
 MANAGER_ONLY_KEYS = frozenset({
     "chunk_size", "default_queue", "lsf_group_root",
     "script_dir", "arg_max",
-    "bsub_path", "bjobs_path", "bkill_path", "bhist_path", "bmod_path",
-    "bgdel_path",
+    "bsub_path", "bjobs_path", "bkill_path", "bhist_path", "bgdel_path",
     "kill_status_policy", "kill_max_retry", "kill_retry_delay_s",
     "progress_min_interval_s", "progress_min_step_ratio",
     "poll_runtime_updates", "submit_finished_on_gate_reject",

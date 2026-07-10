@@ -44,7 +44,7 @@ log = logging.getLogger("lsfmgr.manager")
 
 #: LsfConfig 필드로 직접 전달되는 manager 전용 키
 _CONFIG_KEYS = ("bsub_path", "bjobs_path", "bkill_path", "bhist_path",
-                "bmod_path", "bgdel_path", "script_dir", "lsf_group_root",
+                "bgdel_path", "script_dir", "lsf_group_root",
                 "arg_max", "default_queue", "chunk_size",
                 "kill_status_policy", "kill_max_retry", "kill_retry_delay_s",
                 "progress_min_interval_s", "progress_min_step_ratio",
@@ -574,11 +574,6 @@ class LsfJobManager(QObject):
         if not hits:
             raise JobNotFoundError(f"{jobset_id}/{ref}")
         return hits[0]
-
-    def add_job(self, jobset_id: str, record: JobRecord, *,
-                sync_lsf: bool = True) -> JobRecord:
-        """[sync] job 편입 (sync_lsf=True면 bmod -g — LSF 호출 포함)."""
-        return self.jobsets.add_job(jobset_id, record, sync_lsf=sync_lsf)
 
     def add_handler(self, jobset_id: str, name: str,
                     fn: "Callable[[HandlerContext], Any]", *,

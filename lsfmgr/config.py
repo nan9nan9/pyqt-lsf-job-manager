@@ -20,7 +20,6 @@ class LsfConfig:
     bjobs_path: CmdPath = "bjobs"
     bkill_path: CmdPath = "bkill"
     bhist_path: CmdPath = "bhist"
-    bmod_path: CmdPath = "bmod"
     bgdel_path: CmdPath = "bgdel"
 
     default_queue: str = ""              # 빈 문자열이면 -q 미지정

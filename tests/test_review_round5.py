@@ -23,7 +23,7 @@ import pytest
 from lsfmgr import InMemoryStore, LsfJobManager
 from lsfmgr.errors import LsfmgrError
 from lsfmgr.options import MAX_RETRY_DELAY_S, Options
-from lsfmgr.states import JobRecord, JobState
+from lsfmgr.states import JobState
 from tests.fake_lsf import FakeLsf
 from tests.conftest import submit_cmds
 
@@ -68,29 +68,6 @@ def test_merge_during_active_submit_rejected(qtbot, config):
     finally:
         lsf.gate.set()
         mgr.shutdown()
-
-
-# ----------------------------------------------------------------------
-# 2. add_job 동일 job_key 거부
-# ----------------------------------------------------------------------
-def test_add_job_duplicate_key_rejected(manager):
-    jsid = manager.create_jobset(intended_count=1, label="dup").id
-    rec = JobRecord(job_id=111, array_index=None, jobset_id=jsid,
-                    lsf_job_name="manual_1", state=JobState.RUN,
-                    command="echo a")
-    manager.add_job(jsid, rec, sync_lsf=False)
-    dup = JobRecord(job_id=222, array_index=None, jobset_id=jsid,
-                    lsf_job_name="manual_1", state=JobState.PEND,
-                    command="echo b")
-    with pytest.raises(ValueError):
-        manager.add_job(jsid, dup, sync_lsf=False)
-    kept = manager.get_jobs(jsid)[0]
-    assert kept.job_id == 111 and kept.command == "echo a"
-    # remove 후 재추가는 허용 (정상 교체 경로)
-    # PEND(활성) 편입 레코드 — v9 가드상 force로 레코드만 제거
-    manager.remove_job(jsid, job_key="manual_1", force=True)
-    manager.add_job(jsid, dup, sync_lsf=False)
-    assert manager.get_jobs(jsid)[0].job_id == 222
 
 
 # ----------------------------------------------------------------------
