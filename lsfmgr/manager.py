@@ -35,7 +35,7 @@ from .options import (
 )
 from .qt import QCoreApplication, QObject, QRunnable, QThreadPool, QTimer, Signal
 from .resubmit import ResubmitCoordinator, ResubmitPlan
-from .reports import KillProgress, ReconcileReport, SubmitProgress
+from .reports import KillProgress, SubmitProgress
 from .states import JobRecord, JobSetRecord, JobState
 from .store.base import JobSetStore
 from .store.memory import InMemoryStore
@@ -96,17 +96,8 @@ class LsfJobManager(QObject):
         self.config = (dc_replace(base_cfg, **cfg_updates)
                        if cfg_updates else base_cfg)
 
-        # --- Store 선택: store 객체 > persistent=True > InMemory(기본) ---
-        if store is not None:
-            self.store = store
-        elif mgr_only.get("persistent"):
-            from .store.sqlite import SqliteStore
-            db_path = mgr_only.get(
-                "db_path", os.path.join(os.path.expanduser("~"),
-                                        ".lsfmgr", "jobsets.db"))
-            self.store = SqliteStore(db_path)
-        else:
-            self.store = InMemoryStore()
+        # --- Store: 주입 객체 > InMemory(기본) ---
+        self.store = store if store is not None else InMemoryStore()
 
         # --- ①내장+config 기본값 위에 ②manager kwargs를 merge ---
         cfg = self.config
@@ -174,7 +165,7 @@ class LsfJobManager(QObject):
         # jobset별 마지막 polling interval — resubmit 후 polling 재개에 사용
         self._poll_intervals: Dict[str, float] = {}
 
-        self._misc_pool = QThreadPool(self)     # reconcile 등 단발 작업
+        self._misc_pool = QThreadPool(self)     # 단발 작업 (detail 조회 등)
         self._misc_pool.setMaxThreadCount(2)
         self._shutdown_done = False
 
@@ -786,46 +777,6 @@ class LsfJobManager(QObject):
         return self.store.list_jobsets()
 
     # ------------------------------------------------------------------
-    # Sqlite 전용 (FR-6) — InMemory면 PersistenceNotSupportedError
-    # ------------------------------------------------------------------
-    @property
-    def persistent(self) -> bool:
-        """[sync] Store 모드 판별 — GUI 복원 메뉴 분기용."""
-        return self.store.persistent
-
-    def list_orphan_jobsets(self) -> List[JobSetRecord]:
-        """[sync, snapshot] 이전 세션 미종결 JobSet (FR-6.1)."""
-        return self.store.list_orphan_jobsets()
-
-    def recover_jobset(self, jobset_id: str) -> JobSet:
-        """[sync] orphan을 현재 세션으로 복원 — JobSet 핸들 반환 (v7 §5)."""
-        self.store.recover_jobset(jobset_id)
-        return self.jobset(jobset_id)
-
-    def reconcile(self, jobset_id: str) -> None:
-        """[async→Signal] 저장 상태 vs LSF 실상태 대조 (worker 스레드).
-        완료 시 jobset_updated Signal."""
-        if not self.store.persistent:
-            raise self.store._not_persistent()
-        self._misc_pool.start(_ReconcileTask(self, jobset_id))
-
-    def search_all_sessions(self, **kwargs) -> List[JobSetRecord]:
-        return self.store.search_all_sessions(**kwargs)
-
-    def get_history(self, jobset_id: str) -> List[Dict[str, Any]]:
-        return self.store.get_history(jobset_id)
-
-    def stats(self, since: Optional[datetime] = None,
-              until: Optional[datetime] = None) -> Dict[str, Any]:
-        return self.store.stats(since, until)
-
-    def archive(self, older_than_days: int = 30) -> int:
-        return self.store.archive(older_than_days)
-
-    def export_jobset(self, jobset_id: str, path: str) -> None:
-        self.store.export_jobset(jobset_id, path)
-
-    # ------------------------------------------------------------------
     # 수명 관리
     # ------------------------------------------------------------------
     def _try_hook_about_to_quit(self) -> None:
@@ -864,9 +815,8 @@ class LsfJobManager(QObject):
             pass
         # 각 컴포넌트를 best-effort로 종료 — 하나가 예외를 던져도 나머지 스레드는
         # 반드시 join해야 좀비/core dump가 안 남는다.
-        # misc_pool(reconcile 등)은 polling보다 먼저 drain — reconcile 태스크가
-        # start_polling을 호출하므로, 진행 중인 태스크가 폴링에 새 작업을 거는
-        # 것을 막고 종료한다.
+        # misc_pool은 polling보다 먼저 drain — 단발 태스크가 폴링에 새
+        # 작업을 거는 것을 막고 종료한다.
         for name, fn in (("handlers", self.handlers.shutdown),
                          ("resubmitter", self._resubmitter.shutdown),
                          ("submitter", self.submitter.shutdown),
@@ -986,41 +936,6 @@ class _CallTask(QRunnable):
             self._fn()
         except Exception:                    # noqa: BLE001 — CS-5
             log.exception("백그라운드 작업 실패")
-
-
-class _ReconcileTask(QRunnable):
-    """recover된 jobset의 상태 대조 — worker 스레드 (FR-6.2)."""
-
-    def __init__(self, mgr: LsfJobManager, jobset_id: str):
-        super().__init__()
-        self.setAutoDelete(True)
-        self.mgr = mgr
-        self.jobset_id = jobset_id
-
-    def run(self):
-        try:
-            result = self.mgr.querier.query(self.jobset_id)
-            report = ReconcileReport(
-                jobset_id=self.jobset_id,
-                checked=result.checked,
-                transitioned=len(result.changed), lost=len(result.lost),
-                summary=dict(result.summary))
-            log.info("reconcile %s: %d건 갱신, %d건 LOST",
-                     self.jobset_id, report.transitioned, report.lost)
-        except Exception as e:               # noqa: BLE001 — CS-5
-            log.exception("reconcile 실패: %s", self.jobset_id)
-            self.mgr.error_occurred.emit(self.jobset_id, repr(e))
-            return
-        self.mgr.jobset_updated.emit(self.jobset_id, result.summary)
-        if result.changed:
-            self.mgr.jobs_updated.emit(self.jobset_id, list(result.changed))
-        for rec in result.lost:
-            self.mgr.job_lost.emit(self.jobset_id, rec)
-        # reconcile 후 미종결 job이 남으면 polling 자동 시작 (README §6)
-        if not self.mgr._shutdown_done and any(
-                r.state.is_on_lsf
-                for r in self.mgr.store.get_jobs(self.jobset_id)):
-            self.mgr.start_polling(self.jobset_id)
 
 
 def _common_spec_options(specs: List[JobSpec]) -> Dict[str, Any]:

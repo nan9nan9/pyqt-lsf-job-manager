@@ -73,7 +73,7 @@ Signal 은 두 계층이다.
 | `submit_started` | `(jobset_id)` | `submit` · `submit_wrapper` · `submit_bulk` · `submit_array` · `resubmit_jobs` — 제출 시작 즉시 (`pre_submit` 지정 시엔 게이트 통과 후) |
 | `submit_progress` | `(jobset_id, done, total)` | 위 submit 계열 · `resubmit_jobs` — 제출 진행 중(throttled) |
 | `submit_finished` | `(jobset_id, SubmitReport)` | 위 submit 계열 · `resubmit_jobs` 완료 · `cancel_submit`(중단 마무리) |
-| `jobset_updated` | `(jobset_id, summary)` | **submit 완료(초기 PEND)** · `start_polling`(주기) · `query_once`(1회) · `reconcile` — 상태 갱신 |
+| `jobset_updated` | `(jobset_id, summary)` | **submit 완료(초기 PEND)** · `start_polling`(주기) · `query_once`(1회) — 상태 갱신 |
 | `jobs_updated` | `(jobset_id, [JobRecord])` | **submit 완료(전체 초기 레코드)** · polling **변경분이 있을 때만** |
 | `job_lost` | `(jobset_id, JobRecord)` | `start_polling` · `query_once` · `detect_lost` — LSF 에서 소실 확정 |
 | `kill_started` | `(jobset_id)` | `kill_jobset` · `kill_jobs(jobset_id=...)` 접수 즉시(동기) — 착수 피드백 |
@@ -93,7 +93,7 @@ JobSet 을 한 곳에서 보면 `mgr.*` 를 쓴다.
 | `js.jobs_updated` | `([JobRecord])` | `jobs_updated` | 상태 변경분 배치 — 단일 JobSet 표의 행 갱신용 (jsid 필터 불필요) |
 | `js.submit_progress` | `(done, total)` | `submit_progress` | submit 계열 · `js.resubmit_jobs` |
 | `js.submit_finished` | `(SubmitReport)` | `submit_finished` | submit 계열 · `js.resubmit_jobs` · `js.cancel` |
-| `js.jobset_updated` | `(summary)` | `jobset_updated` | submit 완료(초기 PEND) · `js.start_polling` · `js.refresh` · `js.reconcile` |
+| `js.jobset_updated` | `(summary)` | `jobset_updated` | submit 완료(초기 PEND) · `js.start_polling` · `js.refresh` |
 | `js.jobs_failed` | `([JobRecord])` | (파생) | submit 완료 시 `SUBMIT_FAILED` + polling 중 실패 상태 전이분 |
 | `js.kill_started` | `()` | `kill_started` | `js.kill` · `js.kill_jobs` 접수 즉시(동기) |
 | `js.kill_progress` | `(done, total)` | `kill_progress` | chunk kill 진행(throttled, 마지막은 100%) |

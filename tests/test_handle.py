@@ -243,16 +243,6 @@ def test_call_kwargs_typo_typeerror(qtbot, manager):
         manager.submit(["x"], wokers=8)
 
 
-def test_persistent_kwarg_selects_sqlite(tmp_path, fake_lsf, qtbot, config):
-    mgr = LsfJobManager(config=config, runner=fake_lsf, persistent=True,
-                        db_path=str(tmp_path / "opt.db"))
-    try:
-        assert mgr.persistent is True
-        assert (tmp_path / "opt.db").exists()
-    finally:
-        mgr.shutdown()
-
-
 def test_verify_kill_manager_default(qtbot, fake_lsf, config):
     mgr = LsfJobManager(config=config, runner=fake_lsf, verify_kill=True)
     try:
@@ -281,25 +271,6 @@ def test_auto3_shutdown_on_about_to_quit(qtbot, qapp, fake_lsf, config):
 # ----------------------------------------------------------------------
 # 복원 → 핸들 반환 (v7 §5)
 # ----------------------------------------------------------------------
-def test_recover_returns_handle(qtbot, fake_lsf, config, tmp_path):
-    from lsfmgr import SqliteStore
-    db = str(tmp_path / "h.db")
-    m1 = LsfJobManager(store=SqliteStore(db), config=config, runner=fake_lsf)
-    jsid = m1.submit_bulk([JobSpec(command="x")])
-    with qtbot.waitSignal(m1.submit_finished, timeout=10000):
-        pass
-    m1.shutdown()
-
-    m2 = LsfJobManager(store=SqliteStore(db), config=config, runner=fake_lsf)
-    try:
-        orphan = m2.list_orphan_jobsets()[0]
-        js = m2.recover_jobset(orphan.jobset_id)
-        assert isinstance(js, JobSet)
-        assert js.summary["total"] == 1
-    finally:
-        m2.shutdown()
-
-
 # ----------------------------------------------------------------------
 # is_active / is_inactive — 재수행 판단용
 # inactive = 전원 terminal(DONE/EXIT/SUBMIT_FAILED/LOST), active = 그 반대

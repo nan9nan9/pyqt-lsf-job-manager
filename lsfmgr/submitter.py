@@ -404,7 +404,7 @@ class BulkSubmitter(QObject):
 
         def do_launch():
             # 레코드 선생성 → 요약 불변식(합계==intended). 상태는 곧장
-            # SUBMITTING("제출 중"). 배치 API 필수(Sqlite caller 블로킹 방지).
+            # SUBMITTING("제출 중"). 배치 API로 caller 블로킹을 방지한다.
             created = self.store.add_jobs([
                 JobRecord(job_id=None, array_index=None, jobset_id=jobset_id,
                           lsf_job_name=f"{jobset_id}_{idx}",
@@ -505,7 +505,7 @@ class BulkSubmitter(QObject):
             ctx.pool.waitForDone(-1)
         # QTimer 대기 중인 재시도는 이벤트 루프가 곧 끝나면 영영 발화하지
         # 않는다 — 원장 잔류분을 여기서 확정해야 RETRY_WAIT가 비terminal로
-        # 잔존(persistent 모드에서는 DB 오염)하지 않고 finished도 발행된다.
+        # 잔존하지 않고 finished도 발행된다.
         # waitForDone 이후에는 원장에 새 항목이 추가되지 않는다.
         for ctx in contexts:
             with ctx.lock:
@@ -582,7 +582,7 @@ class BulkSubmitter(QObject):
           바뀐(또는 remove_job으로 소실된) 키는 조용히 건너뛴다.
         - 이전 시도의 실패 잔재(fail_reason/fail_message/retry_count)를 함께
           리셋한다 — 안 지우면 '제출된 적 없는' CREATED job이 실패 이력을
-          달고 UI/persistent store에 남는다 (_task_succeeded가 성공 시
+          달고 UI/store에 남는다 (_task_succeeded가 성공 시
           fail_reason=None을 명시 전달하는 것과 대칭).
         - CREATED 복귀도 changed로 발행한다 — CREATED는 폴링 대상(is_on_lsf)
           이 아니라 여기서 안 알리면 UI 표가 SUBMITTING에 영구 고착된다.

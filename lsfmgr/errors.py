@@ -8,8 +8,6 @@ class LsfmgrError(Exception):
     """lsfmgr 모든 예외의 base."""
 
 
-class PersistenceNotSupportedError(LsfmgrError):
-    """InMemoryStore에서 Sqlite 전용 API 호출 시 발생."""
 
 
 class JobSetNotFoundError(LsfmgrError):

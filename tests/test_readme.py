@@ -6,8 +6,6 @@ import pytest
 from lsfmgr import (
     JobState,
     LsfJobManager,
-    PersistenceNotSupportedError,
-    SqliteStore,
 )
 
 
@@ -73,51 +71,7 @@ def test_count_invalid(manager):
 
 
 # ----------------------------------------------------------------------
-# §6 세션 복원 — js.reconcile() 핸들 메서드 + 이후 자동 polling
 # ----------------------------------------------------------------------
-def test_readme_restore_flow(qtbot, fake_lsf, config, tmp_path):
-    db = str(tmp_path / "restore.db")
-
-    # 세션 1: submit 후 프로세스 kill 가정
-    m1 = LsfJobManager(store=SqliteStore(db), config=config, runner=fake_lsf)
-    js1 = m1.submit([f"r {i}" for i in range(6)], mode="bulk",
-                    auto_poll=False)
-    with qtbot.waitSignal(js1.submit_finished, timeout=10000):
-        pass
-    m1.shutdown()
-
-    # 죽어있는 동안: 절반 DONE, 나머지는 계속 RUN
-    recs = m1.store.get_jobs(js1.id)
-    for r in recs[:3]:
-        fake_lsf.set_job(r.job_id, "DONE", 0)
-    for r in recs[3:]:
-        fake_lsf.set_job(r.job_id, "RUN")
-
-    # 세션 2: README §6 흐름 그대로
-    m2 = LsfJobManager(store=SqliteStore(db), config=config, runner=fake_lsf)
-    try:
-        summaries = []
-        for rec in m2.list_orphan_jobsets():
-            js = m2.recover_jobset(rec.jobset_id)      # 핸들 반환
-            js.jobset_updated.connect(summaries.append)
-            with qtbot.waitSignal(js.jobset_updated, timeout=10000):
-                js.reconcile()                         # 비동기
-        assert summaries[-1]["DONE"] == 3
-        assert summaries[-1]["RUN"] == 3
-        # 미종결(RUN) job이 남았으므로 polling 자동 시작 → 추가 갱신 도착
-        fake_lsf.set_all("DONE", 0)
-        qtbot.waitUntil(lambda: summaries[-1].get("DONE", 0) == 6,
-                        timeout=15000)
-    finally:
-        m2.shutdown()
-
-
-def test_reconcile_on_inmemory_handle_raises(qtbot, manager, fake_lsf):
-    js = manager.submit(["x"], auto_poll=False)
-    with pytest.raises(PersistenceNotSupportedError):
-        js.reconcile()
-
-
 # ----------------------------------------------------------------------
 # §3.3 스냅샷 조회 계약
 # ----------------------------------------------------------------------

@@ -12,28 +12,10 @@ from lsfmgr import (
     JobState,
     LsfConfig,
     LsfJobManager,
-    PersistenceNotSupportedError,
-    SqliteStore,
 )
 
 
 # ----------------------------------------------------------------------
-# persistent 모드 판별 및 InMemory 예외 (수용 기준 11)
-# ----------------------------------------------------------------------
-def test_persistent_property(manager, sqlite_manager):
-    assert manager.persistent is False
-    assert sqlite_manager.persistent is True
-
-
-def test_inmemory_manager_rejects_persistent_api(manager):
-    with pytest.raises(PersistenceNotSupportedError):
-        manager.list_orphan_jobsets()
-    with pytest.raises(PersistenceNotSupportedError):
-        manager.reconcile("x")
-
-
-# ----------------------------------------------------------------------
-# shutdown — 잔여 스레드 없음 (수용 기준 13)
 # ----------------------------------------------------------------------
 def test_shutdown_joins_threads(qtbot, fake_lsf, config):
     before = set(threading.enumerate())
@@ -103,38 +85,6 @@ def test_shutdown_during_submit_preserves_job_ids(qtbot, fake_lsf, config):
 # ----------------------------------------------------------------------
 # 세션 복원 end-to-end (수용 기준 12)
 # ----------------------------------------------------------------------
-def test_session_restore_recover_reconcile(qtbot, fake_lsf, config, tmp_path):
-    db = str(tmp_path / "restore.db")
-
-    # --- 세션 1: submit 후 프로세스 kill 가정 (shutdown 없이 store만 폐기) ---
-    mgr1 = LsfJobManager(store=SqliteStore(db), config=config, runner=fake_lsf)
-    jobs = [JobSpec(command=f"r {i}") for i in range(10)]
-    with qtbot.waitSignal(mgr1.submit_finished, timeout=10000):
-        jsid = mgr1.submit_bulk(jobs)
-    mgr1.shutdown()             # (스레드 정리만 — closed 마킹 안 함)
-
-    # 죽어있는 동안 LSF에서는 job이 진행됨
-    fake_lsf.set_all("DONE", 0)
-    recs = mgr1.store.get_jobs(jsid)
-    fake_lsf.vanish_job(recs[0].job_id, in_bhist=False)    # 1개는 완전 소실
-
-    # --- 세션 2: orphan 감지 → recover → reconcile ---
-    mgr2 = LsfJobManager(store=SqliteStore(db), config=config, runner=fake_lsf)
-    orphans = mgr2.list_orphan_jobsets()
-    assert [o.jobset_id for o in orphans] == [jsid]
-
-    mgr2.recover_jobset(jsid)
-    with qtbot.waitSignal(mgr2.jobset_updated, timeout=10000) as blocker:
-        mgr2.reconcile(jsid)
-    _, summary = blocker.args
-    assert summary["DONE"] == 9
-    assert summary["LOST"] == 1
-    assert sum(v for k, v in summary.items() if k != "total") == 10
-    # 이력도 남았는지 확인
-    assert len(mgr2.get_history(jsid)) > 0
-    mgr2.shutdown()
-
-
 # ----------------------------------------------------------------------
 # GUI 응답성 — polling+submit 중 이벤트 루프 정지 없음 (수용 기준 7 축소판)
 # ----------------------------------------------------------------------

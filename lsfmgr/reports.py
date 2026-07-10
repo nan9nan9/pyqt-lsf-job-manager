@@ -88,11 +88,3 @@ class KillReport:
     errors: List[str] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
-class ReconcileReport:
-    """recover 후 저장 상태 vs LSF 실상태 대조 결과 (Sqlite 전용)."""
-    jobset_id: str
-    checked: int             # 조회 대상(is_on_lsf) job 수
-    transitioned: int        # 상태가 갱신된 job 수
-    lost: int                # LOST로 전이된 job 수
-    summary: Dict[str, int] = field(default_factory=dict)

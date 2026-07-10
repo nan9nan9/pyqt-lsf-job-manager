@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from lsfmgr import (JobRecord, JobSpec, JobState, LsfJobManager,
-                    SqliteStore)
+from lsfmgr import JobRecord, JobSpec, JobState, LsfJobManager
 from lsfmgr.jobset_core import detect_array_template
 from tests.test_store_contract import make_job, make_jobset
 
@@ -249,36 +248,6 @@ def test_array_bhist_fallback_per_element(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 # R3-13: SQLite commit 실패 시 pending 잔존 → 다음 commit에 유령 반영
 # ----------------------------------------------------------------------
-def test_sqlite_commit_failure_rolls_back(tmp_path):
-    import sqlite3
-    s = SqliteStore(str(tmp_path / "c.db"))
-    s.create_jobset(make_jobset("js1", n=1))
-    s.add_job(make_job("js1", 0))
-
-    orig_conn = s._conn
-    state = {"fail": True}
-
-    class FlakyCon:
-        """commit만 1회 실패시키는 connection 프록시."""
-        def __getattr__(self, name):
-            return getattr(orig_conn(), name)
-
-        def commit(self):
-            if state["fail"]:
-                state["fail"] = False
-                raise sqlite3.OperationalError("database is locked (주입)")
-            orig_conn().commit()
-
-    s._conn = lambda: FlakyCon()
-    with pytest.raises(sqlite3.OperationalError):
-        s.transition("js1", "js1_0", JobState.SUBMITTING)
-    # 실패분은 rollback — 이후 정상 쓰기에 유령 반영되면 안 됨
-    s.update_jobset(s.get_jobset("js1"))         # 무관한 쓰기 1회
-    assert s.get_job("js1", "js1_0").state is JobState.CREATED
-    assert s.get_history("js1") == [], "실패한 전이 이력이 유령 commit됨"
-    s.close()
-
-
 # ----------------------------------------------------------------------
 # R3-14: transition으로 키 필드 변경 시 이중 계상 → 거부
 # ----------------------------------------------------------------------

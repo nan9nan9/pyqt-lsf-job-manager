@@ -1,7 +1,6 @@
 """JobSetStore 추상 인터페이스 (Qt 비의존 순수 Python).
 
 공통 API(§4.2)는 두 백엔드가 동일 계약으로 구현하고,
-Sqlite 전용 API(§4.3)는 base에서 PersistenceNotSupportedError를 기본 제공한다.
 모든 public 메서드는 thread-safe여야 한다 (CS-1).
 """
 from __future__ import annotations
@@ -12,7 +11,7 @@ from typing import (
     Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple,
 )
 
-from ..errors import JobNotFoundError, PersistenceNotSupportedError
+from ..errors import JobNotFoundError
 from ..states import JobRecord, JobSetRecord, JobState
 
 #: transition_many 입력 1건 — (job_key, new_state, guard, fields)
@@ -23,8 +22,6 @@ TransitionSpec = Tuple[
 class JobSetStore(ABC):
     """JobSet/JobRecord 저장소 계약."""
 
-    #: SqliteStore=True — GUI에서 복원 메뉴 활성/비활성 분기용
-    persistent: bool = False
 
     # ------------------------------------------------------------------
     # JobSet CRUD
@@ -97,7 +94,7 @@ class JobSetStore(ABC):
         guard가 주어지면 lock 안에서 현재 레코드로 평가해 False면 전이를
         건너뛰고 None 반환 (CAS) — 스냅샷 기반 갱신(polling)이 그 사이
         바뀐 레코드(재제출 등)를 덮어쓰는 것을 막는다.
-        Sqlite 모드에서는 전이 이력 event를 기록한다 (§2.2)."""
+"""
 
     def transition_many(self, jobset_id: str,
                         specs: "Sequence[TransitionSpec]") -> List[JobRecord]:
@@ -105,7 +102,7 @@ class JobSetStore(ABC):
 
         specs: [(job_key, new_state, guard, fields_dict), ...].
         반환: 실제로 전이된 레코드 목록(guard 거부·키 소실분은 제외, 입력 순서).
-        Sqlite는 단일 트랜잭션으로 묶어 건당 commit(수 ms)을 없앤다 — 수만 건
+        구현은 일괄 처리로 건당 오버헤드를 없앤다 — 수만 건
         전이가 한 사이클에 몰릴 때 폴링 스레드 블로킹/WAL 락 독점을 막는다.
         기본 구현은 건당 transition (계약 유지)."""
         out: List[JobRecord] = []
@@ -122,7 +119,7 @@ class JobSetStore(ABC):
     @staticmethod
     def _reject_key_fields(fields: Dict[str, Any]) -> None:
         """transition의 키 필드 변경 거부 — 허용하면 옛 키의 레코드가
-        잔존해 한 job이 이중 계상되거나(sqlite) 키-레코드 불일치(memory)."""
+        잔존해 키-레코드 불일치가 생긴다."""
         for key in ("lsf_job_name", "jobset_id"):
             if key in fields:
                 raise ValueError(
@@ -146,41 +143,6 @@ class JobSetStore(ABC):
     # ------------------------------------------------------------------
     def close(self) -> None:
         """저장소 정리 (connection close 등). 기본은 no-op."""
-
-    # ------------------------------------------------------------------
-    # Sqlite 전용 API (§4.3) — InMemoryStore에서는 예외
-    # ------------------------------------------------------------------
-    def _not_persistent(self) -> PersistenceNotSupportedError:
-        return PersistenceNotSupportedError(
-            "이 기능은 SqliteStore(persistent=True)에서만 지원됩니다")
-
-    def list_orphan_jobsets(self) -> List[JobSetRecord]:
-        raise self._not_persistent()
-
-    def recover_jobset(self, jobset_id: str) -> JobSetRecord:
-        raise self._not_persistent()
-
-    def search_all_sessions(self, *, tag: Optional[str] = None,
-                            label: Optional[str] = None,
-                            since: Optional[datetime] = None
-                            ) -> List[JobSetRecord]:
-        raise self._not_persistent()
-
-    def get_history(self, jobset_id: str) -> List[Dict[str, Any]]:
-        raise self._not_persistent()
-
-    def stats(self, since: Optional[datetime] = None,
-              until: Optional[datetime] = None) -> Dict[str, Any]:
-        raise self._not_persistent()
-
-    def archive(self, older_than_days: int = 30) -> int:
-        raise self._not_persistent()
-
-    def vacuum(self) -> None:
-        raise self._not_persistent()
-
-    def export_jobset(self, jobset_id: str, path: str) -> None:
-        raise self._not_persistent()
 
 
 def make_summary(jobset: JobSetRecord,

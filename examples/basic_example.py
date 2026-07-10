@@ -4,11 +4,10 @@
 하나의 화면에서 lsfmgr 의 주요 기능을 모두 다룬다:
   - submit_wrapper 로 제출 + 진행률 바 / 취소   (QT-5/QT-6, rate limit)
   - job 마다 wrapper 커맨드 (customwrapper_sub 등) 또는 '혼합'
-  - 다중 JobSet 관리 + 요약 실시간 갱신        (Facade Signal, README §9)
+  - 다중 JobSet 관리 + 요약 실시간 갱신        (Facade Signal, README §8)
   - 선택 JobSet 의 job 단위 모니터링 테이블     (상태별 색, jobs_updated 배치)
   - kill 전략: 전체 / PEND만 / verify           (FR-3, KillReport — job_id 기반)
   - 실패 처리: retry(비정상 종료) / SUBMIT_FAILED / EXIT / detect_lost
-  - SQLite 영속 + 세션 복원                     (orphan → recover → reconcile, FR-6)
 
 제출은 wrapper 커맨드(예: `customwrapper_sub -q normal run_3.sp`)를 그대로 실행하고
 그 결과의 `Job <id>` 로 job 을 관리한다. 테스트 환경은 저장소 동봉 mocklsf 이며,
@@ -19,7 +18,6 @@
 import os
 import re
 import sys
-import tempfile
 from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -79,9 +77,6 @@ def make_logging_runner(bus: _LogBus):
 # 데모용 타이밍/실패 주입 — retry(SUBMIT_FAILED)·EXIT 상태를 관찰 가능하게 한다.
 configure_mocklsf(pend=(1, 4), run=(4, 10), submit_fail_rate=0.12,
                   exit_rate=0.12)
-
-# 세션 복원 데모용 영속 DB (lsfmgr JobSet 메타 저장소; mocklsf 상태와는 별개).
-DB = os.path.join(tempfile.gettempdir(), "lsfmgr_demo_basic.db")
 
 # job 상태별 색 (모니터링 테이블).
 _STATE_COLOR = {
@@ -232,14 +227,11 @@ class Dashboard(QWidget):
         top.addWidget(state_top)
         top.setStretchFactor(1, 1)
 
-        # --- 진행률 바 + 세션 복원 버튼 ---
+        # --- 진행률 바 ---
         self.bar = QProgressBar()
         self.bar.setFormat("submit %v/%m")
-        self.btn_restart = QPushButton("앱 재시작 시뮬 (orphan 복원)")
-        self.btn_restart.clicked.connect(self.restart_app)
         midbar = QHBoxLayout()
         midbar.addWidget(self.bar, stretch=1)
-        midbar.addWidget(self.btn_restart)
 
         # --- 하단: Facade 이벤트 로그 (실행 명령·job_id·상태 전이) ---
         self.log = QPlainTextEdit(readOnly=True)
@@ -252,7 +244,7 @@ class Dashboard(QWidget):
         lay.addWidget(self.log, stretch=1)
 
     # ------------------------------------------------------------------
-    # manager 바인딩 (최초 + 세션 복원 시 재바인딩)
+    # manager 바인딩
     # ------------------------------------------------------------------
     def _new_manager(self):
         """로깅 runner 를 주입한 manager 생성 (제출 명령/‏job_id 로그용)."""
@@ -437,31 +429,6 @@ class Dashboard(QWidget):
             return
         self._apply_jobs(js.jobs())
 
-    # ------------------------------------------------------------------
-    # 세션 복원 (07): 앱 비정상 종료 → 재시작 → orphan 복원 → reconcile
-    # ------------------------------------------------------------------
-    def restart_app(self):
-        if self.mgr is None:
-            return
-        self._log("*", "앱 비정상 종료 — JobSet 은 DB 에, job 은 (mock)LSF 에 잔존")
-        self.mgr.shutdown()                  # close_jobset 없이 폐기 → orphan
-        self.mgr = None
-        self.tree.clear()
-        self._items.clear()
-        self.jobtable.setRowCount(0)
-        # 잠시 후 '재시작' — 그동안 mocklsf 데몬은 계속 job 을 전이시킨다.
-        QTimer.singleShot(1500, self._recover)
-
-    def _recover(self):
-        self.bind_manager(self._new_manager())
-        orphans = self.mgr.list_orphan_jobsets()   # FR-6.1 (자동 복원 없음)
-        self._log("*", f"재시작 — orphan {len(orphans)}건 발견")
-        for rec in orphans:
-            js = self.mgr.recover_jobset(rec.jobset_id)   # 핸들 복원
-            self._add_row(js.id, rec.label)
-            js.reconcile()      # 죽어있던 동안의 DONE/EXIT/LOST 반영(비동기)
-            self._log(js.id, "recover + reconcile")
-
     def _append(self, line):
         """로그 한 줄 그대로 출력 (버스 Signal 슬롯)."""
         self.log.appendPlainText(line)
@@ -472,11 +439,11 @@ class Dashboard(QWidget):
 
 
 def new_manager(runner=None):
-    """② manager 계층 기본값 + mocklsf 경로 + 영속(세션 복원용) 로 생성.
+    """② manager 계층 기본값 + mocklsf 경로로 생성.
 
     runner 를 주면 subprocess 실행을 가로채 로깅한다(제출 명령/‏job_id).
     """
-    return LsfJobManager(persistent=True, db_path=DB, workers=8,
+    return LsfJobManager(workers=8,
                          default_queue="normal", max_retry=3,
                          runner=runner, **mocklsf_paths())
 
@@ -500,12 +467,6 @@ def main():
         QTimer.singleShot(300, win.submit)
     maybe_autoquit(app)
     app.exec()
-    if os.path.exists(DB) and not os.environ.get("LSFMGR_KEEP_DB"):
-        for p in (DB, DB + "-wal", DB + "-shm"):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
 
 
 if __name__ == "__main__":

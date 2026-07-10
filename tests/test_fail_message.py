@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-from lsfmgr import InMemoryStore, LsfJobManager, SqliteStore
+from lsfmgr import InMemoryStore, LsfJobManager
 from lsfmgr.states import JobState
 
 
@@ -149,22 +149,6 @@ def test_resubmit_clears_fail_message(qtbot, manager, fake_lsf):
     rec = js.jobs()[0]
     assert rec.state is JobState.PEND
     assert rec.fail_message is None
-
-
-def test_fail_message_persisted_in_sqlite(qtbot, sqlite_manager, fake_lsf,
-                                          tmp_path):
-    fake_lsf.fail_next_bsub = 10
-    with qtbot.waitSignal(sqlite_manager.submit_finished, timeout=10000):
-        js = sqlite_manager.submit(["echo a"], auto_poll=False, max_retry=0)
-    jsid = js.id
-
-    reopened = SqliteStore(str(tmp_path / "db.sqlite"))   # 새 세션으로 재오픈
-    try:
-        rec = reopened.get_jobs(jsid)[0]
-        assert rec.state is JobState.SUBMIT_FAILED
-        assert "queue unavailable" in rec.fail_message
-    finally:
-        reopened.close()
 
 
 def test_fetch_job_detail_signal_on_broken_bhist(qtbot, fake_lsf, config):

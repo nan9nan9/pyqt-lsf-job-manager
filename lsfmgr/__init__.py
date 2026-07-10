@@ -10,7 +10,6 @@ from .errors import (
     JobSetNotFoundError,
     LsfCommandError,
     LsfmgrError,
-    PersistenceNotSupportedError,
     SubmitError,
 )
 from .errors import JobSetClosedError
@@ -21,12 +20,12 @@ from .options import Options
 from .reports import (
     KillProgress,
     KillReport,
-    ReconcileReport,
     SubmitProgress,
     SubmitReport,
 )
 from .states import JobRecord, JobSetRecord, JobState
-from .store import InMemoryStore, JobSetStore, SqliteStore
+from .store.base import JobSetStore
+from .store.memory import InMemoryStore
 
 __version__ = "0.2.0"
 
@@ -43,16 +42,13 @@ __all__ = [
     "JobSetRecord",
     "JobSetStore",
     "InMemoryStore",
-    "SqliteStore",
     "SubmitReport",
     "SubmitProgress",
     "KillReport",
     "KillProgress",
-    "ReconcileReport",
     "HandlerContext",
     "HandlerResult",
     "LsfmgrError",
-    "PersistenceNotSupportedError",
     "JobSetNotFoundError",
     "JobNotFoundError",
     "LsfCommandError",

@@ -86,24 +86,3 @@ def test_transition_many_matches_individual(store):
         == [(r.job_key, r.state) for r in indiv]
 
 
-def test_transition_many_events_only_real_changes(tmp_path):
-    """sqlite 배치 전이도 상태가 실제 바뀔 때만 event를 남긴다 (round6 계약)."""
-    from lsfmgr import SqliteStore
-    st = SqliteStore(str(tmp_path / "db.sqlite"))
-    try:
-        _seed(st, 3)
-        # js_0: PEND→RUN(실전이), js_1: PEND→PEND(재설정, 이벤트 없어야),
-        # js_2: PEND→RUN(실전이)
-        st.transition_many("js", [
-            ("js_0", JobState.RUN, None, {}),
-            ("js_1", JobState.PEND, None, {"start_time": datetime.now()}),
-            ("js_2", JobState.RUN, None, {}),
-        ])
-        hist = st.get_history("js")
-        pairs = [(h["job_key"], h["old_state"], h["new_state"]) for h in hist]
-        assert ("js_0", "PEND", "RUN") in pairs
-        assert ("js_2", "PEND", "RUN") in pairs
-        assert all(o != n for _k, o, n in pairs)          # same-state 없음
-        assert not any(k == "js_1" for k, _o, _n in pairs)  # 재설정 이벤트 없음
-    finally:
-        st.close()

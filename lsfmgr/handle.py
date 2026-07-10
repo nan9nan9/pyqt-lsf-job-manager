@@ -100,13 +100,6 @@ class JobSet(QObject):
         self._check_open()
         self._manager.query_once(self._jobset_id)
 
-    def reconcile(self) -> None:
-        """[async→Signal] 저장 상태 vs LSF 실상태 대조 (Sqlite 전용, FR-6.2).
-        완료 시 jobset_updated Signal, 미종결 job이 남아 있으면 polling 자동 시작.
-        InMemory Store면 PersistenceNotSupportedError."""
-        self._check_open()
-        self._manager.reconcile(self._jobset_id)
-
     def start_polling(self, interval_s: Optional[float] = None) -> None:
         """[async→Signal] 주기 polling 시작 — 갱신은 jobset_updated Signal."""
         self._check_open()

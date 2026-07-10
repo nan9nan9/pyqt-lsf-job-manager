@@ -54,27 +54,6 @@ def test_store_add_jobs_missing_jobset(store):
         store.add_jobs([make_job(jsid="nope")])
 
 
-def test_sqlite_bulk_submit_fast(qtbot, fake_lsf, config, tmp_path):
-    """5,000건 CREATED 선생성이 단일 트랜잭션으로 즉시 끝나야 함 (NFR-3)."""
-    import time
-    from lsfmgr import SqliteStore
-    mgr = LsfJobManager(store=SqliteStore(str(tmp_path / "big.db")),
-                        config=config, runner=fake_lsf)
-    try:
-        t0 = time.monotonic()
-        jsid = mgr.submit_bulk([JobSpec(command=f"r {i}")
-                                for i in range(5000)])
-        elapsed = time.monotonic() - t0            # submit_bulk 반환까지
-        assert elapsed < 2.0, f"submit() 반환에 {elapsed:.2f}s — main 블로킹"
-        assert mgr.summary(jsid)["total"] == 5000
-        # 완주 대기는 불필요 — 반환 시간이 검증 대상. 취소로 빠르게 마무리.
-        mgr.cancel_submit(jsid)
-        with qtbot.waitSignal(mgr.submit_finished, timeout=60000):
-            pass
-    finally:
-        mgr.shutdown()
-
-
 # ----------------------------------------------------------------------
 # 버그 3: close 실패(전원 terminal 아님) 시 polling이 부수효과로 중지됨
 # ----------------------------------------------------------------------
@@ -191,27 +170,6 @@ def test_array_partial_kill_only_pend(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 # 버그 11 (2차): SqliteStore._Tx — connection 생성 실패 시 wlock 누수
 # ----------------------------------------------------------------------
-def test_sqlite_wlock_released_on_connect_error(tmp_path):
-    import sqlite3
-    from lsfmgr import SqliteStore
-    s = SqliteStore(str(tmp_path / "lock.db"))
-    orig_conn = s._conn
-    state = {"fail": True}
-
-    def flaky_conn():
-        if state["fail"]:
-            state["fail"] = False
-            raise sqlite3.OperationalError("disk I/O error (주입)")
-        return orig_conn()
-
-    s._conn = flaky_conn
-    with pytest.raises(sqlite3.OperationalError):
-        s.create_jobset(make_jobset("a"))
-    # lock이 해제되어 다음 쓰기는 성공해야 한다 (누수 시 여기서 데드락)
-    s.create_jobset(make_jobset("b"))
-    s.close()
-
-
 # ----------------------------------------------------------------------
 # 버그 12 (2차): 저수준 submit_bulk/submit_array의 tags="..." 문자 분해
 # ----------------------------------------------------------------------

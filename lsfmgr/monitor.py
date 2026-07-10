@@ -119,8 +119,8 @@ class JobsetQuerier:
                                 and cur.state is rec.state)
 
         # 전이는 개별 실행하지 않고 spec으로 모아 store.transition_many로
-        # 한 트랜잭션에 적용한다 — 수만 건이 한 사이클에 몰릴 때 건당 commit
-        # (sqlite에서 건당 수 ms)이 폴링 스레드를 수십 초 블로킹하던 것을 없앤다.
+        # 한 번에 적용한다 — 수만 건이 한 사이클에 몰릴 때 건당 처리가
+        # 폴링 스레드를 블로킹하지 않게 한다.
         update_specs = []       # bjobs/bhist 기반 일반 전이 [(key,state,guard,fields)]
         lost_specs = []         # LOST 전이 (반환분을 lost로도 분류)
         missing: List[JobRecord] = []
@@ -138,7 +138,7 @@ class JobsetQuerier:
             # 시점에만 반영 — 대량 job 폴링 부하 절감). 클러스터 필드는
             # collect_clusters일 때만 비교·기록한다 — 안 그러면 이전 세션이
             # 채운 forward_cluster를 (수집 안 하는) 이번 세션 폴링이 st의 None으로
-            # 덮어 데이터가 소실된다(persistent+recover 시).
+            # 덮어 데이터가 소실된다(store 주입/복원 시나리오).
             if (st.state is not rec.state or st.exit_code != rec.exit_code
                     or st.start_time != rec.start_time
                     or st.finish_time != rec.finish_time

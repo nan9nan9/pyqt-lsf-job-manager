@@ -79,8 +79,6 @@ js = mgr.submit(jobs, workers=8, max_retry=0, queue="short",
 | `kill_status_policy` | `"optimistic"` | 생성자 | `"optimistic"`=terminated 확인 시 즉시 EXIT / `"actual"`=실제 LSF 상태(폴링)로만 |
 | `kill_max_retry` | 2 | 생성자 | kill 확인 실패 시 재시도 횟수 |
 | `label` / `tags` / `description` | 빈 값 | submit | JobSet 메타데이터 |
-| `persistent` | False | 생성자 | True → SQLite 영속 모드 (§6) |
-| `db_path` | `~/.lsfmgr/jobsets.db` | 생성자 | persistent=True일 때 |
 | `chunk_size` | 200 | 생성자 | chunking fallback 크기 |
 | `bsub_path` 등 | PATH 탐색 | 생성자 | LSF 명령 경로 (문자열 또는 wrapper 토큰 목록) |
 
@@ -281,8 +279,6 @@ js.id                      # jobset_id 문자열 (로그/저장용)
 > 방식으로 조회합니다. 완료 후 최종은 `kill_finished(KillReport)`.
 > > 앱을 닫으면(`shutdown`) 진행 중이던 bsub는 완료까지 기다리되 아직 제출
 > > 안 된 몫은 취소됩니다. 앱 재시작 후에도 이어서 추적하려면
-> > `persistent=True`(SQLite)로 두고 재시작 시 `list_orphan_jobsets()` →
-> > `recover_jobset()`으로 복원하세요 (§6).
 
 > **실패 원인 표시** — 두 경로로 확인합니다.
 > - **SUBMIT_FAILED/RETRY_WAIT**: `rec.fail_message`에 bsub/wrapper 실행의
@@ -450,48 +446,7 @@ js.kill_finished.connect(lambda rep: spinner.stop())
 
 ---
 
-## 6. SQLite 영속 모드 (옵션)
-
-세션 간 복원·이력·통계가 필요할 때만 켭니다:
-
-```python
-mgr = LsfJobManager(persistent=True)               # ~/.lsfmgr/jobsets.db
-mgr = LsfJobManager(persistent=True, db_path="/local_disk/jk/jobs.db")
-```
-
-### 앱 시작 시 이전 세션 복원
-
-```python
-if mgr.persistent:
-    for rec in mgr.list_orphan_jobsets():          # 미종결 JobSet 목록
-        if ask_user(rec.label):                    # 복원 여부는 앱이 결정
-            js = mgr.recover_jobset(rec.jobset_id) # JobSet 반환
-            js.reconcile()                         # 죽어있는 동안의
-                                                   # DONE/EXIT/LOST 반영 (비동기)
-            # reconcile 완료 → updated Signal → 이후 자동 polling
-```
-
-### 이력/통계 (Sqlite 전용)
-
-```python
-mgr.get_history(js.id)          # 상태 전이 이력
-mgr.stats(since=last_week)      # 성공률, PEND→RUN 대기시간 분포 등
-mgr.search_all_sessions(tag="sweep")
-mgr.export_jobset(js.id, "report.json")
-```
-
-| | InMemory (기본) | SQLite (`persistent=True`) |
-|---|---|---|
-| 파일 생성 | 없음 | db 1개 |
-| 앱 종료 시 JobSet | 소멸 (LSF job은 잔존) | 보존 |
-| 복원/이력/통계 | `PersistenceNotSupportedError` | 지원 |
-
-> 인메모리 모드에서 앱이 죽어도 job은 LSF에 남습니다 —
-> `bjobs -g /lsfmgr/<user>/<jobset_id>`로 수동 확인/정리 가능.
-
----
-
-## 7. 로깅 / 예외 수집
+## 6. 로깅 / 예외 수집
 
 라이브러리 이벤트는 `lsfmgr.*` logger 계층으로 나갑니다:
 
@@ -523,12 +478,11 @@ worker 예외는 스레드를 죽이지 않고 로그 + `js.error_occurred` Sign
 
 ---
 
-## 8. 하지 말아야 할 것
+## 7. 하지 말아야 할 것
 
 - 결과를 기다리며 busy-wait / `processEvents()` 루프 → Signal을 기다리세요.
 - Signal로 받은 JobRecord 수정 → frozen이라 예외.
 - `PyQt5`/`PySide6` 직접 import를 lsfmgr와 혼용 → qtpy 감지가 꼬일 수 있음.
-- SQLite db를 NFS에 두기 → lock 신뢰 불가, 로컬 디스크 권장 (경고 로그 남음).
 - `js.jobs()`를 타이트 루프에서 반복 호출 → 스냅샷은 polling 주기로만
   갱신되므로 의미 없음. `jobset_updated` Signal 기반으로 반응하세요.
 - `submit_finished`/`kill_finished` 핸들러 **안에서** 진행 스냅샷 pull
@@ -538,7 +492,7 @@ worker 예외는 스레드를 죽이지 않고 로그 + `js.error_occurred` Sign
 
 ---
 
-## 9. Low-level API (고급)
+## 8. Low-level API (고급)
 
 여러 JobSet을 한 화면에서 통합 관리하는 대시보드처럼 전역 이벤트 스트림이
 필요한 경우, manager의 전역 Signal을 직접 쓸 수 있습니다
@@ -547,7 +501,7 @@ JobSet Signal과 동일 이벤트의 이중 발행). 일반적인 경우엔 JobS
 
 ---
 
-## 10. MockLSF — 실제 LSF 없이 테스트하기 (`mocklsf`)
+## 9. MockLSF — 실제 LSF 없이 테스트하기 (`mocklsf`)
 
 실제 LSF 서버가 없는 환경에서도 lsfmgr를 개발·테스트할 수 있도록,
 `bsub`/`bjobs`/`bkill` 등의 명령을 흉내내는 가상 스케줄러 `mocklsf` 패키지가

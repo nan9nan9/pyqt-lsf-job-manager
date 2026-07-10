@@ -14,8 +14,6 @@ from .base import JobSetStore, make_summary
 class InMemoryStore(JobSetStore):
     """프로세스 메모리에만 저장. 종료 시 JobSet 소멸 (LSF job 자체는 잔존)."""
 
-    persistent = False
-
     def __init__(self):
         self._lock = threading.RLock()          # CS-1
         self._jobsets: Dict[str, JobSetRecord] = {}
@@ -76,7 +74,7 @@ class InMemoryStore(JobSetStore):
         now = datetime.now()
         with self._lock:                        # lock 1회로 일괄 처리
             # 선검증 — 중간 실패 시 앞선 레코드만 반영되는 부분 적용을
-            # 막는다 (SqliteStore의 단일 트랜잭션 rollback과 계약 일치)
+            # 막는다 (일괄 연산의 원자성 계약)
             for record in records:
                 if record.jobset_id not in self._jobsets:
                     raise JobSetNotFoundError(record.jobset_id)

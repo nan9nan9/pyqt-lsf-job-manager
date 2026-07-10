@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager, SqliteStore
+from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
 from lsfmgr.command import LsfCommand
 from lsfmgr.states import JobState
 
@@ -117,24 +117,6 @@ def test_cluster_degradation_is_permanent(qtbot, fake_lsf, config):
 # ----------------------------------------------------------------------
 # sqlite 영속 — 클러스터 필드 저장/복원
 # ----------------------------------------------------------------------
-def test_cluster_persisted_sqlite(qtbot, fake_lsf, config, tmp_path):
-    mgr = LsfJobManager(store=SqliteStore(str(tmp_path / "db.sqlite")),
-                        config=config, runner=fake_lsf, collect_clusters=True)
-    try:
-        js = _submit_running(qtbot, mgr, fake_lsf, src="seoul", fwd="busan")
-        mgr.querier.query(js.id)
-        jsid = js.id
-    finally:
-        mgr.shutdown()
-    reopened = SqliteStore(str(tmp_path / "db.sqlite"))
-    try:
-        rec = reopened.get_jobs(jsid)[0]
-        assert rec.source_cluster == "seoul"
-        assert rec.forward_cluster == "busan"
-    finally:
-        reopened.close()
-
-
 # ----------------------------------------------------------------------
 # 파서 단위 — 10필드(FULL+MC) / 8필드(FULL) / 4필드(CORE)
 # ----------------------------------------------------------------------
