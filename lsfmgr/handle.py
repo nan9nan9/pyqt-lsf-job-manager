@@ -123,14 +123,14 @@ class JobSet(QObject):
         self._check_open()
         self._manager.close_jobset(self._jobset_id)
 
-    def merge_with(self, *others: "JobSet", keep_originals: bool = False,
+    def merge_with(self, *others: "JobSet",
                    sync_lsf: bool = False) -> "JobSet":
         """[sync] 다른 JobSet들과 병합 — 새 JobSet 핸들 반환 (FR-5.5).
-        keep_originals=False면 원본(이 핸들 포함)은 파괴된다."""
+        merge는 항상 '이동' — 원본(이 핸들 포함)은 파괴된다. 소스가 폴링
+        중이었다면 새 jobset이 폴링을 자동으로 이어받는다."""
         self._check_open()
         ids = [self._jobset_id] + [o.id for o in others]
-        new_id = self._manager.merge_jobsets(
-            ids, keep_originals=keep_originals, sync_lsf=sync_lsf)
+        new_id = self._manager.merge_jobsets(ids, sync_lsf=sync_lsf)
         return self._manager.jobset(new_id)
 
     def add_job(self, record: JobRecord, sync_lsf: bool = True) -> JobRecord:

@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from lsfmgr import JobSpec, JobState, LsfJobManager, SqliteStore
+from lsfmgr import (JobRecord, JobSpec, JobState, LsfJobManager,
+                    SqliteStore)
 from lsfmgr.jobset_core import detect_array_template
 from tests.test_store_contract import make_job, make_jobset
 
@@ -89,7 +90,7 @@ def test_kill_falls_back_when_one_attachment_errors(qtbot, manager, fake_lsf):
 
 
 # ----------------------------------------------------------------------
-# R3-4: merge(keep_originals=False) 후 삭제된 원본 jobset을 영구 polling
+# R3-4: merge 후 삭제된 원본 jobset을 영구 polling
 # ----------------------------------------------------------------------
 def test_merge_stops_polling_of_originals(qtbot, manager, fake_lsf):
     a = manager.submit([f"a {i}" for i in range(3)], mode="bulk")   # AUTO-1
@@ -192,9 +193,13 @@ def test_merge_rejects_duplicate_job_keys(qtbot, manager, fake_lsf):
     b = manager.submit(["b 1"], mode="bulk", auto_poll=False)
     qtbot.waitUntil(lambda: not manager.submitter.is_active(a.id)
                     and not manager.submitter.is_active(b.id), timeout=10000)
-    m = a.merge_with(b, keep_originals=True)     # M은 a의 레코드 포함
+    # b에 a의 job_key와 동명인 레코드를 수동 편입 — 충돌 시나리오
+    dup_key = a.jobs()[0].job_key
+    manager.store.add_job(JobRecord(
+        job_id=None, array_index=None, jobset_id=b.id,
+        lsf_job_name=dup_key, state=JobState.CREATED, command=""))
     with pytest.raises(ValueError, match="충돌"):
-        manager.merge_jobsets([m.id, a.id])      # a_0가 양쪽에 존재
+        manager.merge_jobsets([a.id, b.id])      # dup_key가 양쪽에 존재
 
 
 # ----------------------------------------------------------------------

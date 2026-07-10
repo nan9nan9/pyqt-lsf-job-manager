@@ -83,7 +83,7 @@ def test_merge_jobsets(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         b = manager.submit_bulk([JobSpec(command=f"b {i}") for i in range(7)])
 
-    merged = manager.merge_jobsets([a, b], keep_originals=False)
+    merged = manager.merge_jobsets([a, b])
     js = manager.store.get_jobset(merged)
     assert js.intended_count == 12
     assert js.merged_from == [a, b]
@@ -97,16 +97,6 @@ def test_merge_jobsets(qtbot, manager, fake_lsf):
     # merge된 jobset 요약 불변식
     s = manager.summary(merged)
     assert sum(v for k, v in s.items() if k != "total") == 12
-
-
-def test_merge_keep_originals(qtbot, manager, fake_lsf):
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        a = manager.submit_bulk([JobSpec(command="a")])
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        b = manager.submit_bulk([JobSpec(command="b")])
-    merged = manager.merge_jobsets([a, b], keep_originals=True)
-    assert manager.store.get_jobset(a) is not None
-    assert len(manager.get_jobs(merged)) == 2
 
 
 # ----------------------------------------------------------------------
@@ -319,7 +309,7 @@ def test_resubmit_mixed_merge_dispatches_per_job(qtbot, manager, fake_lsf):
                                    auto_poll=False)
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         b = manager.submit_bulk([JobSpec(command="make sim")])
-    merged = manager.merge_jobsets([w.id, b], keep_originals=False)
+    merged = manager.merge_jobsets([w.id, b])
     recs = {r.job_key: r for r in manager.get_jobs(merged)}
     wkey = next(k for k, r in recs.items() if r.via_wrapper)
     bkey = next(k for k, r in recs.items() if not r.via_wrapper)

@@ -170,11 +170,14 @@ class JobSetManager:
     # merge (FR-5.5)
     # ------------------------------------------------------------------
     def merge_jobsets(self, jobset_ids: Sequence[str], *,
-                      keep_originals: bool = False,
                       sync_lsf: bool = False,
                       label: str = "") -> JobSetRecord:
         """여러 JobSet을 새 JobSet으로 병합 — JobRecord 합집합 +
-        intended_count 합산 + 부착물 목록 누적, merged_from 기록."""
+        intended_count 합산 + 부착물 목록 누적, merged_from 기록.
+
+        merge는 항상 '이동'이다 — 원본은 삭제된다. 원본을 남기면(복사)
+        같은 job이 두 jobset에 존재해 어느 쪽도 진실이 아니게 된다:
+        복사본 상태 동결, 이중 폴링, 한쪽 resubmit 시 다른 쪽 LOST 오판."""
         if len(jobset_ids) < 2:
             raise ValueError("merge는 2개 이상의 jobset이 필요합니다")
         sources = [self.store.get_jobset(i) for i in jobset_ids]
@@ -211,9 +214,8 @@ class JobSetManager:
                 self.store.add_job(replace(rec, jobset_id=new_id))
                 if rec.job_id is not None:
                     all_ids.append(rec.job_id)
-        if not keep_originals:
-            for src in sources:
-                self.store.delete_jobset(src.jobset_id)
+        for src in sources:
+            self.store.delete_jobset(src.jobset_id)
         if sync_lsf and all_ids:
             new_group = self.group_path_for(new_id)
             self.command.bmod_group(all_ids, new_group)

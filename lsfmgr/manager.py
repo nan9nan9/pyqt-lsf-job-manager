@@ -719,16 +719,15 @@ class LsfJobManager(QObject):
         self.handlers.remove_handler(jobset_id, name)
 
     def merge_jobsets(self, jobset_ids: Sequence[str], *,
-                      sync_lsf: bool = False,
-                      keep_originals: bool = False) -> str:
-        """[sync] 병합 — 새 jobset_id 반환. 원본 미보존 시 해당 핸들 파괴."""
+                      sync_lsf: bool = False) -> str:
+        """[sync] 병합 — 새 jobset_id 반환. merge는 항상 '이동'이다:
+        원본 jobset과 그 핸들은 파괴된다 (레코드 복사·공존은 같은 job의
+        진실이 둘이 되는 aliasing이라 지원하지 않는다)."""
         # submit/resubmit/kill 진행 중인 소스는 거부 — 허용하면 소스 삭제로
         # worker가 크래시하고(존재하지 않는 jobset에 전이 시도), 진행 중
         # 스냅샷이 복사돼 merged jobset에 SUBMITTING 좀비 레코드가 영구
-        # 잔존한다 (keep_originals=True여도 복사본은 갱신되지 않으므로 동일).
-        # kill도 같은 이유 — 스냅샷 이후 소스가 삭제되면 optimistic EXIT
-        # 전이가 옛 jobset id로 실패해 kill이 오류로 끝나고, 복사된 레코드는
-        # kill 결과를 반영받지 못한다.
+        # 잔존한다. kill도 같은 이유 — 스냅샷 이후 소스가 삭제되면
+        # optimistic EXIT 전이가 옛 jobset id로 실패해 kill이 오류로 끝난다.
         for jsid in jobset_ids:
             if (self.submitter.is_active(jsid)
                     or self._resubmitter.is_active(jsid)
@@ -737,27 +736,24 @@ class LsfJobManager(QObject):
                     f"{jsid}: submit/resubmit/kill 진행 중에는 "
                     f"merge할 수 없습니다")
         new_id = self.jobsets.merge_jobsets(
-            jobset_ids, sync_lsf=sync_lsf,
-            keep_originals=keep_originals).jobset_id
-        if not keep_originals:
-            # 소스 중 폴링을 쓰던 jobset의 interval 수집 (연속성 이관용)
-            intervals = [self._poll_intervals[j] for j in jobset_ids
-                         if j in self._poll_intervals]
-            for old in jobset_ids:
-                # polling 중지 필수 — 삭제된 jobset을 계속 polling하면
-                # 매 주기 JobSetNotFoundError → error Signal 폭주
-                self.polling.stop_polling(old)
-                self.handlers.remove_all(old)
-                self._poll_intervals.pop(old, None)
-                self._invalidate_handle(old)
-            # 폴링 연속성 — 소스가 폴링 중이던 RUN/PEND job은 merge 후에도
-            # 계속 관찰돼야 한다(안 하면 사용자가 start_polling을 다시 불러야
-            # 하는 걸 잊고 상태가 동결됨). 가장 짧은 interval을 이어받는다.
-            # 전원 terminal이면 AUTO-2가 첫 사이클에 즉시 꺼주므로 과폴링
-            # 위험은 없다. keep_originals=True면 원본들이 계속 폴링 중이라
-            # 복사본까지 폴링하면 같은 job_id를 이중 조회 — 시작하지 않는다.
-            if intervals:
-                self.start_polling(new_id, min(intervals))
+            jobset_ids, sync_lsf=sync_lsf).jobset_id
+        # 소스 중 폴링을 쓰던 jobset의 interval 수집 (연속성 이관용)
+        intervals = [self._poll_intervals[j] for j in jobset_ids
+                     if j in self._poll_intervals]
+        for old in jobset_ids:
+            # polling 중지 필수 — 삭제된 jobset을 계속 polling하면
+            # 매 주기 JobSetNotFoundError → error Signal 폭주
+            self.polling.stop_polling(old)
+            self.handlers.remove_all(old)
+            self._poll_intervals.pop(old, None)
+            self._invalidate_handle(old)
+        # 폴링 연속성 — 소스가 폴링 중이던 RUN/PEND job은 merge 후에도
+        # 계속 관찰돼야 한다(안 하면 사용자가 start_polling을 다시 불러야
+        # 하는 걸 잊고 상태가 동결됨). 가장 짧은 interval을 이어받는다.
+        # 전원 terminal이면 AUTO-2가 첫 사이클에 즉시 꺼주므로 과폴링
+        # 위험은 없다.
+        if intervals:
+            self.start_polling(new_id, min(intervals))
         return new_id
 
     def detect_lost(self, jobset_id: str) -> List[JobRecord]:
