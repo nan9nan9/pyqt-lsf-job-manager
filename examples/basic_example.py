@@ -263,6 +263,9 @@ class Dashboard(QWidget):
             lambda j, r: self._log(j, f"kill_finished 대상={r.requested} "
                                       f"호출={r.command_calls}회 "
                                       f"전략={r.strategies} 잔존={r.still_alive}"))
+        mgr.post_processing_started.connect(
+            lambda j: self._log(j, "post_processing_started — 후처리 실행 중"))
+        mgr.post_processing_finished.connect(self._on_post_process)
         mgr.error_occurred.connect(lambda j, msg: self._log(j, f"ERROR {msg}"))
 
     def _add_row(self, jsid, label):
@@ -287,7 +290,8 @@ class Dashboard(QWidget):
         # v9: jobset 생성 시 job까지 함께 만들고 → jobset 기준 제출.
         # wrapper 커맨드는 그대로 실행되고 'Job <id>' 파싱으로 관리된다.
         js = self.mgr.create_jobset(cmds, label=label)
-        self.mgr.submit(js, **kw)
+        # post_process: 전 job이 terminal에 도달하면 worker에서 1회 집계 실행.
+        self.mgr.submit(js, post_process=self._summarize_results, **kw)
         self._add_row(js.id, label)
         self._active_submit = js.id
         self.bar.setMaximum(self.form.count.value())
@@ -306,6 +310,27 @@ class Dashboard(QWidget):
         self._log(jsid, f"submit_finished ok={rpt.ok} failed={rpt.failed} "
                         f"retried={rpt.retried} job_id확보={n_ids} "
                         f"({rpt.duration_s:.1f}s)")
+
+    @staticmethod
+    def _summarize_results(records):
+        """[worker 스레드] 완료 후처리 콜백 — **GUI 접근 금지**. 전원 terminal
+        도달 시 호출되며, 최종 레코드로 성공/실패를 집계해 반환한다(반환값은
+        post_processing_finished로 전달). 실제 앱에선 결과 파일 수합·리포트
+        생성 등을 여기서 수행한다."""
+        from collections import Counter
+        c = Counter(r.state.name for r in records)
+        return {"total": len(records), "DONE": c.get("DONE", 0),
+                "EXIT": c.get("EXIT", 0),
+                "failed": c.get("SUBMIT_FAILED", 0) + c.get("LOST", 0)}
+
+    def _on_post_process(self, jsid, result):
+        """[main] 후처리 완료 — 반환값(result) 또는 None(콜백 예외)."""
+        if result is None:
+            self._log(jsid, "post_processing_finished — 후처리 실패(로그 참조)")
+            return
+        self._log(jsid, f"post_processing_finished — DONE {result['DONE']} / "
+                        f"EXIT {result['EXIT']} / 실패 {result['failed']} "
+                        f"(총 {result['total']})")
 
     # ------------------------------------------------------------------
     # 선택 JobSet 제어
