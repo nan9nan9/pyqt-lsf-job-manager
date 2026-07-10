@@ -13,13 +13,15 @@ from __future__ import annotations
 import atexit
 import logging
 import os
+import re
 import shlex
 from dataclasses import replace as dc_replace
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from .command import LsfCommand, Runner
-from .config import ArrayJobSpec, JobSpec, LsfConfig, spec_from_json
+from .config import (ArrayJobSpec, JobSpec, LsfConfig, spec_from_json,
+                     spec_to_json)
 from .errors import JobNotFoundError, LsfmgrError
 from .handle import JobSet
 from .handlers import HandlerContext, JobSetHandlerService, StateSpec
@@ -34,7 +36,6 @@ from .options import (
     validate_options,
 )
 from .qt import QCoreApplication, QObject, QRunnable, QThreadPool, QTimer, Signal
-from .resubmit import ResubmitCoordinator, ResubmitPlan
 from .reports import KillProgress, SubmitProgress
 from .states import JobRecord, JobSetRecord, JobState
 from .store.base import JobSetStore
@@ -153,10 +154,6 @@ class LsfJobManager(QObject):
         self.killer.finished.connect(self.kill_finished)
         self.killer.progress.connect(self.kill_progress)
         self.killer.error.connect(self.error_occurred)
-
-        # resubmit_jobs 오케스트레이터 — kill(worker) → resubmit(main) 순차 조율
-        self._resubmitter = ResubmitCoordinator(self)
-        self._resubmitter.jobs_changed.connect(self._relay_jobs_changed)
 
         # JobSet별 사용자 handler 주기 실행 (FR-7)
         self.handlers = JobSetHandlerService(self.store, parent=self)
@@ -387,18 +384,14 @@ class LsfJobManager(QObject):
         return self._submit_array_impl(spec, opts, jobset_id=jobset_id)
 
     def cancel_submit(self, jobset_id: str) -> None:
-        """[async→Signal] 진행 중 submit 중단 — submit된 job은 유지 (QT-6).
-        resubmit_jobs의 kill-phase 대기 중이면 그 plan도 취소한다 (이 구간엔
-        submitter ctx가 없어 cancel이 조용히 증발하는 창이 있었다)."""
-        self._resubmitter.cancel(jobset_id)
+        """[async→Signal] 진행 중 submit 중단 — submit된 job은 유지 (QT-6)."""
         self.submitter.cancel_submit(jobset_id)
 
     def is_submitting(self, jobset_id: str) -> bool:
         """[sync] 이 jobset에 진행 중인 submit/resubmit이 있는지.
         대량 제출을 백그라운드로 돌려놓고 진행 dialog를 닫은 뒤에도, 아직
         도는 중인지 아무 때나 확인한다."""
-        return (self.submitter.is_active(jobset_id)
-                or self._resubmitter.is_active(jobset_id))
+        return self.submitter.is_active(jobset_id)
 
     def submit_snapshot(self, jobset_id: str) -> "Optional[SubmitProgress]":
         """[sync] 진행 중 submit의 실시간 스냅샷 (done/total/성공/실패/취소) —
@@ -460,13 +453,13 @@ class LsfJobManager(QObject):
             # LSF master를 두들긴다 (옵션 경로의 5~60초 검증과 달리
             # 직접 호출은 무검증이었음)
             raise ValueError(f"interval_s는 양수여야 합니다 (got {eff})")
-        self._poll_intervals[jobset_id] = eff    # resubmit 후 재개용 기억
+        self._poll_intervals[jobset_id] = eff    # merge 이관/재개용 기억
         self.polling.start_polling(jobset_id, eff)
 
     def stop_polling(self, jobset_id: str) -> None:
         """[async→Signal] polling 중지."""
-        # 재개 기억도 지운다 — 사용자가 일부러 끈 polling을 resubmit_jobs가
-        # 마음대로 되살리지 않게 (재개는 AUTO-2 자동중지 복구 용도만)
+        # 재개 기억도 지운다 — 사용자가 일부러 끈 polling이 merge 이관 등으로
+        # 마음대로 되살아나지 않게
         self._poll_intervals.pop(jobset_id, None)
         self.polling.stop_polling(jobset_id)
 
@@ -543,7 +536,6 @@ class LsfJobManager(QObject):
             #    등록 자체가 거부된다(나중). 재취소 루프가 필요 없다.
             # (부분 kill(only_state)은 살아있는 특정 상태만 겨냥하므로 유지)
             self.submitter.cancel_submit(jobset_id)
-            self._resubmitter.cancel(jobset_id)
             self.submitter.abort_retries(jobset_id)
             scope = self._gate.kill_scope(jobset_id)
         self.killer.kill_jobset(jobset_id, only_state=only_state,
@@ -576,12 +568,122 @@ class LsfJobManager(QObject):
     # ------------------------------------------------------------------
     # JobSet 관리 (FR-5)
     # ------------------------------------------------------------------
-    def create_jobset(self, intended_count: int, *, label: str = "",
+    def create_jobset(self, intended_count: int = 0, *, label: str = "",
                       tags: Sequence[str] = (),
-                      parent: Optional[str] = None) -> str:
-        """[sync] 수동 JobSet 생성 — jobset_id 반환."""
-        return self.jobsets.create_jobset(
-            intended_count, label=label, tags=tags, parent=parent).jobset_id
+                      parent: Optional[str] = None) -> JobSet:
+        """[sync] 빈 JobSet 생성 — 핸들 즉시 반환 (생성 시 CREATED 상태).
+
+        submit 이전(CREATE 단계)부터 jobset이 존재하므로 GUI가 처음부터 이
+        핸들에 테이블/신호를 바인딩한다. 흐름:
+
+            js = mgr.create_jobset(label="sweep")
+            js.create_job("customwrapper_sub -i a.sp",
+                          merge_id="a", ud_data={"run": "..."})
+            if js.can_submit():
+                js.submit(workers=8)          # 전 job (재)제출
+
+        intended_count는 보통 0으로 두면 create_job이 늘려간다."""
+        rec = self.jobsets.create_jobset(
+            intended_count, label=label, tags=tags, parent=parent)
+        return self.jobset(rec.jobset_id)
+
+    def create_job(self, jobset_id: str, command, *,
+                   merge_id: Optional[str] = None,
+                   ud_data: Optional[dict] = None,
+                   wrapper: bool = True) -> JobRecord:
+        """[sync] job 1건 생성(CREATED) — 바구니 누적 (FR-5.4 v9).
+
+        command 타입으로 제출 경로가 정해진다:
+          - JobSpec          → bsub 경로 (queue/resources 등 옵션 보존)
+          - 토큰 리스트(argv) → wrapper 경로 (그대로 실행)
+          - 문자열           → wrapper=True(기본)면 wrapper(공백 분해),
+                               False면 bsub(JobSpec(command=...))
+        merge_id: 논리 키 — merge 시 같은 merge_id의 기존 job이 이 내용으로
+        replace된다. jobset 내 유일해야 한다(None 제외).
+        ud_data: 사용자 정의 dict (JSON 직렬화 가능) — 라이브러리는 보존만.
+        생성 즉시 jobs_updated/jobset_updated가 발행돼 표가 갱신된다."""
+        return self.create_jobs(jobset_id, [command], merge_ids=[merge_id],
+                                ud_datas=[ud_data], wrapper=wrapper)[0]
+
+    def create_jobs(self, jobset_id: str, commands: Sequence, *,
+                    merge_ids: Optional[Sequence[Optional[str]]] = None,
+                    ud_datas: Optional[Sequence[Optional[dict]]] = None,
+                    wrapper: bool = True) -> List[JobRecord]:
+        """[sync] job 일괄 생성(CREATED) — create_job의 배치 버전.
+        merge_ids/ud_datas는 commands와 같은 길이(생략 시 전부 None)."""
+        items = list(commands)
+        if not items:
+            raise ValueError("create_jobs: commands가 비어 있습니다")
+        mids = list(merge_ids) if merge_ids is not None else [None] * len(items)
+        uds = list(ud_datas) if ud_datas is not None else [None] * len(items)
+        if len(mids) != len(items) or len(uds) != len(items):
+            raise ValueError("merge_ids/ud_datas 길이가 commands와 다릅니다")
+
+        # job_key 연번 — 기존 키의 최대 suffix 다음부터
+        used = set()
+        for r in self.get_jobs(jobset_id):
+            m = re.match(rf"^{re.escape(jobset_id)}_(\d+)$", r.job_key)
+            if m:
+                used.add(int(m.group(1)))
+        nxt = (max(used) + 1) if used else 0
+
+        records = []
+        for item, mid, ud in zip(items, mids, uds):
+            key = f"{jobset_id}_{nxt}"
+            nxt += 1
+            if isinstance(item, JobSpec):
+                records.append(JobRecord(
+                    job_id=None, array_index=None, jobset_id=jobset_id,
+                    lsf_job_name=key, state=JobState.CREATED,
+                    command=item.command, via_wrapper=False,
+                    spec_json=spec_to_json(item), merge_id=mid, ud_data=ud))
+                continue
+            if isinstance(item, str):
+                if not wrapper:
+                    records.append(JobRecord(
+                        job_id=None, array_index=None, jobset_id=jobset_id,
+                        lsf_job_name=key, state=JobState.CREATED,
+                        command=item, via_wrapper=False,
+                        spec_json=spec_to_json(JobSpec(command=item)),
+                        merge_id=mid, ud_data=ud))
+                    continue
+                argv = shlex.split(item)
+            else:
+                argv = [str(t) for t in item]
+            if not argv:
+                raise ValueError("create_jobs: 빈 커맨드")
+            records.append(JobRecord(
+                job_id=None, array_index=None, jobset_id=jobset_id,
+                lsf_job_name=key, state=JobState.CREATED,
+                command=shlex.join(argv), via_wrapper=True,
+                merge_id=mid, ud_data=ud))
+
+        out = self.jobsets.create_jobs(jobset_id, records)
+        self._relay_jobs_changed(jobset_id, list(out))   # 표 즉시 갱신
+        return out
+
+    def set_ud_data(self, jobset_id: str, ref, ud_data: Optional[dict]
+                    ) -> JobRecord:
+        """[sync] job의 ud_data 교체 — ref는 job_key(str) 또는 merge_id(str,
+        job_key 미매칭 시) 또는 job_id(int). 갱신 레코드를 jobs_updated로
+        발행한다."""
+        rec = self._find_job(jobset_id, ref)
+        new = self.store.update_job(dc_replace(rec, ud_data=ud_data))
+        self._relay_jobs_changed(jobset_id, [new])
+        return new
+
+    def _find_job(self, jobset_id: str, ref) -> JobRecord:
+        """job_id(int) / job_key / merge_id 로 단일 job 찾기."""
+        jobs = self.get_jobs(jobset_id)
+        if isinstance(ref, int):
+            hits = [r for r in jobs if r.job_id == ref]
+        else:
+            hits = [r for r in jobs if r.job_key == ref]
+            if not hits:
+                hits = [r for r in jobs if r.merge_id == ref]
+        if not hits:
+            raise JobNotFoundError(f"{jobset_id}/{ref}")
+        return hits[0]
 
     def add_job(self, jobset_id: str, record: JobRecord, *,
                 sync_lsf: bool = True) -> JobRecord:
@@ -592,98 +694,6 @@ class LsfJobManager(QObject):
         """[sync] job 편입 취소 — 제거된 레코드 반환 (add_job의 역연산).
         LSF의 실제 job은 유지된다(저장소 추적에서만 제외)."""
         return self.jobsets.remove_job(jobset_id, job_key)
-
-    def resubmit_jobs(self, jobset_id: str, job_keys: Sequence[str], *,
-                 commands: Optional[Dict[str, str]] = None,
-                 verify: bool = True, workers: Optional[int] = None,
-                 max_retry: Optional[int] = None,
-                 rate_limit_per_s: Optional[float] = None,
-                 pre_submit: Optional[Callable[[List[str]], bool]] = None,
-                 envpath: str = "") -> None:
-        """[async→Signal] 지정 job들을 상태에 따라 (재)실행 — 결과는 submit_finished.
-
-        submit/resubmit을 호출자가 고르지 않는다. **각 job의 현재 상태**로 매니저가
-        자동 분기한다:
-          - LSF에 살아있는 job(is_on_lsf, 예: PEND/RUN) → **kill 후** 재제출
-          - 그 외(CREATED/SUBMIT_FAILED/LOST/DONE/EXIT) → 그냥 제출
-        레코드는 **재사용**된다 — 같은 job_key(-J 이름)로 다시 제출하고 job_id/
-        exit_code만 교체하므로 목록 슬롯·intended_count가 유지된다(삭제/재생성 없음).
-
-        job_keys: (재)실행할 job_key(lsf_job_name) 목록.
-        commands: {job_key: 새 커맨드} — 생략 시 기존 rec.command 재사용.
-        verify=True면 kill 후 실제 종료를 확인한 뒤 재제출한다.
-        pre_submit(commands)->bool: 지정 시 재제출 전 게이트 (FR-9) — **kill
-        이전에** 검사한다. False면 돌던 job을 죽이지 않고 그대로 두며 재제출도
-        안 한다. 신호 순서는 submit과 동일(ready_started → ready_finished(ok)
-        → ok일 때만 submit_started → … → submit_finished).
-        envpath: kill 단계에서 source할 LSF env 경로 (MC forward job — 로컬
-        bkill로 안 죽는 환경). kill_jobs의 envpath와 같은 의미.
-        """
-        recs = {r.job_key: r for r in self.get_jobs(jobset_id)}
-        targets: List[JobRecord] = []
-        for key in dict.fromkeys(job_keys):    # 중복 제거 (순서 유지) —
-            rec = recs.get(key)                # 같은 key 2회면 이중 제출됨
-            if rec is None:
-                raise JobNotFoundError(f"{jobset_id}/{key}")
-            if rec.array_index is not None:
-                raise LsfmgrError(
-                    f"array element({key})는 resubmit_jobs로 재제출할 수 없습니다")
-            targets.append(rec)
-        # kill-phase(코디네이터) 진행 중에도 거부해야 한다 — 이 구간엔
-        # submitter ctx가 아직 없어 is_active만으로는 plan 덮어쓰기를 못 막는다
-        if (self.submitter.is_active(jobset_id)
-                or self._resubmitter.is_active(jobset_id)):
-            raise LsfmgrError(
-                f"{jobset_id}: submit/resubmit 진행 중에는 "
-                f"resubmit_jobs를 호출할 수 없습니다")
-        if not targets:
-            return
-
-        kw: Dict[str, Any] = {}
-        if workers is not None:
-            kw["workers"] = workers
-        if max_retry is not None:
-            kw["max_retry"] = max_retry
-        if rate_limit_per_s is not None:
-            kw["rate_limit_per_s"] = rate_limit_per_s
-        opts = self.resolve_options(kw, context="submit")
-
-        cmds = commands or {}
-        live = [r for r in targets if r.state.is_on_lsf]
-        live_ids = sorted({r.job_id for r in live if r.job_id is not None})
-        live_keys = [r.job_key for r in live]
-
-        # 재제출 경로는 job 단위 속성(rec.via_wrapper)으로 결정 — jobset 부착물
-        # 유무로 판별하면 merge된 혼합 jobset에서 wrapper job을 bsub로(이중
-        # 제출), bsub job을 로컬 실행으로(오실행) 보내는 오판이 생긴다
-        def to_item(r: JobRecord):
-            new_cmd = cmds.get(r.job_key)
-            if r.via_wrapper:
-                return shlex.split(new_cmd if new_cmd is not None
-                                   else r.command)
-            # bsub 경로 — 원 제출 옵션(queue/resources/outfile/env) 복원.
-            # command만 다시 만들면 이 옵션들이 기본값으로 조용히 소실된다
-            try:
-                spec = (spec_from_json(r.spec_json) if r.spec_json
-                        else JobSpec(command=r.command))
-            except (ValueError, TypeError) as e:
-                # 손상/신버전 spec_json (전방 호환) — 옵션은 포기하고
-                # command만으로 진행. 여기서 죽으면 재제출 전체가 막힌다
-                log.warning("spec_json 복원 실패(%s) — 옵션 없이 재제출: %s",
-                            e, r.job_key)
-                spec = JobSpec(command=r.command)
-            if new_cmd is not None:
-                spec = dc_replace(spec, command=new_cmd)
-            return spec
-
-        keyed = [(r.job_key, to_item(r)) for r in targets]
-
-        if pre_submit is None:                 # 게이트면 통과 후 코디네이터가 발화
-            self.submit_started.emit(jobset_id)
-        self._resubmitter.start(ResubmitPlan(
-            jobset_id=jobset_id, keyed=keyed, opts=opts,
-            live_ids=live_ids, live_keys=live_keys, verify=verify,
-            pre_submit=pre_submit, envpath=envpath))
 
     # ------------------------------------------------------------------
     # JobSet handler (FR-7)
@@ -709,43 +719,144 @@ class LsfJobManager(QObject):
         """[main] handler 해제."""
         self.handlers.remove_handler(jobset_id, name)
 
-    def merge_jobsets(self, jobset_ids: Sequence[str], *,
-                      sync_lsf: bool = False) -> str:
-        """[sync] 병합 — 새 jobset_id 반환. merge는 항상 '이동'이다:
-        원본 jobset과 그 핸들은 파괴된다 (레코드 복사·공존은 같은 job의
-        진실이 둘이 되는 aliasing이라 지원하지 않는다)."""
-        # submit/resubmit/kill 진행 중인 소스는 거부 — 허용하면 소스 삭제로
-        # worker가 크래시하고(존재하지 않는 jobset에 전이 시도), 진행 중
-        # 스냅샷이 복사돼 merged jobset에 SUBMITTING 좀비 레코드가 영구
-        # 잔존한다. kill도 같은 이유 — 스냅샷 이후 소스가 삭제되면
-        # optimistic EXIT 전이가 옛 jobset id로 실패해 kill이 오류로 끝난다.
-        for jsid in jobset_ids:
-            if (self.submitter.is_active(jsid)
-                    or self._resubmitter.is_active(jsid)
-                    or self.killer.is_active(jsid)):
+    def merge_from(self, target_id: str, source_id: str, *,
+                   force: bool = False) -> List[JobRecord]:
+        """[sync] source jobset을 target에 **in-place 흡수** — merge_id 기준
+        (FR-5.5 v9). source는 삭제되고 target 핸들/테이블은 그대로 유지된다.
+
+        규칙: source job의 merge_id가 target에 있으면 그 job을 **replace**
+        (물리 키 job_key 유지 — 테이블 행 연속), 없거나 None이면 신규 추가.
+        가드: 양쪽 전 job이 비활성(CREATED/DONE/EXIT 등)이어야 하며 활성이
+        있으면 LsfmgrError — force=True면 레코드만 강제 교체(살아있는 LSF
+        job의 정리는 caller 책임, 먼저 kill 권장). can_merge()로 선확인.
+        반환: target에서 replace/추가된 레코드 (jobs_updated로도 발행)."""
+        for jsid in (target_id, source_id):
+            if self.submitter.is_active(jsid) or self.killer.is_active(jsid):
                 raise LsfmgrError(
-                    f"{jsid}: submit/resubmit/kill 진행 중에는 "
-                    f"merge할 수 없습니다")
-        new_id = self.jobsets.merge_jobsets(
-            jobset_ids, sync_lsf=sync_lsf).jobset_id
-        # 소스 중 폴링을 쓰던 jobset의 interval 수집 (연속성 이관용)
-        intervals = [self._poll_intervals[j] for j in jobset_ids
-                     if j in self._poll_intervals]
-        for old in jobset_ids:
-            # polling 중지 필수 — 삭제된 jobset을 계속 polling하면
-            # 매 주기 JobSetNotFoundError → error Signal 폭주
-            self.polling.stop_polling(old)
-            self.handlers.remove_all(old)
-            self._poll_intervals.pop(old, None)
-            self._invalidate_handle(old)
-        # 폴링 연속성 — 소스가 폴링 중이던 RUN/PEND job은 merge 후에도
-        # 계속 관찰돼야 한다(안 하면 사용자가 start_polling을 다시 불러야
-        # 하는 걸 잊고 상태가 동결됨). 가장 짧은 interval을 이어받는다.
-        # 전원 terminal이면 AUTO-2가 첫 사이클에 즉시 꺼주므로 과폴링
-        # 위험은 없다.
-        if intervals:
-            self.start_polling(new_id, min(intervals))
-        return new_id
+                    f"{jsid}: submit/kill 진행 중에는 merge할 수 없습니다")
+        changed = self.jobsets.merge_from(target_id, source_id, force=force)
+        # source 정리 — 삭제된 jobset을 계속 polling하면 error 폭주.
+        # 폴링 연속성: target이 폴링을 안 쓰는데 source가 쓰고 있었다면
+        # 가장 짧은 interval로 target에 이어받는다.
+        src_iv = self._poll_intervals.pop(source_id, None)
+        self.polling.stop_polling(source_id)
+        self.handlers.remove_all(source_id)
+        self._invalidate_handle(source_id)
+        tgt_iv = self._poll_intervals.get(target_id)
+        if src_iv is not None:
+            self.start_polling(target_id,
+                               min(src_iv, tgt_iv) if tgt_iv else src_iv)
+        if changed:
+            self._relay_jobs_changed(target_id, list(changed))
+        return changed
+
+    def can_merge(self, target_id: str, source_id: str) -> bool:
+        """[sync, snapshot] merge_from 가능 여부 — 양쪽 전 job이 비활성이고
+        진행 중 작업(submit/kill)이 없으면 True. GUI 버튼 활성화 판단용."""
+        try:
+            if target_id == source_id:
+                return False
+            if (self.submitter.is_active(target_id)
+                    or self.submitter.is_active(source_id)
+                    or self.killer.is_active(target_id)
+                    or self.killer.is_active(source_id)):
+                return False
+            return all(r.state.is_inactive
+                       for r in (self.get_jobs(target_id)
+                                 + self.get_jobs(source_id)))
+        except LsfmgrError:
+            return False
+
+    def remove_jobs(self, jobset_id: str, *,
+                    job_id: Optional[int] = None,
+                    merge_id: Optional[str] = None,
+                    job_key: Optional[str] = None,
+                    force: bool = False) -> List[JobRecord]:
+        """[sync] job 삭제 — job_id/merge_id/job_key 중 하나로 지정.
+        비활성만 삭제 가능(활성이면 LsfmgrError, force로 레코드만 강제
+        삭제 — LSF job 정리는 caller 책임). 삭제분은 jobset_updated로 반영."""
+        removed = self.jobsets.remove_jobs(
+            jobset_id, job_id=job_id, merge_id=merge_id, job_key=job_key,
+            force=force)
+        self._emit_summary(jobset_id)
+        return removed
+
+    def clear_jobs(self, jobset_id: str, *, force: bool = False
+                   ) -> List[JobRecord]:
+        """[sync] 전 job 삭제 — remove_jobs와 동일 가드."""
+        removed = self.jobsets.clear_jobs(jobset_id, force=force)
+        self._emit_summary(jobset_id)
+        return removed
+
+    def _emit_summary(self, jobset_id: str) -> None:
+        try:
+            self.jobset_updated.emit(jobset_id, self.store.summary(jobset_id))
+        except LsfmgrError:
+            pass
+
+    # ------------------------------------------------------------------
+    # jobset 단위 submit (v9) — 전 job (재)제출
+    # ------------------------------------------------------------------
+    def can_submit(self, jobset_id: str) -> bool:
+        """[sync, snapshot] submit_jobset 가능 여부 — job이 1건 이상 있고
+        전원 비활성(CREATED/DONE/EXIT/SUBMIT_FAILED/LOST)이며 진행 중
+        submit/kill이 없으면 True. GUI 버튼 활성화 판단용."""
+        try:
+            if (self.submitter.is_active(jobset_id)
+                    or self.killer.is_active(jobset_id)):
+                return False
+            jobs = [r for r in self.get_jobs(jobset_id)
+                    if r.array_index is None]
+            return bool(jobs) and all(r.state.is_inactive for r in jobs)
+        except LsfmgrError:
+            return False
+
+    def submit_jobset(self, jobset_id: str, **kwargs: Any) -> None:
+        """[async→Signal] jobset의 **전 job**을 (재)제출 — 결과는
+        submit_finished. 같은 jobset/job_key가 전이되므로 핸들·테이블이
+        그대로 이어진다 (DONE/EXIT 등 이전 결과는 리셋 후 재실행).
+
+        가드: 전 job이 비활성이어야 한다 — RUN/PEND/SUBMITTING 등 활성이
+        있으면 LsfmgrError (먼저 kill 하거나 완료를 기다릴 것, can_submit로
+        선확인). 옵션(kwargs)은 submit과 동일 카탈로그."""
+        if (self.submitter.is_active(jobset_id)
+                or self.killer.is_active(jobset_id)):
+            raise LsfmgrError(
+                f"{jobset_id}: submit/kill 진행 중에는 submit할 수 없습니다")
+        jobs = [r for r in self.get_jobs(jobset_id) if r.array_index is None]
+        if not jobs:
+            raise LsfmgrError(f"{jobset_id}: 제출할 job이 없습니다")
+        busy = [r.job_key for r in jobs if not r.state.is_inactive]
+        if busy:
+            raise LsfmgrError(
+                f"{jobset_id}: 활성(진행 중) job이 있어 submit 불가 — "
+                f"{busy[:5]} (먼저 kill 하거나 완료를 기다리세요)")
+        opts = self.resolve_options(kwargs, context="submit")
+        keyed = [(r.job_key, self._record_to_item(r)) for r in jobs]
+        # handler 재무장 — 재실행되는 job의 진행 상태를 리셋해 새 실행에서도
+        # start/end 주기가 다시 돈다 (전 job 재제출이므로 전 키 대상)
+        self.handlers.rearm(jobset_id, [k for k, _ in keyed])
+        self.submit_started.emit(jobset_id)
+        self.submitter.resubmit_existing(jobset_id, keyed, opts)
+        if opts.auto_poll:                        # AUTO-1 (submit과 동일)
+            self.start_polling(jobset_id, opts.poll_interval_s)
+
+    @staticmethod
+    def _record_to_item(r: JobRecord):
+        """레코드 → 제출 item 재구성. 경로는 job 단위 속성(rec.via_wrapper)
+        으로 결정 — jobset 부착물로 판별하면 merge된 혼합 jobset에서
+        오판한다."""
+        if r.via_wrapper:
+            return shlex.split(r.command)
+        # bsub 경로 — 원 제출 옵션(queue/resources/outfile/env) 복원.
+        # command만 다시 만들면 이 옵션들이 기본값으로 조용히 소실된다
+        try:
+            return (spec_from_json(r.spec_json) if r.spec_json
+                    else JobSpec(command=r.command))
+        except (ValueError, TypeError) as e:
+            log.warning("spec_json 복원 실패(%s) — 옵션 없이 제출: %s",
+                        e, r.job_key)
+            return JobSpec(command=r.command)
 
     def detect_lost(self, jobset_id: str) -> List[JobRecord]:
         """[sync, LSF 조회 포함] 손실 감지/복구 (FR-5.3) — blocking 주의."""
@@ -818,7 +929,6 @@ class LsfJobManager(QObject):
         # misc_pool은 polling보다 먼저 drain — 단발 태스크가 폴링에 새
         # 작업을 거는 것을 막고 종료한다.
         for name, fn in (("handlers", self.handlers.shutdown),
-                         ("resubmitter", self._resubmitter.shutdown),
                          ("submitter", self.submitter.shutdown),
                          ("misc_pool", lambda: self._misc_pool.waitForDone(-1)),
                          ("polling", self.polling.shutdown),

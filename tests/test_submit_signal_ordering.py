@@ -43,22 +43,3 @@ def test_all_jobs_updated_before_finished(qtbot, manager, fake_lsf, trial):
         f"{expected - snapshot_at_finish['keys']}")
 
 
-def test_resubmit_finished_after_all_updates(qtbot, manager, fake_lsf):
-    """resubmit도 동일 — 완료 시점에 전 대상 job의 PEND가 관측돼 있어야 한다."""
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        jsid = manager.submit_bulk(
-            [JobSpec(command=f"r {i}") for i in range(12)], workers=6)
-    keys = [f"{jsid}_{i}" for i in range(12)]
-
-    seen = set()
-    snap = {}
-    manager.jobs_updated.connect(lambda j, rs: [
-        seen.add(r.job_key) for r in rs if r.state is JobState.PEND])
-    manager.submit_finished.connect(
-        lambda j, rep: snap.setdefault("keys", set(seen)))
-
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        manager.resubmit_jobs(jsid, keys)
-
-    assert snap["keys"] == set(keys), (
-        f"resubmit 완료 시점 누락: {set(keys) - snap['keys']}")

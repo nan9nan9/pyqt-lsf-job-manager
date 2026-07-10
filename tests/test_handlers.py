@@ -157,7 +157,7 @@ def test_handler_default_states(qtbot, manager, fake_lsf, submitted):
 # ----------------------------------------------------------------------
 # resubmit_jobs 후 handler 재무장 — 새 실행에서 다시 돈다
 # ----------------------------------------------------------------------
-def test_handler_rearmed_after_resubmit(qtbot, manager, fake_lsf, submitted):
+def test_handler_rearmed_after_resubmit_all(qtbot, manager, fake_lsf, submitted):
     key = f"{submitted}_0"
     results = []
     manager.handler_finished.connect(lambda j, n, r: results.append(r))
@@ -177,9 +177,9 @@ def test_handler_rearmed_after_resubmit(qtbot, manager, fake_lsf, submitted):
     assert (submitted, "c") in manager.handlers._handlers
     n_before = len(results)
 
-    # resubmit → rearm이 status 리셋 → 새 실행에서 다시 돎
+    # 전체 재제출(submit_jobset) → rearm이 status 리셋 → 새 실행에서 다시 돎
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        manager.resubmit_jobs(submitted, [key])
+        manager.submit_jobset(submitted, auto_poll=False)
     fake_lsf.set_all("RUN")
     with qtbot.waitSignal(manager.handler_finished, timeout=10000):
         manager.query_once(submitted)          # 재실행 RUN → 다시 발화

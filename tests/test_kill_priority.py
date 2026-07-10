@@ -104,7 +104,7 @@ def test_array_cancel_before_bsub_returns_created(qtbot, manager, fake_lsf):
     from lsfmgr.submitter import _ArraySubmitTask, _SubmitContext
     from lsfmgr.util import TokenBucketLimiter
 
-    jsid = manager.create_jobset(2)
+    jsid = manager.create_jobset(2).id
     manager.store.add_jobs([
         JobRecord(job_id=None, array_index=i, jobset_id=jsid,
                   lsf_job_name=f"{jsid}[{i}]", state=JobState.SUBMITTING,
@@ -143,7 +143,7 @@ class _StubScope:
 def test_overlapping_kills_keep_snapshot_registered(qtbot, manager, fake_lsf):
     """같은 jobset에 kill이 겹칠 때, 먼저 끝난 kill이 진행 중인 다른 kill의
     스냅샷 등록을 지우지 않는다 — kill 1건당 slot 1개 (겹침 안전)."""
-    jsid = manager.create_jobset(1)
+    jsid = manager.create_jobset(1).id
     gate = threading.Event()
     try:
         blocked = _StubScope(gate=gate)      # kill A — acquire에서 블록 유지
@@ -182,14 +182,18 @@ def test_merge_during_active_kill_rejected(qtbot, manager, fake_lsf):
         assert manager.killer.is_active(a.id)      # kill 진행 중
 
         with pytest.raises(LsfmgrError):
-            manager.merge_jobsets([a.id, b.id])
+            manager.merge_from(a.id, b.id)
     finally:
         gate.set()
     with qtbot.waitSignal(manager.kill_finished, timeout=10000):
         pass                                       # kill 완료
 
-    merged = manager.merge_jobsets([a.id, b.id])   # 완료 후엔 정상
-    assert manager.summary(merged)["total"] == 2
+    # kill 완료 후: b(PEND=활성)가 남아 있으면 여전히 거부 (v9 비활성 가드)
+    assert manager.can_merge(a.id, b.id) is False
+    fake_lsf.set_all("DONE", 0)
+    manager.querier.query(b.id)                    # b 종료 반영 → 전원 비활성
+    manager.merge_from(a.id, b.id)                 # 이제 흡수 가능
+    assert manager.summary(a.id)["total"] == 2
 
 
 def test_kill_started_pull_consistency(qtbot, manager, fake_lsf):
@@ -252,7 +256,7 @@ def test_revert_to_created_clears_failure_residue(qtbot, manager, fake_lsf):
     from lsfmgr.submitter import _SubmitContext
     from lsfmgr.util import TokenBucketLimiter
 
-    jsid = manager.create_jobset(1)
+    jsid = manager.create_jobset(1).id
     key = f"{jsid}_0"
     manager.store.add_jobs([JobRecord(
         job_id=None, array_index=None, jobset_id=jsid, lsf_job_name=key,
@@ -301,12 +305,12 @@ def test_barrier_wait_releases_killer_pool_slot(qtbot, manager, fake_lsf):
     gate = threading.Event()
     try:
         # kill 4건을 acquire에서 블록시켜 pool 4슬롯을 점유 상태로 만든다
-        blocked = [manager.create_jobset(1) for _ in range(4)]
+        blocked = [manager.create_jobset(1).id for _ in range(4)]
         for jsid in blocked:
             manager.killer.kill_jobset(
                 jsid, scope=_StubScope(gate=gate))
 
-        target = manager.create_jobset(1)     # 5번째 — 즉시 처리돼야 함
+        target = manager.create_jobset(1).id  # 5번째 — 즉시 처리돼야 함
         with qtbot.waitSignal(manager.kill_finished, timeout=5000) as blocker:
             manager.killer.kill_jobset(target)
         assert blocker.args[0] == target      # 블록 4건보다 먼저 완료

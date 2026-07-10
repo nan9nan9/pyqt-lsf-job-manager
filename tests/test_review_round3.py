@@ -77,7 +77,8 @@ def test_kill_falls_back_when_one_attachment_errors(qtbot, manager, fake_lsf):
     # ctx 마감 전이면 merge가 거부되는 창을 피한다 (신호 타이밍 무관)
     qtbot.waitUntil(lambda: not manager.submitter.is_active(a.id)
                     and not manager.submitter.is_active(b.id), timeout=10000)
-    merged = a.merge_with(b)                     # group 부착물 2개
+    merged = a                                    # in-place 흡수 (v9)
+    a.merge_from(b, force=True)                  # PEND 활성 — force로 레코드 흡수
 
     fake_lsf.fail_next_bkill = 1                 # 첫 group bkill만 장애
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
@@ -102,10 +103,10 @@ def test_merge_stops_polling_of_originals(qtbot, manager, fake_lsf):
 
     errors = []
     manager.error_occurred.connect(lambda j, m: errors.append((j, m)))
-    merged = a.merge_with(b)                     # 원본 삭제 + 핸들 파괴
+    a.merge_from(b, force=True)                  # source(b) 삭제 + 핸들 파괴
     qtbot.wait(600)                              # 몇 polling 주기 경과
     assert errors == [], f"삭제된 원본 polling으로 error 발생: {errors}"
-    assert merged.summary["total"] == 6
+    assert a.summary["total"] == 6
 
 
 # ----------------------------------------------------------------------
@@ -198,7 +199,9 @@ def test_merge_rejects_duplicate_job_keys(qtbot, manager, fake_lsf):
         job_id=None, array_index=None, jobset_id=b.id,
         lsf_job_name=dup_key, state=JobState.CREATED, command=""))
     with pytest.raises(ValueError, match="충돌"):
-        manager.merge_jobsets([a.id, b.id])      # dup_key가 양쪽에 존재
+        # dup_key(merge_id 없음 → 신규 추가 경로)가 양쪽에 존재 — force로
+        # 활성 가드를 지나도 key 충돌은 거부된다
+        manager.merge_from(a.id, b.id, force=True)
 
 
 # ----------------------------------------------------------------------

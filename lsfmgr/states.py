@@ -45,6 +45,12 @@ class JobState(Enum):
         """bjobs 조회 대상 여부 — LSF에 존재(했)다고 간주되는 상태."""
         return self in _ON_LSF
 
+    @property
+    def is_inactive(self) -> bool:
+        """비활성(제출 전 CREATED 또는 최종) 여부 — submit/merge/remove
+        가드의 공통 술어. 활성(SUBMITTING/RETRY_WAIT/on-LSF)이면 False."""
+        return self is JobState.CREATED or self in _TERMINAL
+
 
 _TERMINAL = frozenset({
     JobState.DONE, JobState.EXIT, JobState.SUBMIT_FAILED, JobState.LOST,
@@ -94,10 +100,20 @@ class JobRecord:
     # job 단위 속성이다: merge로 wrapper/bsub jobset이 섞여도 재제출 경로를
     # 레코드만 보고 정확히 고를 수 있어야 한다 (resubmit_jobs)
     via_wrapper: bool = False
-    # bsub 경로의 제출 옵션 스냅샷(JobSpec 직렬화 JSON) — resubmit_jobs가
+    # bsub 경로의 제출 옵션 스냅샷(JobSpec 직렬화 JSON) — 재제출 시
     # queue/resources/outfile/env 를 원본 그대로 복원하는 근거.
     # command 만 다시 만들면 이 옵션들이 조용히 기본값으로 소실된다
     spec_json: Optional[str] = None
+    # --- 논리 정체성/사용자 데이터 (GUI 직접 제어용, v9) ---
+    # merge_id: job의 논리 키 — merge 시 같은 merge_id의 기존 job을 이
+    # 레코드 내용으로 replace한다(물리 키 job_key는 유지 → 테이블 행 연속).
+    # None이면 merge에서 항상 신규 추가. jobset 내 유일해야 한다(None 제외).
+    merge_id: Optional[str] = None
+    # ud_data: 사용자 정의 데이터(dict, JSON 직렬화 가능해야 함) — 실제
+    # run command 등 GUI가 임의 정보를 싣는 용도. 라이브러리는 해석하지
+    # 않고 보존만 한다. frozen 레코드 안의 dict이므로 내용을 제자리에서
+    # 고치지 말고 set_ud_data로 교체할 것.
+    ud_data: Optional[dict] = None
 
     @property
     def job_key(self) -> str:

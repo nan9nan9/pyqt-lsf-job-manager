@@ -32,7 +32,8 @@ def test_kill_merged_wrapper_and_bsub_jobset(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js_b = manager.submit(["echo x", "echo y"], mode="bulk",
                               auto_poll=False)
-    merged = js_b.merge_with(js_w)
+    merged = js_b
+    js_b.merge_from(js_w, force=True)   # 활성 — force 레코드 흡수
     assert len(fake_lsf.alive_jobs()) == 4
 
     with qtbot.waitSignal(manager.kill_finished, timeout=10000):
@@ -51,7 +52,8 @@ def test_kill_merged_optimistic_no_false_exit(qtbot, manager, fake_lsf):
                                       auto_poll=False)
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js_b = manager.submit(["echo x"], auto_poll=False)
-    merged = js_b.merge_with(js_w)
+    merged = js_b
+    js_b.merge_from(js_w, force=True)            # 활성 — force 레코드 흡수
 
     with qtbot.waitSignal(manager.kill_finished, timeout=10000):
         merged.kill()

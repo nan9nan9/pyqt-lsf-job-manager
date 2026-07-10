@@ -1,4 +1,4 @@
-# 명령별 동작 흐름 (submit · resubmit · kill · cancel · polling)
+# 명령별 동작 흐름 (submit · merge/재실행 · kill · cancel · polling)
 
 사용자 명령이 내부에서 어떤 스레드를 타고, 상태가 어떻게 전이되며, 어떤
 Signal이 언제 발행되는지를 도식으로 정리한다. GUI 연결 규칙은
@@ -63,7 +63,6 @@ main                              killer pool worker
 ──────────────────────────       ─────────────────────────────────────
 kill_jobset()
  ├ cancel_submit()                # 응답성: 미착수 worker 즉시 중단 예약
- ├ resubmit plan 취소             # kill 후 재제출 발화(부활) 방지
  ├ abort_retries()                # RETRY_WAIT QTimer 부활 방지
  ├ kill_started 발행(동기) ◀━━ UI 스피너는 여기서 켠다
  └ killer.kill_jobset(scope) → 반환
@@ -90,25 +89,24 @@ kill_jobset()
 - 정지 대기 초과는 `KillReport.errors`에 남고 optimistic 표시도 억제된다.
 - 부분 kill(`only_state=`)은 우선권 flow 없이 해당 상태만 겨냥한다.
 
-## 3. resubmit (`js.resubmit_jobs`)
+## 3. 재실행 — merge_from + submit (v9, resubmit 제거)
+
+재실행은 별도 파이프라인이 아니라 **데이터 조작 + 일반 submit** 이다:
 
 ```
-main                          killer/worker           main (queued)
-──────────────────────       ─────────────────       ─────────────────────────
-resubmit_jobs(keys)
- └ plan 등록 → kill-phase ▶  살아있는 대상 bkill
-                              (+ verify 재조회)
-                              _killed emit ─────▶    plan pop → 레코드 리셋
-                                                     (job_id/이력 소거,
-                                                      상태 SUBMITTING)
-                                                     → submit pool 재제출
-                                                       (§1과 동일 흐름)
+main (전부 앱이 직접 제어)
+──────────────────────────────────────────
+① (살아있으면) js.kill() → kill_finished 대기
+② fix = create_jobset() → fix.create_job(..., merge_id=기존과 동일)
+③ js.merge_from(fix)     # merge_id 일치분 CREATED 교체(물리 키 유지),
+                         # 신규/None 은 추가. fix 소멸. 가드: 전원 비활성
+④ js.submit()            # 전 job 리셋 후 재제출 — §1과 동일 흐름
 ```
 
-- kill-phase 중 `kill_jobset`이 오면 plan이 취소되고, 리셋 직전에 kill
-  barrier가 올라가 있으면 **born-cancelled** — 레코드를 건드리지 않고(원상
-  유지) `submit_finished(cancelled=N)`로 끝난다.
-- 재실행 job의 내부 kill은 `kill_finished`로 오지 않는다(재제출의 내부 단계).
+- ③의 replace 는 레코드만 교체한다 — force=True 로 활성 job 을 교체해도
+  LSF 의 실제 job 은 그대로다(정리는 앱 책임, 먼저 kill 권장).
+- ④의 리셋: job_id/exit_code/실행시간/fail_message/클러스터 소거,
+  spec_json(제출 옵션)·merge_id·ud_data 보존. handler 자동 재무장.
 
 ## 4. cancel (`js.cancel`)
 

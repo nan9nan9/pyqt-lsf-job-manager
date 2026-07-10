@@ -190,25 +190,23 @@ def test_closed_handle_raises(qtbot, manager, fake_lsf):
     assert js2 is not js
 
 
-def test_merge_with_invalidates_originals(qtbot, manager, fake_lsf):
-    a = manager.submit(["a 1", "a 2"], auto_poll=False, mode="bulk")
-    b = manager.submit(["b 1"], auto_poll=False, mode="bulk")
-    # merge는 submit 진행 중이면 거부된다 — summary(store)가 전원 PEND를
-    # 보여도 ctx 마감(is_active=False) 전이라는 창이 있어, 가드 조건 자체를
-    # 기다린다(신호 타이밍 무관, 결정적)
-    qtbot.waitUntil(lambda: not manager.submitter.is_active(a.id)
-                    and not manager.submitter.is_active(b.id), timeout=10000)
-    merged = a.merge_with(b)
-    assert merged.summary["total"] == 3
+def test_merge_from_invalidates_source(qtbot, manager, fake_lsf):
+    """merge_from 후 source 핸들은 파괴(JobSetClosedError), target은 유지."""
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        a = manager.submit(["echo a"], auto_poll=False)
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        b = manager.submit(["echo b"], auto_poll=False)
+    fake_lsf.set_all("DONE", 0)
+    manager.querier.query(a.id)
+    manager.querier.query(b.id)                  # 전원 비활성化
+
+    a.merge_from(b)
+
+    assert a.summary["total"] == 2               # target 핸들 유지
     with pytest.raises(JobSetClosedError):
-        _ = a.summary
-    with pytest.raises(JobSetClosedError):
-        _ = b.summary
+        b.jobs()                                 # source 핸들 파괴
 
 
-# ----------------------------------------------------------------------
-# 수용 기준 15 — manager kwargs 옵션 계층 (통합 동작)
-# ----------------------------------------------------------------------
 def test_manager_kwargs_default_queue(qtbot, fake_lsf, config):
     mgr = LsfJobManager(config=config, runner=fake_lsf,
                         default_queue="priority", max_retry=0)

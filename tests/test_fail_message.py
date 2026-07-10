@@ -137,7 +137,7 @@ def test_fetch_job_detail_error_reported_in_text(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 # resubmit 리셋 / 영속화
 # ----------------------------------------------------------------------
-def test_resubmit_clears_fail_message(qtbot, manager, fake_lsf):
+def test_full_resubmit_clears_fail_message(qtbot, manager, fake_lsf):
     fake_lsf.fail_next_bsub = 1           # 최초 1회만 실패 — 재제출은 성공
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js = manager.submit(["echo a"], auto_poll=False, max_retry=0)
@@ -145,7 +145,7 @@ def test_resubmit_clears_fail_message(qtbot, manager, fake_lsf):
     assert rec.fail_message
 
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js.resubmit_jobs([rec.job_key])   # 이번엔 성공
+        js.submit()                       # 전체 재제출 — 이번엔 성공
     rec = js.jobs()[0]
     assert rec.state is JobState.PEND
     assert rec.fail_message is None

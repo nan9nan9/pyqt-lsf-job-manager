@@ -116,15 +116,63 @@ class JobSet(QObject):
         self._check_open()
         self._manager.close_jobset(self._jobset_id)
 
-    def merge_with(self, *others: "JobSet",
-                   sync_lsf: bool = False) -> "JobSet":
-        """[sync] 다른 JobSet들과 병합 — 새 JobSet 핸들 반환 (FR-5.5).
-        merge는 항상 '이동' — 원본(이 핸들 포함)은 파괴된다. 소스가 폴링
-        중이었다면 새 jobset이 폴링을 자동으로 이어받는다."""
+    def merge_from(self, source: "JobSet", *,
+                   force: bool = False) -> List[JobRecord]:
+        """[sync] source jobset을 이 jobset에 **in-place 흡수** — merge_id
+        기준 (같으면 replace·물리 키 유지, 없거나 None이면 신규 추가).
+        source는 삭제되고 이 핸들/테이블은 그대로. 활성 job이 있으면
+        LsfmgrError — force로 레코드만 강제 교체(LSF 정리는 caller 책임).
+        can_merge(source)로 선확인."""
         self._check_open()
-        ids = [self._jobset_id] + [o.id for o in others]
-        new_id = self._manager.merge_jobsets(ids, sync_lsf=sync_lsf)
-        return self._manager.jobset(new_id)
+        return self._manager.merge_from(self._jobset_id, source.id,
+                                        force=force)
+
+    def can_merge(self, source: "JobSet") -> bool:
+        """[sync, snapshot] merge_from(source) 가능 여부 — GUI 버튼용."""
+        self._check_open()
+        return self._manager.can_merge(self._jobset_id, source.id)
+
+    def create_job(self, command, *, merge_id: Optional[str] = None,
+                   ud_data: Optional[dict] = None,
+                   wrapper: bool = True) -> JobRecord:
+        """[sync] job 1건 생성(CREATED) — JobSpec=bsub / argv=wrapper /
+        문자열=wrapper 기본(wrapper=False면 bsub). merge_id는 논리 키
+        (merge 시 replace 기준, jobset 내 유일), ud_data는 사용자 dict."""
+        self._check_open()
+        return self._manager.create_job(self._jobset_id, command,
+                                        merge_id=merge_id, ud_data=ud_data,
+                                        wrapper=wrapper)
+
+    def create_jobs(self, commands, **kw) -> List[JobRecord]:
+        """[sync] job 일괄 생성 — create_job의 배치 버전
+        (merge_ids=/ud_datas=/wrapper=)."""
+        self._check_open()
+        return self._manager.create_jobs(self._jobset_id, commands, **kw)
+
+    def set_ud_data(self, ref, ud_data: Optional[dict]) -> JobRecord:
+        """[sync] job의 ud_data 교체 — ref는 job_key/merge_id(str) 또는
+        job_id(int)."""
+        self._check_open()
+        return self._manager.set_ud_data(self._jobset_id, ref, ud_data)
+
+    def can_submit(self) -> bool:
+        """[sync, snapshot] submit 가능 여부 — job 1건 이상 + 전원 비활성
+        (CREATED/DONE/EXIT/SUBMIT_FAILED/LOST) + 진행 중 submit/kill 없음."""
+        self._check_open()
+        return self._manager.can_submit(self._jobset_id)
+
+    def submit(self, **opts: object) -> None:
+        """[async→Signal] 이 jobset의 **전 job**을 (재)제출 — 결과는
+        submit_finished. 활성 job이 있으면 LsfmgrError (can_submit로 선확인).
+        같은 jobset/job_key가 전이되므로 핸들·테이블이 그대로."""
+        self._check_open()
+        self._manager.submit_jobset(self._jobset_id, **opts)
+
+    def clear(self, *, force: bool = False) -> List[JobRecord]:
+        """[sync] 전 job 삭제 — 비활성만(활성이면 LsfmgrError, force로
+        레코드만 강제 삭제)."""
+        self._check_open()
+        return self._manager.clear_jobs(self._jobset_id, force=force)
 
     def add_job(self, record: JobRecord, sync_lsf: bool = True) -> JobRecord:
         """[sync] job 편입 (FR-5.4). sync_lsf=True면 bmod -g 동기화."""
@@ -132,25 +180,17 @@ class JobSet(QObject):
         return self._manager.add_job(self._jobset_id, record,
                                      sync_lsf=sync_lsf)
 
-    def remove_job(self, job_key: str) -> JobRecord:
-        """[sync] job 제외 — 제거된 레코드 반환 (add_job의 역연산).
-        LSF의 실제 job은 유지된다(추적만 해제 — 필요하면 먼저 kill)."""
+    def remove_job(self, *, job_id: Optional[int] = None,
+                   merge_id: Optional[str] = None,
+                   job_key: Optional[str] = None,
+                   force: bool = False) -> List[JobRecord]:
+        """[sync] job 삭제 — job_id/merge_id/job_key 중 하나로 지정 (v9).
+        비활성만 삭제 가능(활성이면 LsfmgrError, force로 레코드만 강제 삭제
+        — LSF job 정리는 caller 책임). LSF의 실제 job은 죽이지 않는다."""
         self._check_open()
-        return self._manager.remove_job(self._jobset_id, job_key)
-
-    def resubmit_jobs(self, job_keys: Sequence[str], *,
-                      commands: Optional[Dict[str, str]] = None,
-                      verify: bool = True, **opts: object) -> None:
-        """[async→Signal] 지정 job들을 상태 기반으로 재실행 — 결과는 submit_finished.
-        살아있는 job은 kill 후, 나머지는 그냥 재제출한다(레코드 재사용).
-        commands로 job_key별 새 커맨드 지정 가능(생략 시 기존 커맨드 재사용).
-        pre_submit=fn(opts로 전달) 지정 시 재제출 전 게이트 — kill 이전에 검사해
-        False면 돌던 job을 죽이지 않고 재제출도 안 한다(FR-9).
-        envpath=경로(opts로 전달) 지정 시 kill 단계에서 그 LSF env를 source한
-        bkill (MC forward job — kill_jobs의 envpath와 동일)."""
-        self._check_open()
-        self._manager.resubmit_jobs(self._jobset_id, job_keys,
-                                    commands=commands, verify=verify, **opts)
+        return self._manager.remove_jobs(
+            self._jobset_id, job_id=job_id, merge_id=merge_id,
+            job_key=job_key, force=force)
 
     def add_handler(self, name: str, fn: "Callable[..., object]", *,
                     start_states: object = None,

@@ -54,13 +54,16 @@ def test_merge_during_active_submit_rejected(qtbot, config):
                                workers=1, auto_poll=False)
         assert mgr.submitter.is_active(js_active.id)
         with pytest.raises(LsfmgrError):
-            mgr.merge_jobsets([js_active.id, js_done.id])
+            mgr.merge_from(js_done.id, js_active.id)
         lsf.gate.set()
         qtbot.waitUntil(lambda: not mgr.submitter.is_active(js_active.id),
                         timeout=10000)
-        # 소스가 온전해야 완료 후 merge는 정상 동작
-        merged = mgr.merge_jobsets([js_active.id, js_done.id])
-        assert mgr.summary(merged)["total"] == 3
+        # 소스가 온전해야 완료 후 merge는 정상 동작 (v9: 전원 비활성 필요)
+        for js in (js_done, js_active):
+            lsf.set_all("DONE", 0)
+            mgr.querier.query(js.id)
+        mgr.merge_from(js_done.id, js_active.id)
+        assert mgr.summary(js_done.id)["total"] == 3
     finally:
         lsf.gate.set()
         mgr.shutdown()
@@ -70,7 +73,7 @@ def test_merge_during_active_submit_rejected(qtbot, config):
 # 2. add_job 동일 job_key 거부
 # ----------------------------------------------------------------------
 def test_add_job_duplicate_key_rejected(manager):
-    jsid = manager.create_jobset(1, label="dup")
+    jsid = manager.create_jobset(1, label="dup").id
     rec = JobRecord(job_id=111, array_index=None, jobset_id=jsid,
                     lsf_job_name="manual_1", state=JobState.RUN,
                     command="echo a")

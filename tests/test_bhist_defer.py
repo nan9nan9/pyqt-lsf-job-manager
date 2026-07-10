@@ -173,26 +173,6 @@ def test_bjobs_chunk_failure_isolated(qtbot, config, fake_lsf):
         mgr.shutdown()
 
 
-def test_resubmit_verify_proceeds_fast_on_query_failure(qtbot, manager,
-                                                        fake_lsf):
-    """resubmit verify의 종료 확인 조회가 실패하면 라운드를 더 돌지 않고
-    즉시 진행한다 — 전면 장애에서 5라운드 × timeout이 직렬로 쌓여
-    코디네이터 pool을 분 단위로 점유하던 회귀 방지 (best-effort 검증)."""
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
-    rec = js.jobs()[0]
-    fake_lsf.set_job(rec.job_id, "RUN")
-    manager.querier.query(js.id)             # RUN 반영 (kill 대상化)
-
-    fake_lsf.bjobs_fail_ids = {rec.job_id}   # 종료 확인 조회가 실패하는 상황
-
-    t0 = time.monotonic()
-    with qtbot.waitSignal(manager.submit_finished, timeout=6000):
-        manager.resubmit_jobs(js.id, [rec.job_key], verify=True)
-    # 5라운드 × interval(기본 2s)이면 8초+ — 조기 진행이면 수 초 내
-    assert time.monotonic() - t0 < 6.0
-
-
 def test_jobid_none_deferred_when_bhist_failing(qtbot, manager, fake_lsf):
     """job_id 없는 missing 레코드는 bhist로 확인 자체가 불가 — bhist 장애가
     섞인 사이클엔 LOST 확정하지 않고 보류한다 (chunk 격리 전과 동일, FR-4.3)."""

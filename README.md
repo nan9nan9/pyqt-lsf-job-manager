@@ -133,14 +133,6 @@ job은 `CREATED`로 남습니다(기본은 `submit_finished(cancelled=N)`도 발
 > ⚠️ 콜백은 **worker 스레드**에서 돕니다 — Qt 위젯 등 **GUI 객체 접근 금지**.
 > 재시도 시 재실행되므로 부수효과는 **멱등**이어야 합니다.
 
-`resubmit_jobs`도 `pre_submit`을 받습니다. 재제출은 살아있는 job을 kill 후
-재실행하는데, 게이트는 **kill 이전**에 돕니다 — 그래서 게이트가 `False`면
-돌던 job을 **죽이지 않고 그대로** 두며 재제출도 안 합니다(레코드 미변경).
-게이트 실행 중 `js.cancel()`을 부르면 kill 착수 전에 멈춥니다.
-```python
-js.resubmit_jobs([job_key, ...], pre_submit=prepare)
-```
-
 > 작성 규칙·실행 방식(멀티 프로세스)·검증·트러블슈팅, 그리고 lsfmgr가 직접 bsub를
 > 조립하는 저수준 `submit`(+`bsub_path`)은 **[`docs/lsfmgr.md`](docs/lsfmgr.md)**
 > 에 정리되어 있습니다.
@@ -152,6 +144,47 @@ js.resubmit_jobs([job_key, ...], pre_submit=prepare)
 `submit()`은 문자열 ID가 아니라 **JobSet**을 반환합니다.
 이 JobSet 하나로 해당 묶음의 모니터링/제어/조회를 전부 합니다.
 
+### 3.0 v9 기본 흐름 — jobset 선생성 + GUI 직접 제어
+
+GUI는 제출 전(CREATE 단계)부터 jobset을 갖습니다 — `create_jobset`으로
+빈 jobset(핸들)을 먼저 만들고, job을 누적한 뒤, jobset 단위로 제출합니다.
+같은 jobset/job_key가 전이되므로 **핸들 교체·테이블 리셋이 없습니다**.
+
+```python
+js = mgr.create_jobset(label="sweep")     # 빈 jobset — 핸들 즉시 (CREATED)
+table.bind(js)                            # 테이블은 처음부터 이 핸들에
+
+js.create_job("customwrapper_sub -i a.sp",     # CREATED 레코드 누적
+              merge_id="case-a",               # 논리 키 (merge 시 replace 기준)
+              ud_data={"run": "...", "rev": 3})  # 사용자 데이터 (라이브러리는 보존만)
+js.create_jobs([...], merge_ids=[...], ud_datas=[...])   # 배치
+
+if js.can_submit():                        # 전원 비활성 + job 존재?
+    js.submit(workers=8)                   # **전 job** (재)제출 — 이전
+                                           # DONE/EXIT도 리셋 후 재실행
+```
+
+**재실행 패턴** (resubmit API 없음): 실패/수정 job을 같은 `merge_id`로 담은
+새 jobset을 만들어 흡수 → 다시 submit:
+
+```python
+fix = mgr.create_jobset(label="fix")
+fix.create_job("customwrapper_sub -i a_fixed.sp", merge_id="case-a")
+if js.can_merge(fix):
+    js.merge_from(fix)         # case-a만 CREATED로 교체 (다른 결과 유지,
+                               # 물리 키 유지 — 테이블 행 연속), fix 소멸
+js.submit()                    # 전체 재실행
+```
+
+**규칙 요약** — 전부 "비활성(CREATED/DONE/EXIT/SUBMIT_FAILED/LOST)" 기준:
+
+| 명령 | 가드 | force |
+|---|---|---|
+| `js.submit()` | 전 job 비활성 + 1건 이상 (`can_submit`) | — (활성은 먼저 kill) |
+| `js.merge_from(src)` | 양쪽 전 job 비활성 (`can_merge`) | 레코드만 강제 교체 (LSF 정리는 앱 책임) |
+| `js.remove_job(...)` / `js.clear()` | 대상 비활성 | 레코드만 강제 삭제 (〃) |
+| `js.kill()` | 예외 — 활성(RUN/PEND/SUBMITTING)만 대상, 종료분은 자동 skip | — |
+
 ### 3.1 Signal (이 JobSet의 이벤트만 옴 — 필터링 불필요)
 
 이름은 `mgr.*` Signal과 동일하다(인자에서 `jsid`만 빠짐). 여러 JobSet을 한 곳에서
@@ -160,8 +193,8 @@ js.resubmit_jobs([job_key, ...], pre_submit=prepare)
 | Signal | 인자 | 시점 |
 |---|---|---|
 | `jobset_updated` | `dict` 요약 | **submit 완료 시(초기 PEND)** + polling/refresh 후 |
-| `submit_progress` | `(done, total)` | submit/resubmit 진행 (throttled) |
-| `submit_finished` | `SubmitReport` | submit/resubmit 완료 (retry 포함 최종) |
+| `submit_progress` | `(done, total)` | submit 진행 (throttled) |
+| `submit_finished` | `SubmitReport` | submit 완료 (retry 포함 최종) |
 | `jobs_failed` | `list[JobRecord]` | SUBMIT_FAILED/EXIT/LOST 변경분 — `rec.fail_message`에 실패 진단 원문 |
 | `kill_started` | — | kill 접수 즉시(동기) 착수 통지 — 정지 대기로 완료가 늦어져도 UI가 바로 표시 |
 | `kill_progress` | `(done, total)` | 대량 chunk kill 진행 (throttled, 마지막 100%) |
@@ -184,11 +217,10 @@ js.kill(only_state=JobState.PEND)      # PEND만
 js.kill(verify=True)                   # 실제 종료까지 확인
 js.kill_jobs([job_key, ...])           # 선택 job만 kill (테이블 선택 행)
 js.kill_jobs(keys, envpath="/lsf/busan/conf/cshrc.lsf")  # MC forward job — env source 후 bkill
-js.cancel()                            # 진행 중 submit/resubmit 중단 (된 것은 유지)
+js.cancel()                            # 진행 중 submit 중단 (된 것은 유지)
 js.refresh()                           # 지금 즉시 1회 조회 요청
 js.stop_polling(); js.start_polling(interval_s=30)
-js.resubmit_jobs([job_key, ...])       # 특정 job 재실행 — 살아있으면 kill 후
-                                       # (레코드 재사용, 원 제출 옵션 보존)
+js.submit(workers=8)                   # 전 job (재)제출 — can_submit로 선확인
 js.close()                             # 종결 (전원 terminal일 때)
 ```
 
@@ -224,8 +256,6 @@ js.close()                             # 종결 (전원 terminal일 때)
 > 불필요하게 envpath를 씌우게 됩니다. (`source_cluster`는 LSF 버전에 따라 로컬
 > job도 자기 클러스터명이 나올 수 있어 판별 기준으로는 부적합 — `forward_cluster`
 > 로 판별하세요.)
-> `js.resubmit_jobs(keys, envpath=...)`도 동일 — 재제출의 kill 단계에서 그 env를
-> source합니다 (안 주면 forward job이 안 죽은 채 새 job이 중복 제출됨).
 
 ### 3.3 조회 (동기 — 로컬 스냅샷, LSF 호출 없음)
 
@@ -248,8 +278,8 @@ js.id                      # jobset_id 문자열 (로그/저장용)
 > 같지만 job이 하나도 없는 빈 JobSet은 `is_inactive=True`(is_done은 False)로
 > 다릅니다.
 > ```python
-> if js.is_inactive:        # 진행 중인 것 없음 → 재수행 판단
->     js.resubmit_jobs([r.job_key for r in js.jobs()])
+> if js.can_submit():       # 진행 중인 것 없음 → 전체 재수행 가능
+>     js.submit()
 > ```
 
 > **대량 제출을 백그라운드로 돌리기** (`is_submitting` / `submit_state`) —
@@ -271,7 +301,7 @@ js.id                      # jobset_id 문자열 (로그/저장용)
 > ```
 > `submit_state`는 진행 중이 아니면 `None`이고, 완료 후 최종 결과는
 > `submit_finished(SubmitReport)` 또는 `js.summary`로 봅니다.
-> `is_submitting`은 제출/재제출이 도는 동안 True입니다(`jobs`의 PEND/RUN이
+> `is_submitting`은 제출이 도는 동안 True입니다(`jobs`의 PEND/RUN이
 > 아니라 **제출 작업 자체**의 진행 여부).
 > **kill도 대칭**입니다 — 대량 chunked kill(특히 MC `envpath`는 chunk마다 env
 > source, `verify`는 재조회 루프)도 오래 걸릴 수 있어 `js.is_killing` /
@@ -283,7 +313,7 @@ js.id                      # jobset_id 문자열 (로그/저장용)
 > **실패 원인 표시** — 두 경로로 확인합니다.
 > - **SUBMIT_FAILED/RETRY_WAIT**: `rec.fail_message`에 bsub/wrapper 실행의
 >   stderr/stdout(터미널에서 봤을 메시지)이 자동 저장됩니다. 재시도 성공/
->   재제출 시 자동으로 지워집니다.
+>   재제출(js.submit) 시 자동으로 지워집니다.
 > - **EXIT**: 자동 수집하지 않습니다(폴링 오버헤드 0). 상태 셀 클릭 등
 >   필요한 시점에 `js.fetch_job_detail(job_key)`를 호출하면 `bhist -l`
 >   원문이 `js.job_detail_ready(job_key, text)` Signal로 옵니다(bhist는
@@ -298,9 +328,13 @@ js.id                      # jobset_id 문자열 (로그/저장용)
 ### 3.4 그 외
 
 ```python
-merged = js_a.merge_with(js_b)         # 병합 → 새 JobSet
+js_a.merge_from(js_b)                  # b를 a에 흡수(merge_id 규칙) — b 소멸
+js_a.can_merge(js_b)                   # 흡수 가능 여부 (전원 비활성)
 js2 = mgr.jobset(jobset_id)            # ID로 JobSet 재획득
-js.add_job(record); js.remove_job(key) # job 편입 / 편입 취소 (intended 유지)
+js.remove_job(merge_id="m1")           # 삭제 — job_id/merge_id/job_key 기준
+js.remove_job(job_id=12345, force=True)  # 활성이면 force 필요 (레코드만)
+js.clear()                             # 전 job 삭제 (동일 가드)
+js.set_ud_data("m1", {"note": "..."}) # 사용자 데이터 교체
 ```
 
 ### 3.5 job별 handler — 폴링 사이클마다 실행 (파싱 + 최종 수집)
@@ -328,7 +362,7 @@ js.remove_handler("collect")               # 해제
   `res.final`로 구분. 예외는 `res.error`에 담겨 옵니다(다른 job에 영향 없음).
 - **폴링이 돌고 있어야 동작**합니다(auto_poll 기본이면 자동). 첫 실행은 다음 폴링
   사이클이며, `js.refresh()`로 즉시 1회 유도 가능합니다.
-- `resubmit_jobs`로 재실행하면 진행 상태가 자동 재무장되어 새 실행에서 다시 돕니다.
+- `js.submit()`으로 전체 재실행하면 진행 상태가 자동 재무장되어 새 실행에서 다시 돕니다.
 - 실행 예제: `examples/handler_example.py`, 상세 규칙:
   [`docs/lsfmgr.md`](docs/lsfmgr.md) §2.5.
 
@@ -386,7 +420,7 @@ js.jobset_updated.connect(on_update)
 pull하면 신호 내용과 일치하는 상태를 봅니다.
 
 ```
-submit / resubmit:
+submit (js.submit 재제출 포함):
   (ready_started → ready_finished)          # pre_submit 게이트 지정 시
   → submit_started                          # 제출 착수
   → jobs_updated([전원 SUBMITTING])          # 표가 즉시 채워짐
@@ -465,7 +499,6 @@ WARNING=retry·부착물 실패, ERROR=SUBMIT_FAILED/LOST 확정·worker 예외(
 |---|---|---|---|
 | submit | `lsfmgr.submit` | `submit 착수 <jsid>: N건 (bsub/wrapper)` | `submit 완료 …` |
 | kill | `lsfmgr.kill` | `kill 착수 <jsid> (전체/only/ids)` | `kill 완료 …: 요청/확인/미확인/잔존` |
-| resubmit | `lsfmgr.resubmit` | `resubmit 착수 …` | `resubmit kill 단계 완료 → 재제출 dispatch` |
 | polling | `lsfmgr.monitor` | (정규 사이클은 DEBUG — 신호로 통지) | 자동 중지 시 INFO |
 
 `lsfmgr.command`만 DEBUG로 올리면 원시 명령·stdout/stderr을 볼 수 있다
@@ -537,6 +570,6 @@ customwrapper_sub -q normal run1.sp   # == bsub -q normal run1.sp → "Job <id> 
 파싱해 job_id 기반으로 관리합니다. job 마다 다른 wrapper를 섞어 쓸 수 있습니다.
 
 실제 환경에서 wrapper를 작성·지정하는 방법은 **[`docs/lsfmgr.md`](docs/lsfmgr.md)**,
-대량 job 명령(submit/kill/resubmit)을 GUI에 **바로바로 반영**하는 Signal 사용법은
+대량 job 명령(submit/kill)을 GUI에 **바로바로 반영**하는 Signal 사용법은
 **[`docs/signal_usage.md`](docs/signal_usage.md)**, mocklsf 자체는
 [`docs/mocklsf.md`](docs/mocklsf.md)를 참고하세요.
