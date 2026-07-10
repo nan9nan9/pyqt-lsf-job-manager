@@ -80,7 +80,7 @@ def test_job_detail_sync_exit(qtbot, manager, fake_lsf):
     rec = js.jobs()[0]
     fake_lsf.set_job(rec.job_id, "EXIT", exit_code=7)
 
-    text = js.job_detail(rec.job_key)
+    text = manager.job_detail(js, rec.job_key)
     assert "Exited with exit code 7" in text
     assert f"Job <{rec.job_id}>" in text  # bhist -l 원문
 
@@ -91,7 +91,7 @@ def test_job_detail_submit_failed_falls_back(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js = manager.submit(["echo a"], auto_poll=False, max_retry=0)
     rec = js.jobs()[0]
-    assert "queue unavailable" in js.job_detail(rec.job_key)
+    assert "queue unavailable" in manager.job_detail(js, rec.job_key)
 
 
 def test_job_detail_array_element(qtbot, manager, fake_lsf):
@@ -102,7 +102,7 @@ def test_job_detail_array_element(qtbot, manager, fake_lsf):
     rec = next(r for r in js.jobs() if r.array_index == 2)
     fake_lsf.set_job(rec.job_id, "EXIT", exit_code=9, array_index=2)
 
-    text = js.job_detail(rec.job_key)
+    text = manager.job_detail(js, rec.job_key)
     assert "Exited with exit code 9" in text
     assert f"Job <{rec.job_id}[2]>" in text
     assert f"Job <{rec.job_id}[1]>" not in text   # 다른 element 미포함
@@ -116,7 +116,7 @@ def test_fetch_job_detail_async_signal(qtbot, manager, fake_lsf):
     fake_lsf.set_job(rec.job_id, "EXIT", exit_code=5)
 
     with qtbot.waitSignal(js.job_detail_ready, timeout=10000) as blocker:
-        js.fetch_job_detail(rec.job_key)
+        manager.fetch_job_detail(js, rec.job_key)
     key, text = blocker.args
     assert key == rec.job_key
     assert "Exited with exit code 5" in text
@@ -145,7 +145,7 @@ def test_full_resubmit_clears_fail_message(qtbot, manager, fake_lsf):
     assert rec.fail_message
 
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js.submit()                       # 전체 재제출 — 이번엔 성공
+        manager.submit(js)                       # 전체 재제출 — 이번엔 성공
     rec = js.jobs()[0]
     assert rec.state is JobState.PEND
     assert rec.fail_message is None

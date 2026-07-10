@@ -150,17 +150,22 @@ GUI는 제출 전(CREATE 단계)부터 jobset을 갖습니다 — `create_jobset
 빈 jobset(핸들)을 먼저 만들고, job을 누적한 뒤, jobset 단위로 제출합니다.
 같은 jobset/job_key가 전이되므로 **핸들 교체·테이블 리셋이 없습니다**.
 
+**명령은 전부 manager 한 곳입니다** — `mgr.submit(js)` / `mgr.kill(js)` /
+`mgr.merge(a, b)` 처럼 핸들을 인자로 넘깁니다. 핸들(JobSet)은 **조회
+(`jobs()`/`summary`/`is_*`)와 Signal 전용 뷰**라 명령 API가 두 군데로
+갈라지지 않습니다.
+
 ```python
 js = mgr.create_jobset(label="sweep")     # 빈 jobset — 핸들 즉시 (CREATED)
 table.bind(js)                            # 테이블은 처음부터 이 핸들에
 
-js.create_job("customwrapper_sub -i a.sp",     # CREATED 레코드 누적
+mgr.create_job(js, "customwrapper_sub -i a.sp",   # CREATED 레코드 누적
               merge_id="case-a",               # 논리 키 (merge 시 replace 기준)
               ud_data={"run": "...", "rev": 3})  # 사용자 데이터 (라이브러리는 보존만)
-js.create_jobs([...], merge_ids=[...], ud_datas=[...])   # 배치
+mgr.create_jobs(js, [...], merge_ids=[...], ud_datas=[...])   # 배치
 
-if js.can_submit():                        # 전원 비활성 + job 존재?
-    js.submit(workers=8)                   # **전 job** (재)제출 — 이전
+if mgr.can_submit(js):                     # 전원 비활성 + job 존재?
+    mgr.submit(js, workers=8)              # **전 job** (재)제출 — 이전
                                            # DONE/EXIT도 리셋 후 재실행
 ```
 
@@ -169,21 +174,21 @@ if js.can_submit():                        # 전원 비활성 + job 존재?
 
 ```python
 fix = mgr.create_jobset(label="fix")
-fix.create_job("customwrapper_sub -i a_fixed.sp", merge_id="case-a")
-if js.can_merge(fix):
-    js.merge_from(fix)         # case-a만 CREATED로 교체 (다른 결과 유지,
+mgr.create_job(fix, "customwrapper_sub -i a_fixed.sp", merge_id="case-a")
+if mgr.can_merge(js, fix):
+    mgr.merge(js, fix)         # case-a만 CREATED로 교체 (다른 결과 유지,
                                # 물리 키 유지 — 테이블 행 연속), fix 소멸
-js.submit()                    # 전체 재실행
+mgr.submit(js)                 # 전체 재실행
 ```
 
 **규칙 요약** — 전부 "비활성(CREATED/DONE/EXIT/SUBMIT_FAILED/LOST)" 기준:
 
 | 명령 | 가드 | force |
 |---|---|---|
-| `js.submit()` | 전 job 비활성 + 1건 이상 (`can_submit`) | — (활성은 먼저 kill) |
-| `js.merge_from(src)` | 양쪽 전 job 비활성 (`can_merge`) | 레코드만 강제 교체 (LSF 정리는 앱 책임) |
-| `js.remove_job(...)` / `js.clear()` | 대상 비활성 | 레코드만 강제 삭제 (〃) |
-| `js.kill()` | 예외 — 활성(RUN/PEND/SUBMITTING)만 대상, 종료분은 자동 skip | — |
+| `mgr.submit(js)` | 전 job 비활성 + 1건 이상 (`can_submit`) | — (활성은 먼저 kill) |
+| `mgr.merge(js, src)` | 양쪽 전 job 비활성 (`can_merge`) | 레코드만 강제 교체 (LSF 정리는 앱 책임) |
+| `mgr.remove_job(js, ...)` / `mgr.clear(js)` | 대상 비활성 | 레코드만 강제 삭제 (〃) |
+| `mgr.kill(js)` | 예외 — 활성(RUN/PEND/SUBMITTING)만 대상, 종료분은 자동 skip | — |
 
 ### 3.1 Signal (이 JobSet의 이벤트만 옴 — 필터링 불필요)
 
@@ -212,16 +217,16 @@ js.submit()                    # 전체 재실행
 ### 3.2 제어 (비동기 — 즉시 반환, 결과는 Signal)
 
 ```python
-js.kill()                              # 전체 kill (명령 1회, ARG_MAX 안전)
-js.kill(only_state=JobState.PEND)      # PEND만
-js.kill(verify=True)                   # 실제 종료까지 확인
-js.kill_jobs([job_key, ...])           # 선택 job만 kill (테이블 선택 행)
-js.kill_jobs(keys, envpath="/lsf/busan/conf/cshrc.lsf")  # MC forward job — env source 후 bkill
-js.cancel()                            # 진행 중 submit 중단 (된 것은 유지)
-js.refresh()                           # 지금 즉시 1회 조회 요청
-js.stop_polling(); js.start_polling(interval_s=30)
-js.submit(workers=8)                   # 전 job (재)제출 — can_submit로 선확인
-js.close()                             # 종결 (전원 terminal일 때)
+mgr.kill(js)                           # 전체 kill (명령 1회, ARG_MAX 안전)
+mgr.kill(js, only_state=JobState.PEND) # PEND만
+mgr.kill(js, verify=True)              # 실제 종료까지 확인
+mgr.kill_jobs(js, [job_key, ...])      # 선택 job만 kill (테이블 선택 행)
+mgr.kill_jobs(js, keys, envpath="/lsf/busan/conf/cshrc.lsf")  # MC forward — env source 후 bkill
+mgr.cancel_submit(js)                  # 진행 중 submit 중단 (된 것은 유지)
+mgr.query_once(js)                     # 지금 즉시 1회 조회 요청
+mgr.stop_polling(js); mgr.start_polling(js, 30)
+mgr.submit(js, workers=8)              # 전 job (재)제출 — can_submit로 선확인
+mgr.close(js)                          # 종결 (전원 terminal일 때)
 ```
 
 > **kill 상태 정책** (`LsfJobManager(kill_status_policy=...)`):

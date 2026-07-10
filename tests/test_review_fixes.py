@@ -62,13 +62,13 @@ def test_failed_close_keeps_polling_and_handle(qtbot, manager, fake_lsf):
                         auto_poll=False)
     with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
-    js.start_polling(interval_s=0.2)
+    manager.start_polling(js, 0.2)
     updates = []
     js.jobset_updated.connect(updates.append)
     qtbot.waitUntil(lambda: len(updates) >= 1, timeout=10000)
 
     with pytest.raises(LsfmgrError):
-        js.close()                                   # 전원 PEND — 거부
+        manager.close(js)                                   # 전원 PEND — 거부
 
     # 핸들 살아있고 polling도 계속 돈다
     assert js.summary["total"] == 5
@@ -138,7 +138,7 @@ def test_kill_falls_through_when_group_rejected(qtbot, manager, fake_lsf):
     assert all(j.group is None for j in fake_lsf.jobs.values())
 
     with qtbot.waitSignal(js.kill_finished, timeout=10000) as blocker:
-        js.kill()
+        manager.kill(js)
     rpt = blocker.args[0]
     # group 전략은 no-match로 표시되고 name 패턴으로 fallback해 전부 kill
     assert any("(no-match)" in s for s in rpt.strategies)
@@ -159,7 +159,7 @@ def test_array_partial_kill_only_pend(qtbot, manager, fake_lsf):
         manager.store.transition(jsid, f"{jsid}[{i}]", JobState.RUN)
 
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
-        manager.kill_jobset(jsid, only_state=JobState.PEND)
+        manager.kill(jsid, only_state=JobState.PEND)
     rpt = blocker.args[1]
     assert rpt.requested == 5                    # PEND element만
     alive = fake_lsf.alive_jobs()

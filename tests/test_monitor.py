@@ -197,7 +197,7 @@ def test_polling_shutdown_cleans_timers_in_thread(qtbot, manager, fake_lsf,
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
     fake_lsf.set_all("RUN")
-    js.start_polling(interval_s=5.0)          # 여유 없이 바로 shutdown
+    manager.start_polling(js, 5.0)          # 여유 없이 바로 shutdown
     worker = manager.polling._worker
     manager.shutdown()
 

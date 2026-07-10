@@ -26,7 +26,7 @@ def test_kill_logs_start_and_finish(qtbot, manager, fake_lsf, caplog):
         js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
     with caplog.at_level(logging.INFO, logger="lsfmgr.kill"):
         with qtbot.waitSignal(manager.kill_finished, timeout=10000):
-            manager.kill_jobset(js.id)
+            manager.kill(js.id)
     msgs = [r.message for r in caplog.records if r.name == "lsfmgr.kill"]
     assert any(m.startswith("kill 착수") for m in msgs), msgs
     assert any(m.startswith("kill 완료") for m in msgs), msgs

@@ -45,7 +45,7 @@ def test_kill_during_submit_cancels_unsubmitted_and_kills_submitted(
 
         with qtbot.waitSignals([mgr.submit_finished, mgr.kill_finished],
                                timeout=15000):
-            mgr.kill_jobset(js.id)           # kill 우선권 발동
+            mgr.kill(js.id)           # kill 우선권 발동
             runner.gate.set()                # 진행 중이던 bsub 완료 허용
 
         states = sorted(r.state.name for r in js.jobs())
@@ -66,7 +66,7 @@ def test_kill_during_submit_invariant_no_survivors(qtbot, manager, fake_lsf):
                            timeout=15000):
         js = manager.submit([f"echo {i}" for i in range(30)], mode="bulk",
                             auto_poll=False)
-        manager.kill_jobset(js.id)
+        manager.kill(js.id)
 
     assert fake_lsf.alive_jobs() == []
     allowed = {JobState.EXIT, JobState.CREATED, JobState.SUBMIT_FAILED}
@@ -85,7 +85,7 @@ def test_kill_during_array_submit_no_leak(qtbot, config, fake_lsf):
 
         with qtbot.waitSignals([mgr.submit_finished, mgr.kill_finished],
                                timeout=15000):
-            mgr.kill_jobset(js.id)
+            mgr.kill(js.id)
             runner.gate.set()
 
         assert all(r.state is JobState.EXIT for r in js.jobs())
@@ -182,7 +182,7 @@ def test_merge_during_active_kill_rejected(qtbot, manager, fake_lsf):
         assert manager.killer.is_active(a.id)      # kill 진행 중
 
         with pytest.raises(LsfmgrError):
-            manager.merge_from(a.id, b.id)
+            manager.merge(a.id, b.id)
     finally:
         gate.set()
     with qtbot.waitSignal(manager.kill_finished, timeout=10000):
@@ -192,7 +192,7 @@ def test_merge_during_active_kill_rejected(qtbot, manager, fake_lsf):
     assert manager.can_merge(a.id, b.id) is False
     fake_lsf.set_all("DONE", 0)
     manager.querier.query(b.id)                    # b 종료 반영 → 전원 비활성
-    manager.merge_from(a.id, b.id)                 # 이제 흡수 가능
+    manager.merge(a.id, b.id)                 # 이제 흡수 가능
     assert manager.summary(a.id)["total"] == 2
 
 
@@ -207,7 +207,7 @@ def test_kill_started_pull_consistency(qtbot, manager, fake_lsf):
         killing=js.is_killing, snap=js.kill_state is not None))
 
     with qtbot.waitSignal(manager.kill_finished, timeout=10000):
-        js.kill()
+        manager.kill(js)
 
     assert pulled == {"killing": True, "snap": True}, pulled
 
@@ -219,7 +219,7 @@ def test_kill_finished_emitted_on_worker_exception(qtbot, manager, fake_lsf):
     manager.error_occurred.connect(lambda _j, m: errors.append(m))
 
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
-        manager.kill_jobset("no_such_jobset")      # get_jobset 예외 유발
+        manager.kill("no_such_jobset")      # get_jobset 예외 유발
 
     _jsid, report = blocker.args
     assert report.errors and "internal" in report.errors[0]
@@ -290,7 +290,7 @@ def test_kill_started_emitted_synchronously(qtbot, manager, fake_lsf):
     js.kill_started.connect(lambda: order.append(("handle_started", js.id)))
 
     with qtbot.waitSignal(manager.kill_finished, timeout=10000):
-        manager.kill_jobset(js.id)
+        manager.kill(js.id)
         # 동기 발행 — kill_jobset 반환 시점에 이미 도착해 있어야 한다
         assert ("started", js.id) in order
         assert ("handle_started", js.id) in order

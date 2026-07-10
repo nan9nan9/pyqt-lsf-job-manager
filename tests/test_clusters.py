@@ -146,9 +146,9 @@ def test_full_resubmit_clears_cluster(qtbot, mc_manager, fake_lsf):
     # v9: 살아있는 job은 먼저 kill(GUI 직접 제어) → 종료 후 전체 재제출.
     # 재제출 리셋이 이전 클러스터 흔적을 지워야 한다
     with qtbot.waitSignal(mc_manager.kill_finished, timeout=10000):
-        js.kill()
+        mc_manager.kill(js)
     with qtbot.waitSignal(mc_manager.submit_finished, timeout=10000):
-        js.submit()
+        mc_manager.submit(js)
     rec = js.jobs()[0]
     assert rec.state is JobState.PEND
     assert rec.source_cluster is None

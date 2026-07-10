@@ -103,7 +103,7 @@ def test_submit_updated_relayed_to_handle(qtbot, manager, fake_lsf):
     js.jobset_updated.connect(lambda s: got.append(s))
     # 완료 후 재조회 없이도 이미 발화됐으므로, refresh로 한 번 더 확인
     with qtbot.waitSignal(js.jobset_updated, timeout=10000):
-        js.refresh()
+        manager.query_once(js)
     assert got and got[-1]["total"] == 1
 
 

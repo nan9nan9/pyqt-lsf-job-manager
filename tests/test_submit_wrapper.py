@@ -91,7 +91,7 @@ def test_wrapper_kill_by_id(qtbot, manager, fake_lsf):
         js = manager.submit_wrapper(
             [f"customwrapper_sub run_{i}.sp" for i in range(10)], workers=8)
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
-        js.kill()
+        manager.kill(js)
     _, report = blocker.args
     # 부착물이 없으므로 id chunk 전략으로 kill 된다
     assert "chunk" in " ".join(report.strategies)

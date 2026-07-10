@@ -11,7 +11,7 @@ main 스레드                  워커                           통지 (→ mai
 ──────────────              ─────────────────────────      ─────────────────────
 mgr.submit()      ──────▶   submit pool (jobset당 1개,     progress / jobs_updated /
 mgr.kill_jobset() ──────▶   killer pool (전역 4스레드)      finished / error ...
-js.start_polling()──────▶   polling QThread (전역 1개)
+mgr.start_polling(js)───▶   polling QThread (전역 1개)
 ```
 
 - 모든 사용자 명령은 **즉시 반환**(비동기)하고 결과는 Signal로 온다.
@@ -96,11 +96,11 @@ kill_jobset()
 ```
 main (전부 앱이 직접 제어)
 ──────────────────────────────────────────
-① (살아있으면) js.kill() → kill_finished 대기
-② fix = create_jobset() → fix.create_job(..., merge_id=기존과 동일)
-③ js.merge_from(fix)     # merge_id 일치분 CREATED 교체(물리 키 유지),
+① (살아있으면) mgr.kill(js) → kill_finished 대기
+② fix = mgr.create_jobset() → mgr.create_job(fix, ..., merge_id=기존과 동일)
+③ mgr.merge(js, fix)     # merge_id 일치분 CREATED 교체(물리 키 유지),
                          # 신규/None 은 추가. fix 소멸. 가드: 전원 비활성
-④ js.submit()            # 전 job 리셋 후 재제출 — §1과 동일 흐름
+④ mgr.submit(js)         # 전 job 리셋 후 재제출 — §1과 동일 흐름
 ```
 
 - ③의 replace 는 레코드만 교체한다 — force=True 로 활성 job 을 교체해도
@@ -108,7 +108,7 @@ main (전부 앱이 직접 제어)
 - ④의 리셋: job_id/exit_code/실행시간/fail_message/클러스터 소거,
   spec_json(제출 옵션)·merge_id·ud_data 보존. handler 자동 재무장.
 
-## 4. cancel (`js.cancel`)
+## 4. cancel (`mgr.cancel_submit(js)`)
 
 ```
 cancel_submit(): ctx.cancel_event set → 반환(즉시)

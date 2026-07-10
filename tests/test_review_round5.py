@@ -54,7 +54,7 @@ def test_merge_during_active_submit_rejected(qtbot, config):
                                workers=1, auto_poll=False)
         assert mgr.submitter.is_active(js_active.id)
         with pytest.raises(LsfmgrError):
-            mgr.merge_from(js_done.id, js_active.id)
+            mgr.merge(js_done.id, js_active.id)
         lsf.gate.set()
         qtbot.waitUntil(lambda: not mgr.submitter.is_active(js_active.id),
                         timeout=10000)
@@ -62,7 +62,7 @@ def test_merge_during_active_submit_rejected(qtbot, config):
         for js in (js_done, js_active):
             lsf.set_all("DONE", 0)
             mgr.querier.query(js.id)
-        mgr.merge_from(js_done.id, js_active.id)
+        mgr.merge(js_done.id, js_active.id)
         assert mgr.summary(js_done.id)["total"] == 3
     finally:
         lsf.gate.set()
@@ -86,7 +86,8 @@ def test_add_job_duplicate_key_rejected(manager):
     kept = manager.get_jobs(jsid)[0]
     assert kept.job_id == 111 and kept.command == "echo a"
     # remove 후 재추가는 허용 (정상 교체 경로)
-    manager.remove_job(jsid, "manual_1")
+    # PEND(활성) 편입 레코드 — v9 가드상 force로 레코드만 제거
+    manager.remove_job(jsid, job_key="manual_1", force=True)
     manager.add_job(jsid, dup, sync_lsf=False)
     assert manager.get_jobs(jsid)[0].job_id == 222
 
@@ -116,14 +117,14 @@ def test_kill_chunk_failure_still_finishes(qtbot, manager, fake_lsf):
                                     auto_poll=False)
     fake_lsf.fail_next_bkill = 1          # mbatchd 장애 주입
     with qtbot.waitSignal(manager.kill_finished, timeout=5000) as blocker:
-        js.kill()
+        manager.kill(js)
     report = blocker.args[1]
     assert report.errors
     # 장애 상황이므로 optimistic 오표시(EXIT) 금지 — 재시도 여지 유지
     assert js.jobs(states={JobState.EXIT}) == []
     # 장애 해소 후 재kill은 정상 완료
     with qtbot.waitSignal(manager.kill_finished, timeout=5000) as blocker:
-        js.kill()
+        manager.kill(js)
     assert not blocker.args[1].errors
     assert fake_lsf.alive_jobs() == []
 
@@ -172,8 +173,8 @@ def test_start_polling_rejects_nonpositive(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js = manager.submit(["echo a"], auto_poll=False)
     with pytest.raises(ValueError):
-        js.start_polling(0)
+        manager.start_polling(js, 0)
     with pytest.raises(ValueError):
-        js.start_polling(-1.0)
-    js.start_polling(5.0)                 # 정상 구간은 동작
-    js.stop_polling()
+        manager.start_polling(js, -1.0)
+    manager.start_polling(js, 5.0)        # 정상 구간은 동작
+    manager.stop_polling(js)

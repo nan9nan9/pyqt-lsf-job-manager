@@ -20,7 +20,7 @@ def submitted(qtbot, manager, fake_lsf):
 def test_kill_by_group_single_call(qtbot, manager, fake_lsf, submitted):
     fake_lsf.calls.clear()
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
-        manager.kill_jobset(submitted)
+        manager.kill(submitted)
     jsid, report = blocker.args
     assert jsid == submitted
     assert report.requested == 30
@@ -42,7 +42,7 @@ def test_kill_array(qtbot, manager, fake_lsf):
     manager.store.update_jobset(replace(js, lsf_group_paths=[]))
     fake_lsf.calls.clear()
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
-        manager.kill_jobset(jsid)
+        manager.kill(jsid)
     _, report = blocker.args
     assert report.command_calls == 1
     assert any(s.startswith("array:") for s in report.strategies)
@@ -58,7 +58,7 @@ def test_kill_chunk_fallback(qtbot, manager, fake_lsf, submitted, config):
     manager.store.update_jobset(replace(
         js, lsf_group_paths=[], name_patterns=[], array_job_ids=[]))
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
-        manager.kill_jobset(submitted)
+        manager.kill(submitted)
     _, report = blocker.args
     assert report.strategies == ["chunk"]
     assert fake_lsf.alive_jobs() == []
@@ -74,7 +74,7 @@ def test_partial_kill_by_state(qtbot, manager, fake_lsf, submitted):
         fake_lsf.set_job(r.job_id, "RUN")
         manager.store.transition(submitted, r.job_key, JobState.RUN)
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
-        manager.kill_jobset(submitted, only_state=JobState.PEND)
+        manager.kill(submitted, only_state=JobState.PEND)
     _, report = blocker.args
     assert report.requested == 15
     run_alive = [j for j in fake_lsf.alive_jobs() if j.stat == "RUN"]
@@ -155,12 +155,12 @@ def test_kill_jobs_optimistic_without_jobset(qtbot, manager, fake_lsf,
 
 
 def test_js_kill_jobs_by_key(qtbot, manager, fake_lsf, submitted):
-    """js.kill_jobs(job_keys) — JobSet의 선택 job만 kill, jobset 컨텍스트라
+    """manager.kill_jobs(js, job_keys) — JobSet의 선택 job만 kill, jobset 컨텍스트라
     optimistic EXIT + killed Signal 정상."""
     js = manager.jobset(submitted)
     keys = [r.job_key for r in manager.get_jobs(submitted)][:3]
     with qtbot.waitSignal(js.kill_finished, timeout=10000) as blocker:
-        js.kill_jobs(keys)
+        manager.kill_jobs(js, keys)
     report = blocker.args[0]
     assert len(report.changed) == 3
     exited = manager.get_jobs(submitted, states={JobState.EXIT})
@@ -176,7 +176,7 @@ def test_kill_optimistic_marks_exit_immediately(qtbot, manager, fake_lsf,
     per_job = []
     manager.jobs_updated.connect(lambda j, recs: per_job.append(recs))
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
-        manager.kill_jobset(submitted)               # verify 없음
+        manager.kill(submitted)               # verify 없음
     _, report = blocker.args
     assert len(report.changed) == 30                 # 즉시 EXIT 전이
     s = manager.summary(submitted)
@@ -196,7 +196,7 @@ def test_kill_actual_waits_for_lsf(qtbot, fake_lsf, config):
             jsid = mgr.submit_bulk([JobSpec(command=f"r {i}")
                                     for i in range(5)])
         with qtbot.waitSignal(mgr.kill_finished, timeout=10000) as blocker:
-            mgr.kill_jobset(jsid)                     # verify 없음
+            mgr.kill(jsid)                     # verify 없음
         _, report = blocker.args
         assert report.changed == []                  # optimistic 전이 없음
         # store는 아직 초기 PEND — 실제 LSF 상태를 안 당겨옴
@@ -204,7 +204,7 @@ def test_kill_actual_waits_for_lsf(qtbot, fake_lsf, config):
         assert mgr.summary(jsid).get("EXIT", 0) == 0
         # verify=True면 재조회로 실제 EXIT 반영
         with qtbot.waitSignal(mgr.kill_finished, timeout=10000):
-            mgr.kill_jobset(jsid, verify=True)
+            mgr.kill(jsid, verify=True)
         assert mgr.summary(jsid).get("EXIT", 0) == 5
     finally:
         mgr.shutdown()
@@ -236,7 +236,7 @@ def test_kill_unconfirmed_reported(qtbot, manager, fake_lsf, submitted):
 # ----------------------------------------------------------------------
 def test_kill_verify(qtbot, manager, fake_lsf, submitted):
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
-        manager.kill_jobset(submitted, verify=True)
+        manager.kill(submitted, verify=True)
     _, report = blocker.args
     assert report.still_alive == 0
     # verify 조회가 store에도 반영됨 (killed → EXIT)
@@ -262,7 +262,7 @@ def test_partial_kill_verify_counts_only_targets(qtbot, fake_lsf, config):
         fake_lsf.set_job(recs[1].job_id, "RUN")
         mgr.querier.query(js.id)                    # 2 RUN, 2 PEND
         with qtbot.waitSignal(mgr.kill_finished, timeout=10000) as b:
-            js.kill(only_state=JobState.PEND, verify=True)
+            mgr.kill(js, only_state=JobState.PEND, verify=True)
         assert b.args[1].still_alive == 0           # RUN 2개는 대상 아님
     finally:
         mgr.shutdown()
@@ -281,7 +281,7 @@ def test_individual_kill_verify_counts_only_targets(qtbot, fake_lsf, config):
         mgr.querier.query(js.id)
         keys = sorted(r.job_key for r in js.jobs())
         with qtbot.waitSignal(mgr.kill_finished, timeout=10000) as b:
-            js.kill_jobs(keys[:1], verify=True)     # 1개만 kill
+            mgr.kill_jobs(js, keys[:1], verify=True)     # 1개만 kill
         assert b.args[1].still_alive == 0           # 나머지 2개는 대상 아님
         assert len(fake_lsf.alive_jobs()) == 2      # 실제로 2개 살아있음
     finally:
@@ -292,7 +292,7 @@ def test_individual_kill_verify_counts_only_targets(qtbot, fake_lsf, config):
 # 전체 kill은 대기 중 submit 재시도도 포기 확정 — job 부활 방지
 # ----------------------------------------------------------------------
 def test_whole_kill_aborts_pending_retries(qtbot, manager, fake_lsf):
-    """RETRY_WAIT 중 js.kill() 후 재시도 QTimer가 발화해도 job이 부활하지
+    """RETRY_WAIT 중 manager.kill(js) 후 재시도 QTimer가 발화해도 job이 부활하지
     않는다 — 예전엔 kill 뒤 타이머가 재제출해 PEND로 되살아났다."""
     import time
     fake_lsf.fail_next_bsub = 1              # 첫 bsub 실패 → RETRY_WAIT
@@ -310,7 +310,7 @@ def test_whole_kill_aborts_pending_retries(qtbot, manager, fake_lsf):
     reports = []
     manager.submit_finished.connect(lambda _js, r: reports.append(r))
     with qtbot.waitSignal(manager.kill_finished, timeout=10000):
-        js.kill()      # 전체 kill — 재시도 포기 확정 (submit_finished도 이때 발행)
+        manager.kill(js)      # 전체 kill — 재시도 포기 확정 (submit_finished도 이때 발행)
     qtbot.wait(400)                          # 재시도 타이머 발화 시간 경과
     rec = js.jobs()[0]
     assert rec.state is JobState.SUBMIT_FAILED   # 부활 없음
@@ -332,7 +332,7 @@ def test_partial_kill_keeps_pending_retries(qtbot, manager, fake_lsf):
             break
         qtbot.wait(10)
     with qtbot.waitSignal(manager.kill_finished, timeout=10000):
-        js.kill(only_state=JobState.PEND)    # PEND만 kill — 재시도 유지
+        manager.kill(js, only_state=JobState.PEND)    # PEND만 kill — 재시도 유지
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         pass
     # RETRY_WAIT였던 job은 재시도로 PEND 복귀

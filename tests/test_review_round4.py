@@ -3,7 +3,7 @@
 1. merge된 wrapper+bsub jobset kill: group 전략 성공(covered)만 믿고
    fallback을 생략해 부착물이 없는 wrapper job이 영원히 살아남던 버그
    (+ optimistic 정책이 그 생존 job을 EXIT로 오표시하던 파생 버그).
-2. js.kill_jobs(array element key): parent job_id로 변환하며 array_index가
+2. manager.kill_jobs(js, array element key): parent job_id로 변환하며 array_index가
    소실돼 전체 array가 죽던 버그.
 3. array submit 최종 실패: SUBMIT_FAILED 전이가 jobs_updated/jobs_failed로
    발행되지 않아 UI 표가 SUBMITTING에 고착되던 버그.
@@ -33,11 +33,11 @@ def test_kill_merged_wrapper_and_bsub_jobset(qtbot, manager, fake_lsf):
         js_b = manager.submit(["echo x", "echo y"], mode="bulk",
                               auto_poll=False)
     merged = js_b
-    js_b.merge_from(js_w, force=True)   # 활성 — force 레코드 흡수
+    manager.merge(js_b, js_w, force=True)   # 활성 — force 레코드 흡수
     assert len(fake_lsf.alive_jobs()) == 4
 
     with qtbot.waitSignal(manager.kill_finished, timeout=10000):
-        merged.kill()
+        manager.kill(merged)
 
     alive = fake_lsf.alive_jobs()
     assert alive == [], (
@@ -53,10 +53,10 @@ def test_kill_merged_optimistic_no_false_exit(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js_b = manager.submit(["echo x"], auto_poll=False)
     merged = js_b
-    js_b.merge_from(js_w, force=True)            # 활성 — force 레코드 흡수
+    manager.merge(js_b, js_w, force=True)            # 활성 — force 레코드 흡수
 
     with qtbot.waitSignal(manager.kill_finished, timeout=10000):
-        merged.kill()
+        manager.kill(merged)
 
     still_alive_ids = {j.job_id for j in fake_lsf.alive_jobs()}
     lying = [r for r in merged.jobs(states={JobState.EXIT})
@@ -74,7 +74,7 @@ def test_kill_pure_bsub_jobset_still_skips_chunk(qtbot, manager, fake_lsf):
                             auto_poll=False)
     fake_lsf.calls.clear()
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
-        js.kill()
+        manager.kill(js)
     assert fake_lsf.alive_jobs() == []
     assert "chunk" not in blocker.args[1].strategies
 
@@ -83,14 +83,14 @@ def test_kill_pure_bsub_jobset_still_skips_chunk(qtbot, manager, fake_lsf):
 # 2. array element 부분 kill
 # ----------------------------------------------------------------------
 def test_kill_jobs_single_array_element(qtbot, manager, fake_lsf):
-    """js.kill_jobs(["jsid[2]"])는 element 2만 죽여야 한다 — parent id로
+    """manager.kill_jobs(js, ["jsid[2]"])는 element 2만 죽여야 한다 — parent id로
     변환되면 나머지 element까지 전부 죽는다."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js = manager.submit("run_task", count=3, auto_poll=False)
     fake_lsf.set_all("RUN")
 
     with qtbot.waitSignal(manager.kill_finished, timeout=10000):
-        js.kill_jobs([f"{js.id}[2]"])
+        manager.kill_jobs(js, [f"{js.id}[2]"])
 
     alive_idx = sorted(j.array_index for j in fake_lsf.alive_jobs())
     assert alive_idx == [1, 3]

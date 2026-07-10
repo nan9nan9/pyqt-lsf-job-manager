@@ -251,7 +251,8 @@ class BulkSubmitter(QObject):
             via_wrapper=True, pre_submit=pre_submit)
 
     def resubmit_existing(self, jobset_id: str,
-                          keyed_items: Sequence, options: Options) -> bool:
+                          keyed_items: Sequence, options: Options,
+                          pre_submit=None) -> bool:
         """[async→Signal] 기존 레코드 재제출 (resubmit_jobs 용).
 
         keyed_items: [(job_key, JobSpec | argv토큰리스트), ...] — item 타입으로
@@ -260,6 +261,8 @@ class BulkSubmitter(QObject):
         새 CREATED 레코드를 만들지 않고 **이미 존재하는 레코드**를 리셋(이전
         job_id/exit_code/실행시간 초기화 + command 갱신) 후 같은 job_key로
         재submit한다. 결과는 finished(SubmitReport).
+        pre_submit(commands)->bool 지정 시 **리셋 이전에** 게이트 워커에서
+        검사한다 — False/예외면 레코드를 건드리지 않고 끝난다 (FR-9).
 
         반환: 제출이 실제 착수됐으면 True. shutdown/born-cancelled(kill
         barrier 중 시작 — 레코드 원상 유지, 전원 취소 정산)면 False —
@@ -280,44 +283,55 @@ class BulkSubmitter(QObject):
             # main 스레드가 O(N)회 lock/신호 발화를 하게 되므로 금지.
             self._gate_reject(ctx, finish=True)
             return False
-        # 기존 레코드 리셋 — 이전 실행의 흔적(job_id/exit_code/실행시간/위치)을
-        # 지우고 새 command 반영. 지우지 않으면 재제출 실패 시 죽은 옛 job_id·
-        # 이전 실행의 start/finish/working_dir가 새 커맨드의 것처럼 잔존한다.
-        # 상태는 곧장 SUBMITTING으로 — 재제출은 즉시 제출 착수라, 파이프라인이
-        # EXIT(kill) → SUBMITTING(제출 중) → PEND로 자연스럽게 보인다(CREATED
-        # 중간 표시 생략). worker가 다시 SUBMITTING으로 두는 건 무해한 재설정.
-        launch = []
-        reset_recs = []
-        for key, item in keyed:
-            try:
-                rec = self.store.transition(
-                    jobset_id, key, JobState.SUBMITTING,
-                    job_id=None, exit_code=None, fail_reason=None,
-                    fail_message=None,
-                    retry_count=0, command=self._item_command(item),
-                    submit_time=None, run_time_s=None, start_time=None,
-                    finish_time=None, working_dir=None,
-                    source_cluster=None, forward_cluster=None,
-                    spec_json=(spec_to_json(item)
-                               if isinstance(item, JobSpec) else None))
-            except Exception:                    # noqa: BLE001 — CS-5
-                # 키 소실(remove_job 경합)·store 장애(sqlite lock 등) 어느
-                # 쪽이든 이 키만 건너뛰고 나머지는 진행 — 여기서 전파되면
-                # ctx가 미완(finished 미발행)으로 고착되어 jobset이 잠긴다
-                log.exception("재제출 리셋 실패 — 건너뜀: %s/%s",
-                              jobset_id, key)
-                self._count(ctx, cancelled=True)
-                continue
-            if rec is not None:
-                reset_recs.append(rec)
-            launch.append((key, item))
-        # 리셋된 SUBMITTING을 즉시 발행 — 재제출도 완료를 안 기다리고 표에 반영
-        if reset_recs:
-            self.jobs_changed.emit(jobset_id, reset_recs)
-        for key, item in launch:
-            ctx.pool.start(self._make_resubmit_task(ctx, key, item))
-        if not launch:
-            QTimer.singleShot(0, lambda: self._finish_if_done(ctx, force=True))
+        def do_launch():
+            # 기존 레코드 리셋 — 이전 실행의 흔적(job_id/exit_code/실행시간/
+            # 위치)을 지우고 새 command 반영. 지우지 않으면 재제출 실패 시
+            # 죽은 옛 job_id·이전 실행의 start/finish/working_dir가 잔존한다.
+            # 상태는 곧장 SUBMITTING으로 — 재제출은 즉시 제출 착수라,
+            # EXIT(kill) → SUBMITTING → PEND로 자연스럽게 보인다.
+            launch = []
+            reset_recs = []
+            for key, item in keyed:
+                try:
+                    rec = self.store.transition(
+                        jobset_id, key, JobState.SUBMITTING,
+                        job_id=None, exit_code=None, fail_reason=None,
+                        fail_message=None,
+                        retry_count=0, command=self._item_command(item),
+                        submit_time=None, run_time_s=None, start_time=None,
+                        finish_time=None, working_dir=None,
+                        source_cluster=None, forward_cluster=None,
+                        spec_json=(spec_to_json(item)
+                                   if isinstance(item, JobSpec) else None))
+                except Exception:                # noqa: BLE001 — CS-5
+                    # 키 소실(remove_job 경합)·store 장애 어느 쪽이든 이
+                    # 키만 건너뛰고 나머지는 진행 — 여기서 전파되면 ctx가
+                    # 미완(finished 미발행)으로 고착되어 jobset이 잠긴다
+                    log.exception("재제출 리셋 실패 — 건너뜀: %s/%s",
+                                  jobset_id, key)
+                    self._count(ctx, cancelled=True)
+                    continue
+                if rec is not None:
+                    reset_recs.append(rec)
+                launch.append((key, item))
+            # 리셋된 SUBMITTING 즉시 발행 — 완료를 안 기다리고 표에 반영
+            if reset_recs:
+                self.jobs_changed.emit(jobset_id, reset_recs)
+            for key, item in launch:
+                ctx.pool.start(self._make_resubmit_task(ctx, key, item))
+            if not launch:
+                QTimer.singleShot(0,
+                                  lambda: self._finish_if_done(ctx, force=True))
+
+        if pre_submit is None:
+            do_launch()
+            return True
+        # 게이트 경로 — 리셋 **이전**에 검사하므로 False/예외면 레코드 원상
+        # 유지 (make_failed=[]: 예외 시에도 새 레코드를 만들지 않는다 —
+        # error + finished(failed=N)로만 마무리, FR-9)
+        commands = [self._item_command(item) for _key, item in keyed]
+        ctx.pool.start(_GateTask(self, ctx, commands, pre_submit,
+                                 do_launch, lambda msg: []))
         return True
 
     @staticmethod

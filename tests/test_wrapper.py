@@ -54,7 +54,7 @@ def test_wrapper_submit_then_group_kill(qtbot, fake_lsf, tmp_path):
         with qtbot.waitSignal(mgr.submit_finished, timeout=15000):
             js = mgr.submit([f"run {i}" for i in range(4)], mode="bulk")
         with qtbot.waitSignal(mgr.kill_finished, timeout=15000) as blk:
-            mgr.kill_jobset(js.id)
+            mgr.kill(js.id)
         _, report = blk.args
         assert report.requested == 4
         # bkill은 wrapper가 아니라 표준 명령을 그대로 사용

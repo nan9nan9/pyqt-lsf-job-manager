@@ -201,7 +201,7 @@ def test_gate_autopoll_deferred_until_pass(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.jobset_updated, timeout=10000):
         manager.query_once(js.id)
     assert js.jobs()[0].state is JobState.RUN
-    js.stop_polling()
+    manager.stop_polling(js)
 
 
 def test_gate_reject_no_autopoll(qtbot, manager, fake_lsf):

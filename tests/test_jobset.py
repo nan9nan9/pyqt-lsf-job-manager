@@ -52,14 +52,14 @@ def test_detect_lost_marks_lost(qtbot, manager, fake_lsf, submitted):
 # ----------------------------------------------------------------------
 def test_close_requires_all_terminal(qtbot, manager, fake_lsf, submitted):
     with pytest.raises(LsfmgrError):
-        manager.close_jobset(submitted)        # 전원 PEND — 불가
+        manager.close(submitted)        # 전원 PEND — 불가
 
 
 def test_close_after_terminal(qtbot, manager, fake_lsf, submitted):
     fake_lsf.set_all("DONE", 0)
     with qtbot.waitSignal(manager.jobset_updated, timeout=10000):
         manager.query_once(submitted)
-    manager.close_jobset(submitted)
+    manager.close(submitted)
     assert manager.store.get_jobset(submitted).closed is True
     # bgdel은 worker 스레드에서 비동기 수행 (main 스레드 LSF 호출 금지)
     qtbot.waitUntil(lambda: len(fake_lsf.calls_of("bgdel")) == 1,
@@ -92,7 +92,10 @@ def test_remove_job_decrements_intended_count(qtbot, manager, fake_lsf, submitte
     before = manager.summary(submitted)
     assert before["total"] == 10
 
-    rec = manager.remove_job(submitted, victim.job_key)
+    # victim은 PEND(활성) — v9 가드상 force로 레코드만 제거
+    recs = manager.remove_job(submitted, job_key=victim.job_key,
+                              force=True)
+    rec = recs[0]
     assert rec.job_key == victim.job_key       # 제거된 레코드 반환
 
     s = manager.summary(submitted)

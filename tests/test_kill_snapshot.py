@@ -37,7 +37,7 @@ def test_kill_is_nonblocking_and_snapshot(qtbot, tmp_path):
         mgr.querier.query(js.id)
 
         gate.clear()
-        js.kill()                              # 비동기 — 즉시 반환, bkill 붙잡힘
+        mgr.kill(js)                              # 비동기 — 즉시 반환, bkill 붙잡힘
         # kill이 도는 중인지 pull로 확인
         qtbot.waitUntil(lambda: js.is_killing, timeout=5000)
         snap = js.kill_state
@@ -79,7 +79,7 @@ def test_kill_snapshot_progresses(qtbot, tmp_path):
         mgr.querier.query(js.id)
         seen = []
         with qtbot.waitSignal(mgr.kill_finished, timeout=10000):
-            js.kill(envpath="/lsf/busan/cshrc.lsf")   # id-chunk sourced
+            mgr.kill(js, envpath="/lsf/busan/cshrc.lsf")   # id-chunk sourced
             for _ in range(50):
                 s = js.kill_state
                 if s is not None:

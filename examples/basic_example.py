@@ -290,7 +290,7 @@ class Dashboard(QWidget):
         self._active_submit = js.id
         self.bar.setMaximum(self.form.count.value())
         self.bar.setValue(0)
-        js.start_polling(interval_s=1)           # 데모: 상태 전이를 촘촘히 관찰
+        self.mgr.start_polling(js, 1)            # 데모: 상태 전이를 촘촘히 관찰
 
     def _on_progress(self, jsid, done, total):
         if jsid == self._active_submit:
@@ -319,27 +319,27 @@ class Dashboard(QWidget):
     def kill(self):
         js = self._handle()
         if js:
-            js.kill(verify=True)
+            self.mgr.kill(js, verify=True)
 
     def kill_pend(self):
         js = self._handle()
         if js:
-            js.kill(only_state=JobState.PEND)
+            self.mgr.kill(js, only_state=JobState.PEND)
 
     def cancel(self):
         js = self._handle()
         if js:
-            js.cancel()
+            self.mgr.cancel_submit(js)
 
     def refresh(self):
         js = self._handle()
         if js:
-            js.refresh()
+            self.mgr.query_once(js)
 
     def detect_lost(self):
         js = self._handle()
         if js:
-            lost = js.detect_lost()
+            lost = self.mgr.detect_lost(js)
             self._log(js.id, f"detect_lost: LOST 확정 {len(lost)}건")
 
     def close_jobset(self):
@@ -347,7 +347,7 @@ class Dashboard(QWidget):
         if not js:
             return
         try:
-            js.close()
+            self.mgr.close(js)
             self._log(js.id, "closed")
         except Exception as e:               # 전원 terminal 아니면 거부
             self._log(js.id, f"close 거부: {e}")

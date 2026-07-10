@@ -134,7 +134,7 @@ def test_concurrent_submit_poll_kill(qtbot, fake_lsf, config):
         with qtbot.waitSignal(mgr.submit_finished, timeout=15000):
             b = mgr.submit_bulk([JobSpec(command=f"b {i}") for i in range(30)])
         with qtbot.waitSignal(mgr.kill_finished, timeout=15000):
-            mgr.kill_jobset(a)
+            mgr.kill(a)
 
         qtbot.wait(300)                       # polling 몇 사이클 더
         for jsid in (a, b):

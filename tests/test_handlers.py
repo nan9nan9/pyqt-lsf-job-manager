@@ -73,7 +73,7 @@ def test_handler_finished_relayed_to_handle(qtbot, manager, fake_lsf,
     fake_lsf.set_all("RUN")
     _poll(qtbot, manager, submitted)          # store를 RUN으로
 
-    js.add_handler("h1", lambda ctx: ctx.job_id)
+    manager.add_handler(js, "h1", lambda ctx: ctx.job_id)
     with qtbot.waitSignal(js.handler_finished, timeout=10000) as blk:
         manager.query_once(submitted)         # 폴링 사이클에 실행
     name, res = blk.args
@@ -179,7 +179,7 @@ def test_handler_rearmed_after_resubmit_all(qtbot, manager, fake_lsf, submitted)
 
     # 전체 재제출(submit_jobset) → rearm이 status 리셋 → 새 실행에서 다시 돎
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        manager.submit_jobset(submitted, auto_poll=False)
+        manager.submit(manager.jobset(submitted), auto_poll=False)
     fake_lsf.set_all("RUN")
     with qtbot.waitSignal(manager.handler_finished, timeout=10000):
         manager.query_once(submitted)          # 재실행 RUN → 다시 발화

@@ -39,7 +39,7 @@ def test_probe_failure_defers_lost(qtbot, manager, fake_lsf):
 
     fake_lsf.fail_all_queries = True             # LSF 순단 시뮬레이션
     with qtbot.waitSignal(manager.jobset_updated, timeout=10000) as blocker:
-        js.refresh()
+        manager.query_once(js)
     _, summary = blocker.args
     assert summary.get("LOST", 0) == 0, "순단 1회로 LOST 확정되면 안 됨"
     assert summary["PEND"] == 10                 # 판단 보류 — 상태 유지
@@ -47,7 +47,7 @@ def test_probe_failure_defers_lost(qtbot, manager, fake_lsf):
     fake_lsf.fail_all_queries = False            # 복구 후 정상 갱신
     fake_lsf.set_all("RUN")
     with qtbot.waitSignal(manager.jobset_updated, timeout=10000) as blocker:
-        js.refresh()
+        manager.query_once(js)
     assert blocker.args[1]["RUN"] == 10
 
 
@@ -60,7 +60,7 @@ def test_real_loss_still_detected_after_recovery(qtbot, manager, fake_lsf):
     rec = js.jobs()[0]
     fake_lsf.vanish_job(rec.job_id, in_bhist=False)
     with qtbot.waitSignal(manager.job_lost, timeout=10000):
-        js.refresh()
+        manager.query_once(js)
     assert js.summary["LOST"] == 1
 
 
@@ -78,11 +78,11 @@ def test_kill_falls_back_when_one_attachment_errors(qtbot, manager, fake_lsf):
     qtbot.waitUntil(lambda: not manager.submitter.is_active(a.id)
                     and not manager.submitter.is_active(b.id), timeout=10000)
     merged = a                                    # in-place 흡수 (v9)
-    a.merge_from(b, force=True)                  # PEND 활성 — force로 레코드 흡수
+    manager.merge(a, b, force=True)                  # PEND 활성 — force로 레코드 흡수
 
     fake_lsf.fail_next_bkill = 1                 # 첫 group bkill만 장애
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
-        merged.kill()
+        manager.kill(merged)
     rpt = blocker.args[1]
     assert rpt.errors, "장애가 errors에 기록되어야 함"
     assert fake_lsf.alive_jobs() == [], \
@@ -97,13 +97,13 @@ def test_merge_stops_polling_of_originals(qtbot, manager, fake_lsf):
     b = manager.submit([f"b {i}" for i in range(3)], mode="bulk")
     qtbot.waitUntil(lambda: not manager.submitter.is_active(a.id)
                     and not manager.submitter.is_active(b.id), timeout=10000)
-    a.start_polling(interval_s=0.1)
-    b.start_polling(interval_s=0.1)
+    manager.start_polling(a, 0.1)
+    manager.start_polling(b, 0.1)
     qtbot.wait(300)
 
     errors = []
     manager.error_occurred.connect(lambda j, m: errors.append((j, m)))
-    a.merge_from(b, force=True)                  # source(b) 삭제 + 핸들 파괴
+    manager.merge(a, b, force=True)                  # source(b) 삭제 + 핸들 파괴
     qtbot.wait(600)                              # 몇 polling 주기 경과
     assert errors == [], f"삭제된 원본 polling으로 error 발생: {errors}"
     assert a.summary["total"] == 6
@@ -177,7 +177,7 @@ def test_polling_autostops_on_empty_jobset(qtbot, manager, fake_lsf):
         pass
     updates = []
     js.jobset_updated.connect(lambda s: updates.append(s))
-    js.start_polling(interval_s=0.1)
+    manager.start_polling(js, 0.1)
     qtbot.waitUntil(lambda: len(updates) >= 2, timeout=10000)
     qtbot.wait(500)                              # idle 2사이클 후 자동 중지
     n = len(updates)
@@ -201,7 +201,7 @@ def test_merge_rejects_duplicate_job_keys(qtbot, manager, fake_lsf):
     with pytest.raises(ValueError, match="충돌"):
         # dup_key(merge_id 없음 → 신규 추가 경로)가 양쪽에 존재 — force로
         # 활성 가드를 지나도 key 충돌은 거부된다
-        manager.merge_from(a.id, b.id, force=True)
+        manager.merge(a.id, b.id, force=True)
 
 
 # ----------------------------------------------------------------------

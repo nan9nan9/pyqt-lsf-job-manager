@@ -113,7 +113,7 @@ def test_handle_signal_isolation(qtbot, manager, fake_lsf):
 
     fake_lsf.set_all("RUN")
     with qtbot.waitSignal(a.jobset_updated, timeout=10000):
-        a.refresh()
+        manager.query_once(a)
     assert len(a_updates) == 1
     assert b_updates == []                     # 타 JobSet 이벤트 미수신
     # Facade와 이중 발행 일치
@@ -147,7 +147,7 @@ def test_handle_kill(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     with qtbot.waitSignal(js.kill_finished, timeout=10000) as blocker:
-        js.kill()
+        manager.kill(js)
     assert blocker.args[0].requested == 10
     assert fake_lsf.alive_jobs() == []
 
@@ -164,7 +164,7 @@ def test_handle_snapshot_properties(qtbot, manager, fake_lsf):
 
     fake_lsf.set_all("DONE", 0)
     with qtbot.waitSignal(js.jobset_updated, timeout=10000):
-        js.refresh()
+        manager.query_once(js)
     assert js.is_done is True
 
 
@@ -179,12 +179,12 @@ def test_closed_handle_raises(qtbot, manager, fake_lsf):
         pass
     fake_lsf.set_all("DONE", 0)
     with qtbot.waitSignal(js.jobset_updated, timeout=10000):
-        js.refresh()
-    js.close()
+        manager.query_once(js)
+    manager.close(js)
     with pytest.raises(JobSetClosedError):
         _ = js.summary
     with pytest.raises(JobSetClosedError):
-        js.kill()
+        manager.kill(js)
     # 재획득하면 새 핸들 (store에는 closed 상태로 남아있음)
     js2 = manager.jobset(js.id)
     assert js2 is not js
@@ -200,7 +200,7 @@ def test_merge_from_invalidates_source(qtbot, manager, fake_lsf):
     manager.querier.query(a.id)
     manager.querier.query(b.id)                  # 전원 비활성化
 
-    a.merge_from(b)
+    manager.merge(a, b)
 
     assert a.summary["total"] == 2               # target 핸들 유지
     with pytest.raises(JobSetClosedError):
@@ -249,7 +249,7 @@ def test_verify_kill_manager_default(qtbot, fake_lsf, config):
         with qtbot.waitSignal(js.submit_finished, timeout=10000):
             pass
         with qtbot.waitSignal(js.kill_finished, timeout=10000) as blocker:
-            js.kill()                          # verify 미지정 → ② 적용
+            mgr.kill(js)                          # verify 미지정 → ② 적용
         assert blocker.args[0].still_alive == 0
     finally:
         mgr.shutdown()
