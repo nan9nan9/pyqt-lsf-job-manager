@@ -3,14 +3,15 @@ from __future__ import annotations
 
 import pytest
 
-from lsfmgr import ArrayJobSpec, JobSpec, JobState
+from lsfmgr import JobSpec, JobState
+from tests.conftest import submit_cmds
 
 
 @pytest.fixture
 def submitted(qtbot, manager, fake_lsf):
     jobs = [JobSpec(command=f"r {i}") for i in range(30)]
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        jsid = manager.submit_bulk(jobs)
+        jsid = submit_cmds(manager, jobs).id
     return jsid
 
 
@@ -32,23 +33,6 @@ def test_kill_by_group_single_call(qtbot, manager, fake_lsf, submitted):
 # ----------------------------------------------------------------------
 # 전략 ② array
 # ----------------------------------------------------------------------
-def test_kill_array(qtbot, manager, fake_lsf):
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        jsid = manager.submit_array(ArrayJobSpec(command="r", count=25))
-    # array jobset은 group도 있으므로 group이 먼저 시도됨 — group 제거하여
-    # array 전략 검증
-    from dataclasses import replace
-    js = manager.store.get_jobset(jsid)
-    manager.store.update_jobset(replace(js, lsf_group_paths=[]))
-    fake_lsf.calls.clear()
-    with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
-        manager.kill(jsid)
-    _, report = blocker.args
-    assert report.command_calls == 1
-    assert any(s.startswith("array:") for s in report.strategies)
-    assert fake_lsf.alive_jobs() == []
-
-
 # ----------------------------------------------------------------------
 # 전략 ④ chunking (부착물 전부 유실, 수용 기준 3)
 # ----------------------------------------------------------------------
@@ -102,7 +86,7 @@ def test_kill_progress_signal(qtbot, fake_lsf, config):
     try:
         jobs = [JobSpec(command=f"r {i}") for i in range(60)]
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            jsid = mgr.submit_bulk(jobs)
+            jsid = submit_cmds(mgr, jobs).id
         ids = [r.job_id for r in mgr.get_jobs(jsid)]
         seen = []
         mgr.kill_progress.connect(
@@ -193,8 +177,8 @@ def test_kill_actual_waits_for_lsf(qtbot, fake_lsf, config):
     try:
         assert mgr.config.kill_status_policy == "actual"
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            jsid = mgr.submit_bulk([JobSpec(command=f"r {i}")
-                                    for i in range(5)])
+            jsid = submit_cmds(mgr, [JobSpec(command=f"r {i}")
+                                    for i in range(5)]).id
         with qtbot.waitSignal(mgr.kill_finished, timeout=10000) as blocker:
             mgr.kill(jsid)                     # verify 없음
         _, report = blocker.args
@@ -255,7 +239,7 @@ def test_partial_kill_verify_counts_only_targets(qtbot, fake_lsf, config):
                         kill_status_policy="actual")
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            js = mgr.submit([f"echo {i}" for i in range(4)], mode="bulk",
+            js = submit_cmds(mgr, [f"echo {i}" for i in range(4)],
                            auto_poll=False)
         recs = sorted(js.jobs(), key=lambda r: r.job_key)
         fake_lsf.set_job(recs[0].job_id, "RUN")
@@ -275,7 +259,7 @@ def test_individual_kill_verify_counts_only_targets(qtbot, fake_lsf, config):
                         kill_status_policy="actual")
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            js = mgr.submit(["echo a", "echo b", "echo c"], mode="bulk",
+            js = submit_cmds(mgr, ["echo a", "echo b", "echo c"],
                            auto_poll=False)
         fake_lsf.set_all("RUN")
         mgr.querier.query(js.id)
@@ -297,7 +281,7 @@ def test_whole_kill_aborts_pending_retries(qtbot, manager, fake_lsf):
     import time
     fake_lsf.fail_next_bsub = 1              # 첫 bsub 실패 → RETRY_WAIT
     # 재시도 지연을 길게 — kill이 타이머 발화보다 먼저 도는 것을 보장
-    js = manager.submit(["echo a"], mode="bulk", auto_poll=False, max_retry=3,
+    js = submit_cmds(manager, ["echo a"], auto_poll=False, max_retry=3,
                         retry_backoff="fixed:2")
     deadline = time.time() + 5
     while time.time() < deadline:
@@ -323,7 +307,7 @@ def test_partial_kill_keeps_pending_retries(qtbot, manager, fake_lsf):
     타이머 발화 후 정상 재제출된다."""
     import time
     fake_lsf.fail_next_bsub = 1
-    js = manager.submit(["echo a", "echo b"], mode="bulk", auto_poll=False,
+    js = submit_cmds(manager, ["echo a", "echo b"], auto_poll=False,
                         max_retry=3)
     deadline = time.time() + 5
     while time.time() < deadline:

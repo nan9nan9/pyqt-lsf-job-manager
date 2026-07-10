@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import logging
 
+from tests.conftest import submit_cmds
+
 
 # ----------------------------------------------------------------------
 # INFO 착수/완료 — 명령별 로거
@@ -14,7 +16,7 @@ import logging
 def test_submit_logs_start_and_finish(qtbot, manager, fake_lsf, caplog):
     with caplog.at_level(logging.INFO, logger="lsfmgr.submit"):
         with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-            manager.submit(["echo a", "echo b"], mode="bulk", auto_poll=False)
+            submit_cmds(manager, ["echo a", "echo b"], auto_poll=False)
     text = "\n".join(r.message for r in caplog.records
                      if r.name == "lsfmgr.submit")
     assert "submit 착수" in text
@@ -23,7 +25,7 @@ def test_submit_logs_start_and_finish(qtbot, manager, fake_lsf, caplog):
 
 def test_kill_logs_start_and_finish(qtbot, manager, fake_lsf, caplog):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
+        js = submit_cmds(manager, ["echo a"], auto_poll=False)
     with caplog.at_level(logging.INFO, logger="lsfmgr.kill"):
         with qtbot.waitSignal(manager.kill_finished, timeout=10000):
             manager.kill(js.id)

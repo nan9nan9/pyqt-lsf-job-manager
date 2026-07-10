@@ -20,7 +20,7 @@ SHARED_KEYS = frozenset({
     "submit_timeout_s", "verify_kill",
 })
 #: ③(call) 전용
-CALL_ONLY_KEYS = frozenset({"mode", "label", "tags", "description"})
+CALL_ONLY_KEYS = frozenset({"label", "tags", "description"})
 #: ②(manager) 전용 — Options에 포함되지 않고 config/store 구성에 쓰이는 키
 MANAGER_ONLY_KEYS = frozenset({
     "chunk_size", "default_queue", "lsf_group_root",
@@ -47,7 +47,6 @@ BUILTIN_DEFAULTS: Dict[str, Any] = {
     "submit_timeout_s": 30.0,
     "chunk_size": 200,
     "verify_kill": False,
-    "mode": "auto",
     "label": "",
     "tags": (),
     "description": "",
@@ -73,7 +72,6 @@ class Options:
     submit_timeout_s: float = 30.0
     chunk_size: int = 200
     verify_kill: bool = False
-    mode: str = "auto"
     label: str = ""
     tags: Tuple[str, ...] = ()
     description: str = ""
@@ -143,10 +141,6 @@ def _validate(key: str, value: Any) -> Any:
         if not 1 <= v <= 5000:
             raise ValueError(f"chunk_size는 1~5000 (got {value})")
         return v
-    if key == "mode":
-        if value not in ("auto", "array", "bulk"):
-            raise ValueError(f"mode는 auto/array/bulk (got {value!r})")
-        return value
     if key == "kill_status_policy":
         if value not in ("optimistic", "actual"):
             raise ValueError(
@@ -203,7 +197,7 @@ def resolve_options(defaults: Dict[str, Any], call_kwargs: Dict[str, Any], *,
 
     defaults(①내장+②manager가 이미 merge된 값) 위에 ③call kwargs를 덮어
     frozen Options를 만든다. context에 따라 허용 키가 다르다:
-    - "submit": 공통 + mode/label/tags/description
+    - "submit": 공통 + label/tags/description
     - "kill":   verify_kill만
     """
     if context == "submit":

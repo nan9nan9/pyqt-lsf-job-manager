@@ -13,6 +13,7 @@ from lsfmgr import (
     LsfConfig,
     LsfJobManager,
 )
+from tests.conftest import submit_cmds
 
 
 # ----------------------------------------------------------------------
@@ -22,7 +23,7 @@ def test_shutdown_joins_threads(qtbot, fake_lsf, config):
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf)
     jobs = [JobSpec(command=f"r {i}") for i in range(20)]
     with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-        jsid = mgr.submit_bulk(jobs)
+        jsid = submit_cmds(mgr, jobs).id
     mgr.start_polling(jsid, interval_s=0.2)
     qtbot.wait(300)
     mgr.shutdown()
@@ -58,8 +59,10 @@ def test_no_coredump_on_exit_without_shutdown(tmp_path):
         app = QApplication(sys.argv)
         mgr = LsfJobManager(store=InMemoryStore(),
                             config=LsfConfig(poll_interval_s=5), runner=FakeLsf())
-        jsid = mgr.submit_bulk([JobSpec(command=f"r {i}") for i in range(20)])
-        mgr.start_polling(jsid, 0.2)     # 폴링 QThread 가동 중
+        js = mgr.create_jobset()
+        mgr.create_jobs(js, [f"r {i}" for i in range(20)], wrapper=False)
+        mgr.submit(js, auto_poll=False)
+        mgr.start_polling(js.id, 0.2)    # 폴링 QThread 가동 중
         # shutdown() 미호출 + app.exec() 미실행 → 그냥 종료
     """).replace("REPO", repr(repo))
     r = subprocess.run([sys.executable, "-c", script],
@@ -73,7 +76,7 @@ def test_shutdown_during_submit_preserves_job_ids(qtbot, fake_lsf, config):
     """CS-8 — shutdown 시 진행 중 bsub의 job_id 유실 없음."""
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf)
     jobs = [JobSpec(command=f"r {i}") for i in range(50)]
-    jsid = mgr.submit_bulk(jobs, workers=2, rate_limit_per_s=30)
+    jsid = submit_cmds(mgr, jobs, workers=2, rate_limit_per_s=30).id
     qtbot.wait(200)             # 일부만 submit된 시점
     mgr.shutdown()
     # submit 성공한 job 수 == store에 job_id 확보된 레코드 수
@@ -109,7 +112,7 @@ def test_event_loop_not_blocked_during_bulk_submit(qtbot, fake_lsf):
 
         jobs = [JobSpec(command=f"r {i}") for i in range(300)]
         with qtbot.waitSignal(mgr.submit_finished, timeout=30000):
-            mgr.submit_bulk(jobs, workers=8)
+            submit_cmds(mgr, jobs, workers=8)
         timer.stop()
 
         # main 스레드 이벤트 루프가 100ms 이상 정지한 구간이 없어야 함
@@ -127,12 +130,12 @@ def test_concurrent_submit_poll_kill(qtbot, fake_lsf, config):
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf)
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=15000):
-            a = mgr.submit_bulk([JobSpec(command=f"a {i}") for i in range(30)])
+            a = submit_cmds(mgr, [JobSpec(command=f"a {i}") for i in range(30)])
         mgr.start_polling(a, interval_s=0.1)
 
         # polling 도중 새 submit + kill 동시 진행
         with qtbot.waitSignal(mgr.submit_finished, timeout=15000):
-            b = mgr.submit_bulk([JobSpec(command=f"b {i}") for i in range(30)])
+            b = submit_cmds(mgr, [JobSpec(command=f"b {i}") for i in range(30)])
         with qtbot.waitSignal(mgr.kill_finished, timeout=15000):
             mgr.kill(a)
 

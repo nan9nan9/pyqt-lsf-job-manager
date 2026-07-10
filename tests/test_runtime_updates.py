@@ -4,12 +4,13 @@ from __future__ import annotations
 
 
 from lsfmgr import InMemoryStore, LsfJobManager
+from tests.conftest import submit_cmds
 from lsfmgr.states import JobState
 
 
 def _submit_one_running(qtbot, mgr, fake_lsf):
     with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-        js = mgr.submit(["echo a"], mode="bulk", auto_poll=False)
+        js = submit_cmds(mgr, ["echo a"], auto_poll=False)
     rec = js.jobs()[0]
     fake_lsf.set_job(rec.job_id, "RUN")
     fake_lsf.jobs[str(rec.job_id)].run_time_s = 10

@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from lsfmgr import JobSpec, JobState
+from tests.conftest import submit_cmds
 
 
 @pytest.mark.parametrize("trial", range(8))
@@ -31,9 +32,9 @@ def test_all_jobs_updated_before_finished(qtbot, manager, fake_lsf, trial):
     manager.submit_finished.connect(on_finished)
 
     with qtbot.waitSignal(manager.submit_finished, timeout=15000):
-        jsid = manager.submit_bulk(
+        jsid = submit_cmds(manager, 
             [JobSpec(command=f"run {i}") for i in range(n)],
-            parallel=True, workers=8)
+            workers=8).id
 
     # 완료 통지 시점 스냅샷: 전 job의 PEND가 이미 jobs_updated로 나갔어야 함
     assert snapshot_at_finish["report"].succeeded == n

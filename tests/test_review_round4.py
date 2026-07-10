@@ -17,6 +17,7 @@ from datetime import datetime
 import pytest
 
 from lsfmgr.command import _parse_lsf_time
+from tests.conftest import submit_cmds
 from lsfmgr.states import JobState
 
 
@@ -27,10 +28,10 @@ def test_kill_merged_wrapper_and_bsub_jobset(qtbot, manager, fake_lsf):
     """group 전략이 bsub job을 커버해도, 부착물이 없는 wrapper job은
     chunk fallback으로 반드시 죽여야 한다."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js_w = manager.submit_wrapper(
-            ["customwrapper_sub -i a.sp", "customwrapper_sub -i b.sp"], auto_poll=False)
+        js_w = submit_cmds(manager, 
+            ["customwrapper_sub -i a.sp", "customwrapper_sub -i b.sp"], auto_poll=False, wrapper=True)
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js_b = manager.submit(["echo x", "echo y"], mode="bulk",
+        js_b = submit_cmds(manager, ["echo x", "echo y"],
                               auto_poll=False)
     merged = js_b
     manager.merge(js_b, js_w, force=True)   # 활성 — force 레코드 흡수
@@ -48,10 +49,10 @@ def test_kill_merged_optimistic_no_false_exit(qtbot, manager, fake_lsf):
     """optimistic 정책이 LSF에 살아있는 job을 EXIT로 오표시하면 안 된다 —
     kill이 wrapper job까지 실제로 커버해야 store가 거짓말하지 않는다."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js_w = manager.submit_wrapper(["customwrapper_sub -i a.sp"],
+        js_w = submit_cmds(manager, ["customwrapper_sub -i a.sp"], wrapper=True,
                                       auto_poll=False)
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js_b = manager.submit(["echo x"], auto_poll=False)
+        js_b = submit_cmds(manager, ["echo x"], auto_poll=False)
     merged = js_b
     manager.merge(js_b, js_w, force=True)            # 활성 — force 레코드 흡수
 
@@ -70,7 +71,7 @@ def test_kill_pure_bsub_jobset_still_skips_chunk(qtbot, manager, fake_lsf):
     """수정 후에도 부착물이 커버하는 순수 bsub jobset은 chunk fallback을
     생략해야 한다 (LSF 부하 최소화 설계 유지)."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit(["echo x", "echo y"], mode="bulk",
+        js = submit_cmds(manager, ["echo x", "echo y"],
                             auto_poll=False)
     fake_lsf.calls.clear()
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
@@ -85,9 +86,19 @@ def test_kill_pure_bsub_jobset_still_skips_chunk(qtbot, manager, fake_lsf):
 def test_kill_jobs_single_array_element(qtbot, manager, fake_lsf):
     """manager.kill_jobs(js, ["jsid[2]"])는 element 2만 죽여야 한다 — parent id로
     변환되면 나머지 element까지 전부 죽는다."""
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit("run_task", count=3, auto_poll=False)
-    fake_lsf.set_all("RUN")
+    from tests.fake_lsf import FakeJob
+    from lsfmgr import JobRecord
+
+    js = manager.create_jobset(intended_count=3)
+    jsid, parent = js.id, 9400
+    manager.store.add_jobs([JobRecord(
+        job_id=parent, array_index=i, jobset_id=jsid,
+        lsf_job_name=f"{jsid}[{i}]", state=JobState.RUN, command="r")
+        for i in (1, 2, 3)])
+    for i in (1, 2, 3):
+        fake_lsf.jobs[f"{parent}[{i}]"] = FakeJob(
+            job_id=parent, array_index=i, name=f"{jsid}[{i}]", group=None,
+            queue="q", command="r", stat="RUN")
 
     with qtbot.waitSignal(manager.kill_finished, timeout=10000):
         manager.kill_jobs(js, [f"{js.id}[2]"])
@@ -110,7 +121,7 @@ def test_array_submit_failure_emits_failed_records(qtbot, manager, fake_lsf):
     manager.jobs_updated.connect(lambda jsid, recs: updates.append(recs))
 
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit("run_task", count=3, auto_poll=False,
+        js = submit_cmds(manager, "run_task", count=3, auto_poll=False,
                             max_retry=1)
 
     assert all(r.state is JobState.SUBMIT_FAILED for r in js.jobs())

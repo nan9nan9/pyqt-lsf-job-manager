@@ -14,6 +14,7 @@ from lsfmgr import LsfConfig, LsfJobManager
 from lsfmgr.command import LsfCommand
 from lsfmgr.states import JobState
 from tests.fake_lsf import FakeJob
+from tests.conftest import submit_cmds
 
 
 def _cmd(fake):
@@ -23,7 +24,7 @@ def _cmd(fake):
 def test_no_bjobs_call_uses_all_flag(qtbot, manager, fake_lsf):
     """어떤 bjobs 호출에도 -a가 붙지 않는다."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
+        js = submit_cmds(manager, ["echo a"], auto_poll=False)
     fake_lsf.set_all("RUN")
     manager.querier.query(js.id)
     fake_lsf.set_all("DONE")
@@ -69,7 +70,7 @@ def test_group_tracked_done_detected_via_id_requery(qtbot, manager, fake_lsf):
     """group으로 추적하는 job이 종료되면 group probe(active만)가 아니라
     leftover explicit-id 재조회로 DONE이 잡힌다 — bhist 없이 (설계 무결성)."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
+        js = submit_cmds(manager, ["echo a"], auto_poll=False)
     jid = js.jobs()[0].job_id
     fake_lsf.set_job(jid, "RUN")
     manager.querier.query(js.id)

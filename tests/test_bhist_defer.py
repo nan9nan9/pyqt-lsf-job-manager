@@ -16,13 +16,14 @@ import time
 from dataclasses import replace
 
 from lsfmgr import InMemoryStore, LsfJobManager
+from tests.conftest import submit_cmds
 from lsfmgr.states import JobState
 
 
 def _submit_running(qtbot, mgr, fake_lsf):
     """job 1건을 제출해 RUN 상태로 만든 뒤 (jobset, job_id) 반환."""
     with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-        js = mgr.submit(["echo a"], mode="bulk", auto_poll=False)
+        js = submit_cmds(mgr, ["echo a"], auto_poll=False)
     jid = js.jobs()[0].job_id
     fake_lsf.set_job(jid, "RUN")
     mgr.querier.query(js.id)                 # RUN 진입 반영
@@ -81,7 +82,7 @@ def test_found_job_updates_while_sibling_defers(qtbot, config, fake_lsf):
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf)
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            js = mgr.submit(["echo a", "echo b"], mode="bulk", auto_poll=False)
+            js = submit_cmds(mgr, ["echo a", "echo b"], auto_poll=False)
         alive, gone = (r.job_id for r in js.jobs())
         fake_lsf.set_all("RUN")
         mgr.querier.query(js.id)
@@ -108,7 +109,7 @@ def test_bhist_chunk_failure_isolated(qtbot, config, fake_lsf):
                         config=replace(config, chunk_size=1), runner=fake_lsf)
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            js = mgr.submit(["echo a", "echo b"], mode="bulk", auto_poll=False)
+            js = submit_cmds(mgr, ["echo a", "echo b"], auto_poll=False)
         bad, good = (r.job_id for r in js.jobs())
         fake_lsf.set_all("RUN")
         mgr.querier.query(js.id)                  # 둘 다 RUN
@@ -155,8 +156,8 @@ def test_bjobs_chunk_failure_isolated(qtbot, config, fake_lsf):
                         config=replace(config, chunk_size=1), runner=fake_lsf)
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            js = mgr.submit_wrapper(["customwrapper_sub a.sp",
-                                     "customwrapper_sub b.sp"])
+            js = submit_cmds(mgr, ["customwrapper_sub a.sp",
+                                     "customwrapper_sub b.sp"], wrapper=True)
         bad, good = (r.job_id for r in js.jobs())
         mgr.querier.query(js.id)                  # 둘 다 PEND 반영
         fake_lsf.set_job(good, "RUN")

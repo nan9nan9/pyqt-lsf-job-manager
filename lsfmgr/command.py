@@ -301,7 +301,7 @@ class LsfCommand:
         return argv
 
     # ------------------------------------------------------------------
-    # submit_wrapper — wrapper 커맨드를 '그대로' 실행하고 job_id 만 파싱
+    # wrapper 제출 — wrapper 커맨드를 '그대로' 실행하고 job_id 만 파싱
     # ------------------------------------------------------------------
     def run_submit(self, argv: Sequence[str],
                    timeout_s: Optional[float] = None) -> int:

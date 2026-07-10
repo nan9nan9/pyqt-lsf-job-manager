@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Callable, Dict, List, Optional, Sequence
 
 from .command import LsfCommand
-from .config import ArrayJobSpec, JobSpec, LsfConfig, spec_to_json
+from .config import JobSpec, LsfConfig, spec_to_json
 from .errors import SubmitError
 from .jobset_core import JobSetManager
 from .lifecycle import SubmitGate
@@ -162,7 +162,7 @@ class _SubmitTask(_BaseSubmitTask):
 
 
 class _WrapperSubmitTask(_BaseSubmitTask):
-    """wrapper 커맨드 1개를 '그대로' 실행하는 worker (submit_wrapper 용).
+    """wrapper 커맨드 1개를 '그대로' 실행하는 worker (wrapper 제출용).
 
     lsfmgr 는 인자를 조립하지 않는다 — argv(예: ["customwrapper_sub","-i","a.sp"])를
     subprocess 로 실행하고 stdout 의 'Job <id>' 만 파싱한다. 관리는 그렇게 얻은
@@ -218,38 +218,6 @@ class BulkSubmitter(QObject):
     # ------------------------------------------------------------------
     # public API
     # ------------------------------------------------------------------
-    def submit_bulk(self, jobset_id: str, specs: Sequence[JobSpec],
-                    options: Options, pre_submit=None) -> None:
-        """[async→Signal] 대량 submit. CREATED 레코드 생성 후 즉시 반환,
-        실제 bsub는 QThreadPool worker에서 수행 (QT-1). 결과는 finished.
-
-        lsfmgr 가 bsub 인자(-q/-J/-g …)를 조립하는 경로.
-        pre_submit(commands)->bool: 지정 시 제출 전 게이트 (FR-9).
-        """
-        self._launch(
-            jobset_id, specs, options,
-            record_command=lambda spec: spec.command,
-            make_task=lambda ctx, key, spec: _SubmitTask(self, ctx, key,
-                                                         spec, 0),
-            pre_submit=pre_submit)
-
-    def submit_wrappers(self, jobset_id: str, argvs: Sequence[Sequence[str]],
-                        options: Options, pre_submit=None) -> None:
-        """[async→Signal] wrapper 커맨드 대량 실행 (submit_wrapper 용).
-
-        각 argv 를 그대로 subprocess 실행하고 'Job <id>' 를 파싱한다. lsfmgr 가
-        인자를 조립하지 않고 argv 를 다루는 점만 submit_bulk 와 다르다.
-        record_command은 shlex 인용 보존 — resubmit 시 split 왕복으로 원본
-        argv가 복원돼야 한다 (공백 포함 인자 손상 방지).
-        pre_submit(commands)->bool: 지정 시 제출 전 게이트 (FR-9).
-        """
-        self._launch(
-            jobset_id, argvs, options,
-            record_command=lambda argv: shlex.join(argv),
-            make_task=lambda ctx, key, argv: _WrapperSubmitTask(self, ctx, key,
-                                                               argv, 0),
-            via_wrapper=True, pre_submit=pre_submit)
-
     def resubmit_existing(self, jobset_id: str,
                           keyed_items: Sequence, options: Options,
                           pre_submit=None) -> bool:
@@ -284,6 +252,7 @@ class BulkSubmitter(QObject):
             self._gate_reject(ctx, finish=True)
             return False
         def do_launch():
+            log.info("submit 착수 %s: %d건", jobset_id, len(keyed))
             # 기존 레코드 리셋 — 이전 실행의 흔적(job_id/exit_code/실행시간/
             # 위치)을 지우고 새 command 반영. 지우지 않으면 재제출 실패 시
             # 죽은 옛 job_id·이전 실행의 start/finish/working_dir가 잔존한다.
@@ -399,106 +368,6 @@ class BulkSubmitter(QObject):
         """config의 progress throttle 설정으로 EmitThrottler 생성 (QT-5)."""
         return EmitThrottler(self.config.progress_min_interval_s,
                              self.config.progress_min_step_ratio)
-
-    def _launch(self, jobset_id: str, items: Sequence, options: Options,
-                record_command: Callable[[object], str],
-                make_task: Callable[..., QRunnable],
-                via_wrapper: bool = False, pre_submit=None) -> None:
-        """단건 submit 공통 골격 — pool/‏ctx 구성 + CREATED 레코드 선생성 + 발화.
-
-        item(JobSpec 또는 argv)마다 make_task(ctx, job_key, item) 로 worker 를
-        만들어 병렬 실행한다. 재시도·rate limit·취소는 ctx 를 통해 공유된다.
-        via_wrapper는 레코드에 제출 경로를 남긴다 — resubmit_jobs가 job 단위로
-        재제출 경로를 복원하는 근거 (merge된 혼합 jobset에서도 정확).
-        pre_submit(commands)->bool 지정 시, 실제 제출 전에 게이트 워커 1개로
-        검사한다 (통과해야 do_launch 진행, FR-9).
-        """
-        items = list(items)
-        ctx = self._new_context(jobset_id, len(items), options)
-
-        def do_launch():
-            # 레코드 선생성 → 요약 불변식(합계==intended). 상태는 곧장
-            # SUBMITTING("제출 중"). 배치 API로 caller 블로킹을 방지한다.
-            created = self.store.add_jobs([
-                JobRecord(job_id=None, array_index=None, jobset_id=jobset_id,
-                          lsf_job_name=f"{jobset_id}_{idx}",
-                          state=JobState.SUBMITTING,
-                          command=record_command(item), via_wrapper=via_wrapper,
-                          spec_json=(spec_to_json(item)
-                                     if isinstance(item, JobSpec) else None))
-                for idx, item in enumerate(items)])
-            if created:                  # 초기 SUBMITTING 즉시 발행 (표 채움)
-                self.jobs_changed.emit(jobset_id, list(created))
-            log.info("submit 착수 %s: %d건 (%s, workers=%d)", jobset_id,
-                     len(items), "wrapper" if via_wrapper else "bsub",
-                     options.workers)
-            for idx, item in enumerate(items):
-                ctx.pool.start(make_task(ctx, f"{jobset_id}_{idx}", item))
-
-        def make_failed(msg):            # 게이트 예외 시 전원 SUBMIT_FAILED 레코드
-            return [
-                JobRecord(job_id=None, array_index=None, jobset_id=jobset_id,
-                          lsf_job_name=f"{jobset_id}_{idx}",
-                          state=JobState.SUBMIT_FAILED,
-                          fail_reason="PRE_SUBMIT_FAILED", fail_message=msg,
-                          command=record_command(item), via_wrapper=via_wrapper,
-                          spec_json=(spec_to_json(item)
-                                     if isinstance(item, JobSpec) else None))
-                for idx, item in enumerate(items)]
-
-        if pre_submit is None:
-            do_launch()
-            if not items:
-                # 동기 emit 금지 — caller(manager.submit)가 아직 핸들을 만들기
-                # 전이라 finished가 유실된다. 이벤트 루프 한 바퀴 뒤로 지연.
-                QTimer.singleShot(0,
-                                  lambda: self._finish_if_done(ctx, force=True))
-            return
-
-        # 게이트 경로 — 워커 1개에서 pre_submit 검사 후 통과 시 do_launch
-        commands = [record_command(item) for item in items]
-        ctx.pool.start(_GateTask(self, ctx, commands, pre_submit,
-                                 do_launch, make_failed))
-
-    def submit_array(self, jobset_id: str, spec: ArrayJobSpec,
-                     options: Options, pre_submit=None) -> None:
-        """[async→Signal] array job submit (FR-1.3) — bsub 1회.
-        pre_submit(commands)->bool: 지정 시 제출 전 게이트 (FR-9)."""
-        n = spec.size
-        ctx = self._new_context(jobset_id, 1, options)   # 게이트 등록 포함
-        ctx.pool.setMaxThreadCount(1)        # bsub 1회 — worker 1개면 충분
-
-        def do_launch():
-            created = self.store.add_jobs([
-                JobRecord(job_id=None, array_index=i, jobset_id=jobset_id,
-                          lsf_job_name=f"{jobset_id}[{i}]",
-                          state=JobState.SUBMITTING,
-                          command=(spec.commands[i - 1] if spec.commands
-                                   else (spec.command or "")))
-                for i in range(1, n + 1)])
-            if created:
-                self.jobs_changed.emit(jobset_id, list(created))
-            log.info("array submit 착수 %s: %d element (bsub 1회)",
-                     jobset_id, n)
-            ctx.pool.start(_ArraySubmitTask(self, ctx, spec, 0))
-
-        def make_failed(msg):
-            return [
-                JobRecord(job_id=None, array_index=i, jobset_id=jobset_id,
-                          lsf_job_name=f"{jobset_id}[{i}]",
-                          state=JobState.SUBMIT_FAILED,
-                          fail_reason="PRE_SUBMIT_FAILED", fail_message=msg,
-                          command=(spec.commands[i - 1] if spec.commands
-                                   else (spec.command or "")))
-                for i in range(1, n + 1)]
-
-        if pre_submit is None:
-            do_launch()
-            return
-        commands = (list(spec.commands) if spec.commands
-                    else [spec.command or ""])
-        ctx.pool.start(_GateTask(self, ctx, commands, pre_submit,
-                                 do_launch, make_failed))
 
     def cancel_submit(self, jobset_id: str) -> None:
         """진행 중 submit 중단 (QT-6). 이미 submit된 job은 유지."""
@@ -860,121 +729,3 @@ class _GateTask(QRunnable):
             sub._finish_if_done(ctx, force=True)
 
 
-class _ArraySubmitTask(QRunnable):
-    """array job bsub 1회 worker (FR-1.3)."""
-
-    def __init__(self, submitter: BulkSubmitter, ctx: _SubmitContext,
-                 spec: ArrayJobSpec, attempt: int):
-        super().__init__()
-        self.setAutoDelete(True)
-        self.submitter = submitter
-        self.ctx = ctx
-        self.spec = spec
-        self.attempt = attempt
-
-    def run(self):
-        try:
-            self._run()
-        except Exception as e:                  # noqa: BLE001
-            log.exception("array submit 예외: %s", self.ctx.jobset_id)
-            changed = self._fail_all("INTERNAL_ERROR", repr(e)[:4000])
-            self.submitter.error.emit(self.ctx.jobset_id, repr(e))
-            self.submitter._count(self.ctx, failed=True,
-                                  reason="ARRAY_SUBMIT_FAILED",
-                                  changed=changed)
-
-    def _run(self):
-        sub, ctx, spec = self.submitter, self.ctx, self.spec
-        jsid = ctx.jobset_id
-        n = spec.size
-        keys = [f"{jsid}[{i}]" for i in range(1, n + 1)]
-        if ctx.cancel_event.is_set():
-            # kill/cancel 우선 — 제출 전 안전 지점 중단, 전 element CREATED
-            # 복귀 (bulk _task_cancelled와 동일 정책·공용 헬퍼, QT-6)
-            sub._revert_to_created(ctx, keys)
-            return
-        for key in keys:
-            sub.store.transition(jsid, key, JobState.SUBMITTING)
-
-        command = spec.command
-        if spec.commands is not None:
-            command = self._write_dispatch_script(jsid, spec.commands)
-
-        js = sub.store.get_jobset(jsid)
-        group = js.lsf_group_paths[0] if js.lsf_group_paths else None
-        try:
-            opts = ctx.options
-            array_id = sub.command.bsub(
-                command,
-                queue=(spec.queue if spec.queue is not None
-                       else (opts.queue or None)),
-                job_name=f"{jsid}[1-{n}]",            # array 지정
-                group_path=group,
-                resources=spec.resources or opts.resource_req,
-                outfile=spec.outfile, errfile=spec.errfile,
-                extra_args=spec.extra_args,
-                env=spec.env,
-                timeout_s=opts.submit_timeout_s)
-        except SubmitError as e:
-            if (self.attempt < ctx.max_retry and not ctx.cancel_event.is_set()
-                    and not sub._shutdown):
-                msg = e.diagnostic()[:4000]
-                for key in keys:
-                    sub.store.transition(jsid, key, JobState.RETRY_WAIT,
-                                         retry_count=self.attempt + 1,
-                                         fail_reason=e.fail_reason,
-                                         fail_message=msg)
-                nxt = self.attempt + 1      # 값 즉시 캡처 (task는 autoDelete)
-                sub._schedule_retry(
-                    ctx, keys, ctx.options.retry_delay_s(self.attempt),
-                    lambda: _ArraySubmitTask(sub, ctx, spec, nxt))
-                return
-            changed = self._fail_all(e.fail_reason, e.diagnostic()[:4000])
-            sub._count(ctx, failed=True, reason="ARRAY_SUBMIT_FAILED",
-                       changed=changed)
-            return
-
-        sub.jobsets.add_array_attachment(jsid, array_id)
-        now = datetime.now()
-        recs = []
-        for key in keys:
-            r = sub.store.transition(jsid, key, JobState.PEND,
-                                     job_id=array_id, submit_time=now,
-                                     fail_reason=None, fail_message=None)
-            if r is not None:
-                recs.append(r)
-        sub._count(ctx, succeeded=True, changed=recs)
-
-    def _write_dispatch_script(self, jsid: str, commands) -> str:
-        """element별 command가 다른 경우 $LSB_JOBINDEX dispatch 스크립트 생성."""
-        script_dir = self.submitter.config.resolve_script_dir()
-        cmds_path = os.path.join(script_dir, f"{jsid}.cmds")
-        sh_path = os.path.join(script_dir, f"{jsid}.sh")
-        with open(cmds_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(commands) + "\n")
-        with open(sh_path, "w", encoding="utf-8") as f:
-            f.write("#!/bin/sh\n"
-                    "# lsfmgr 자동 생성 — $LSB_JOBINDEX 번째 명령을 실행\n"
-                    f'CMD=$(sed -n "${{LSB_JOBINDEX}}p" "{cmds_path}")\n'
-                    'exec /bin/sh -c "$CMD"\n')
-        os.chmod(sh_path, os.stat(sh_path).st_mode
-                 | stat_mod.S_IXUSR | stat_mod.S_IXGRP)
-        return sh_path
-
-    def _fail_all(self, reason: str, message: Optional[str] = None) -> list:
-        """전 element를 SUBMIT_FAILED로 확정. 반환: 전이된 레코드 목록 —
-        _count(changed=...)로 넘겨 jobs_updated/jobs_failed 발행을 보장한다
-        (누락 시 UI 표가 SUBMITTING에 고착)."""
-        jsid = self.ctx.jobset_id
-        changed = []
-        for i in range(1, self.spec.size + 1):
-            try:
-                rec = self.submitter.store.transition(
-                    jsid, f"{jsid}[{i}]", JobState.SUBMIT_FAILED,
-                    retry_count=self.attempt, fail_reason=reason,
-                    fail_message=message)
-                if rec is not None:
-                    changed.append(rec)
-            except Exception:                   # noqa: BLE001
-                pass
-        return changed

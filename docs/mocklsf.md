@@ -26,7 +26,7 @@ PyQt 앱을 실제 LSF 없이 테스트하기 위한 용도. **이 저장소에 
 ```
 
 > 실제 환경처럼 job 마다 wrapper(`customwrapper_sub` 등)로 제출하는 방법은
-> [`lsfmgr.md`](lsfmgr.md) 참고 (lsfmgr `submit_wrapper`).
+> [`lsfmgr.md`](lsfmgr.md) 참고 (lsfmgr wrapper 제출).
 
 ## 동작 방식
 
@@ -137,9 +137,9 @@ export MOCKLSF_FORWARD_RATE=1.0          # 전부 forward (데모용)
       by_cluster.setdefault(r.forward_cluster, []).append(r.job_key)
   for cluster, keys in by_cluster.items():
       if cluster:                                  # forward 된 job
-          js.kill_jobs(keys, envpath=mockcfg.cluster_env_path(cluster))
+          mgr.kill_jobs(js, keys, envpath=mockcfg.cluster_env_path(cluster))
       else:                                        # 로컬 job
-          js.kill_jobs(keys)
+          mgr.kill_jobs(js, keys)
   ```
   lsfmgr 는 이때 `tcsh -c "source <cshrc> && set noglob && exec bkill <ids>"`
   를 실행하고, 그 컨텍스트에서 mocklsf bkill 이 forward job 에 닿아 죽인다.

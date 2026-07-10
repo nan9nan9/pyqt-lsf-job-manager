@@ -7,6 +7,7 @@ lsfmgr 는 각 wrapper 커맨드(customwrapper_sub 등)를 그대로 실행하�
 from __future__ import annotations
 
 from lsfmgr import JobState
+from tests.conftest import submit_cmds
 
 
 def _finish(qtbot, mgr, timeout=15000):
@@ -21,7 +22,7 @@ def _finish(qtbot, mgr, timeout=15000):
 def test_submit_wrapper_captures_job_id(qtbot, manager, fake_lsf):
     cmds = [f"customwrapper_sub -q normal run_{i}.sp" for i in range(20)]
     with qtbot.waitSignal(manager.submit_finished, timeout=15000) as blocker:
-        js = manager.submit_wrapper(cmds, workers=8)
+        js = submit_cmds(manager, cmds, wrapper=True, workers=8)
     _, report = blocker.args
     assert report.succeeded == 20 and report.failed == 0
 
@@ -33,10 +34,8 @@ def test_submit_wrapper_captures_job_id(qtbot, manager, fake_lsf):
     # 실제로 customwrapper_sub 가 실행됐는지 (bsub 직접 호출 아님)
     assert fake_lsf.calls_of("customwrapper_sub"), "customwrapper_sub 가 실행되지 않음"
 
-    # job_id 만으로 관리 → 그룹/이름 부착물 없음
-    jsrec = manager.store.get_jobset(js.id)
-    assert jsrec.lsf_group_paths == []
-    assert jsrec.name_patterns == []
+    # v9: create_jobset이 부착물을 항상 만들지만, wrapper 제출은 이를
+    # 사용하지 않는다 — kill은 group 실패 시 job_id fallback으로 동작
 
 
 def test_submit_wrapper_token_list_and_mixed(qtbot, manager, fake_lsf):
@@ -47,7 +46,7 @@ def test_submit_wrapper_token_list_and_mixed(qtbot, manager, fake_lsf):
         ["customwrapper_sub", "c.sp"],
     ]
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit_wrapper(cmds)
+        js = submit_cmds(manager, cmds, wrapper=True)
     assert all(r.job_id is not None for r in manager.get_jobs(js.id))
     # 세 커맨드 모두 wrapper를 그대로 거쳐 실행됨
     assert len(fake_lsf.calls_of("customwrapper_sub")) == 3
@@ -59,7 +58,7 @@ def test_submit_wrapper_token_list_and_mixed(qtbot, manager, fake_lsf):
 def test_wrapper_retry_on_nonzero(qtbot, manager, fake_lsf):
     fake_lsf.fail_next_bsub = 2          # 처음 2회 rc!=0 → 재시도로 성공
     with qtbot.waitSignal(manager.submit_finished, timeout=15000) as blocker:
-        js = manager.submit_wrapper(["customwrapper_sub x.sp"], max_retry=3)
+        js = submit_cmds(manager, ["customwrapper_sub x.sp"], wrapper=True, max_retry=3)
     _, report = blocker.args
     assert report.succeeded == 1
     assert report.retried >= 1
@@ -71,7 +70,7 @@ def test_wrapper_no_retry_on_parse_fail(qtbot, manager, fake_lsf):
     # 위험이 있어, max_retry 가 있어도 재시도하지 않고 즉시 실패해야 한다.
     fake_lsf.no_jobid_next_bsub = 5
     with qtbot.waitSignal(manager.submit_finished, timeout=10000) as blocker:
-        js = manager.submit_wrapper(["customwrapper_sub x.sp"], max_retry=3)
+        js = submit_cmds(manager, ["customwrapper_sub x.sp"], wrapper=True, max_retry=3)
     _, report = blocker.args
     assert report.failed == 1 and report.succeeded == 0
     assert report.retried == 0           # 재시도 안 함
@@ -88,8 +87,8 @@ def test_wrapper_no_retry_on_parse_fail(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_wrapper_kill_by_id(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=15000):
-        js = manager.submit_wrapper(
-            [f"customwrapper_sub run_{i}.sp" for i in range(10)], workers=8)
+        js = submit_cmds(manager, 
+            [f"customwrapper_sub run_{i}.sp" for i in range(10)], workers=8, wrapper=True)
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
         manager.kill(js)
     _, report = blocker.args
@@ -101,4 +100,4 @@ def test_wrapper_kill_by_id(qtbot, manager, fake_lsf):
 def test_submit_wrapper_empty_raises(manager):
     import pytest
     with pytest.raises(ValueError):
-        manager.submit_wrapper([])
+        submit_cmds(manager, [], wrapper=True)

@@ -43,7 +43,7 @@ class SubmitError(LsfmgrError):
         self.returncode = returncode
         self.stderr = stderr
         self.stdout = stdout
-        # 재시도 대상 여부. submit_wrapper 경로는 '비정상 종료(non-zero)'만
+        # 재시도 대상 여부. wrapper 제출 경로는 '비정상 종료(non-zero)'만
         # 재시도하고, 파싱 실패/timeout 은 중복 제출 위험 때문에 재시도하지 않는다.
         self.retryable = retryable
 

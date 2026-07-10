@@ -338,38 +338,6 @@ class JobSetManager:
         return self.store.update_jobset(replace(js, closed=True))
 
 
-def detect_array_template(commands: Sequence[str]) -> Optional[str]:
-    """AUTO-4 — command 목록이 array로 표현 가능하면 $LSB_JOBINDEX 템플릿 반환.
-
-    조건: 모든 command의 숫자 외 골격이 동일하고, 달라지는 숫자 필드가
-    전부 1..N 인덱스와 일치. 전부 동일한 command면 command 자체를 반환.
-    불가하면 None (→ bulk 방식).
-    """
-    import re
-    if len(commands) < 2:
-        return None
-    tokens = [re.split(r"(\d+)", c) for c in commands]
-    n_tok = len(tokens[0])
-    if any(len(t) != n_tok for t in tokens):
-        return None
-    template = list(tokens[0])
-    for pos in range(n_tok):
-        column = [t[pos] for t in tokens]
-        if pos % 2 == 0:                        # 숫자 아닌 골격 — 전부 동일해야
-            if len(set(column)) != 1:
-                return None
-        elif len(set(column)) != 1:             # 달라지는 숫자 — 인덱스여야
-            # 문자열 비교 필수: int 비교면 "01" == 1로 오판해
-            # $LSB_JOBINDEX(=1) 치환 시 run_01 → run_1 오실행이 된다
-            if all(column[i] == str(i + 1) for i in range(len(column))):
-                # 중괄호 필수: "run_$LSB_JOBINDEX_final"이면 셸이 변수명을
-                # LSB_JOBINDEX_final로 흡수해 빈 문자열로 확장된다
-                template[pos] = "${LSB_JOBINDEX}"
-            else:
-                return None
-    return "".join(template)
-
-
 def _dedup(items: Iterable) -> list:
     """순서 보존 중복 제거."""
     seen = set()

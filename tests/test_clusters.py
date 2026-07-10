@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
+from tests.conftest import submit_cmds
 from lsfmgr.command import LsfCommand
 from lsfmgr.states import JobState
 
@@ -23,7 +24,7 @@ def mc_manager(qtbot, fake_lsf, config):
 
 def _submit_running(qtbot, mgr, fake_lsf, src=None, fwd=None):
     with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-        js = mgr.submit(["echo a"], mode="bulk", auto_poll=False)
+        js = submit_cmds(mgr, ["echo a"], auto_poll=False)
     rec = js.jobs()[0]
     fj = fake_lsf.jobs[str(rec.job_id)]
     fj.stat = "RUN"
@@ -61,7 +62,7 @@ def test_collect_clusters_forward_only(qtbot, mc_manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_default_off_no_cluster_fields(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
+        js = submit_cmds(manager, ["echo a"], auto_poll=False)
     rec = js.jobs()[0]
     fj = fake_lsf.jobs[str(rec.job_id)]
     fj.stat = "RUN"; fj.source_cluster = "seoul"
@@ -82,7 +83,7 @@ def test_cluster_field_unsupported_degrades_to_full(qtbot, fake_lsf, config):
                         collect_clusters=True)
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            js = mgr.submit(["echo a"], mode="bulk", auto_poll=False)
+            js = submit_cmds(mgr, ["echo a"], auto_poll=False)
         rec = js.jobs()[0]
         fj = fake_lsf.jobs[str(rec.job_id)]
         fj.stat = "RUN"; fj.run_time_s = 42; fj.source_cluster = "seoul"
@@ -103,7 +104,7 @@ def test_cluster_degradation_is_permanent(qtbot, fake_lsf, config):
                         collect_clusters=True)
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            js = mgr.submit(["echo a"], mode="bulk", auto_poll=False)
+            js = submit_cmds(mgr, ["echo a"], auto_poll=False)
         fake_lsf.set_all("RUN")
         mgr.querier.query(js.id)             # 여기서 강등
         fake_lsf.calls.clear()
@@ -181,8 +182,8 @@ def test_double_field_error_degrades_to_core():
 # ----------------------------------------------------------------------
 def test_wrapper_array_aggregate_carries_cluster(qtbot, mc_manager, fake_lsf):
     with qtbot.waitSignal(mc_manager.submit_finished, timeout=10000):
-        js = mc_manager.submit_wrapper(
-            [["customwrapper_sub", "-J", "arr[1-3]", "echo", "hi"]], auto_poll=False)
+        js = submit_cmds(mc_manager, 
+            [["customwrapper_sub", "-J", "arr[1-3]", "echo", "hi"]], auto_poll=False, wrapper=True)
     rec = js.jobs()[0]
     aid = rec.job_id
     for i in (1, 2, 3):
@@ -206,7 +207,7 @@ def test_off_polling_preserves_stored_cluster(qtbot, fake_lsf, tmp_path):
     mgr = LsfJobManager(store=store, config=LsfConfig(), runner=fake_lsf)  # off
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            js = mgr.submit(["echo a"], mode="bulk", auto_poll=False)
+            js = submit_cmds(mgr, ["echo a"], auto_poll=False)
         rec = js.jobs()[0]
         # 이전 세션이 채운 것처럼 store에 직접 클러스터 주입 + LSF도 RUN
         store.transition(js.id, rec.job_key, JobState.RUN,

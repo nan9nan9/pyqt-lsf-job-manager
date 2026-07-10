@@ -19,14 +19,17 @@ mgr.start_polling(js)───▶   polling QThread (전역 1개)
   어느 slot에서든 `js.jobs()` pull이 신호 내용과 일치한다.
 - worker→main Signal은 queued connection — slot은 항상 main에서 실행된다.
 
-## 1. submit (bulk / wrapper / array)
+## 1. submit — `mgr.submit(js)` (유일한 제출 경로, v9)
+
+`create_jobset` → `create_jobs`(CREATED, 표 즉시 채움) 후 jobset 기준으로
+전 job을 (재)제출한다. 가드: 전원 비활성(CREATED/terminal)이어야 한다.
 
 ```
 main                          submit pool worker (job당 1 task)
 ────────────────────────      ──────────────────────────────────
-submit()
- ├ 레코드 선생성(전원 SUBMITTING)
- │   → jobs_updated([전원])        # 표가 즉시 채워짐
+mgr.submit(js)
+ ├ 가드(전원 비활성) + 레코드 리셋(전원 SUBMITTING)
+ │   → jobs_updated([전원])        # 표가 즉시 갱신
  ├ SubmitGate.register(ctx)        # kill barrier 중이면 born-cancelled
  └ pool.start(task × N) → 반환
                               task._run:

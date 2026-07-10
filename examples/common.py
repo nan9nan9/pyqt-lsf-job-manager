@@ -42,7 +42,7 @@ _REAL = os.environ.get("LSFMGR_REAL") == "1"
 
 
 def wrapper(tool: str, *args) -> list:
-    """submit_wrapper 에 넘길 wrapper 커맨드(토큰 리스트)를 만든다.
+    """create_jobs 에 넘길 wrapper 커맨드(토큰 리스트)를 만든다.
 
     mocklsf 모드에서는 `bin/<tool>` 절대경로를, 실제 LSF 모드에서는 PATH 의
     `<tool>` 이름을 프로그램으로 쓴다.

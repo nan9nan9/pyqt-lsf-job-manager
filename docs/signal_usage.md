@@ -201,13 +201,16 @@ mgr.kill_finished.connect(lambda jsid, rpt: bar.setVisible(False))
 ```python
 def on_submit_clicked(self):
     cmds = [f"customwrapper_sub -q normal run_{i}.sp" for i in range(5000)]
-    js = self.mgr.submit_wrapper(cmds, workers=32, max_retry=3, label="sweep")
+    js = self.mgr.create_jobset(label="sweep")
+    self.mgr.create_jobs(js, cmds)            # wrapper 커맨드 그대로
+    self.mgr.submit(js, workers=32, max_retry=3)
     self._current_jsid = js.id                # 이 JobSet을 테이블에 표시
     self.bar.setValue(0)
 ```
 
 일어나는 일 (자동):
-- **명령 직후** 5000개가 `SUBMITTING`으로 `jobs_updated`에 한 번에 온다 → 표 즉시 채워짐.
+- `create_jobs` 직후 5000개가 `CREATED`로, `submit` 착수 직후 `SUBMITTING`
+  리셋이 `jobs_updated`에 한 번에 온다 → 표 즉시 채워짐.
 - 각 job이 bsub 완료되는 대로 `PEND`로 `jobs_updated` 점진 배치 → 표가 실시간 갱신.
 - `submit_progress`로 막대 진행. 끝나면 `submit_finished(jsid, SubmitReport)`.
 
@@ -218,8 +221,8 @@ def _on_submit_done(self, jsid, rep):         # SubmitReport
         f"({rep.duration_s:.1f}s)")
 ```
 
-> `submit_wrapper`는 `JobSet`을, `submit_bulk`는 `jobset_id` 문자열을 반환한다.
-> 어느 쪽이든 `mgr.*` Signal은 `jobset_id`로 오므로 위 배선 그대로 동작한다.
+> `mgr.*` Signal은 첫 인자 `jobset_id`(문자열)로 오므로 위 배선 그대로
+> 동작한다 — 핸들이 필요하면 `mgr.jobset(jsid)`로 재획득한다.
 
 ---
 

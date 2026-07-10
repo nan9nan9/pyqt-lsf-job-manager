@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import pytest
 
-from lsfmgr import JobSpec, JobState, LsfJobManager
+from lsfmgr import JobRecord, JobSpec, JobState, LsfJobManager
+from tests.conftest import submit_cmds
 from lsfmgr.command import LsfCommand
 from lsfmgr.config import LsfConfig
 from lsfmgr.errors import LsfmgrError
-from lsfmgr.jobset_core import detect_array_template
 from lsfmgr.options import resolve_options
 from tests.test_store_contract import make_job, make_jobset
 
@@ -15,19 +15,9 @@ from tests.test_store_contract import make_job, make_jobset
 # ----------------------------------------------------------------------
 # 버그 1: leading-zero 인덱스를 $LSB_JOBINDEX로 오치환 → 잘못된 파일 실행
 # ----------------------------------------------------------------------
-def test_template_rejects_leading_zero_indices():
-    # "run_01" vs $LSB_JOBINDEX(=1) → run_1 이 되므로 array 불가 판정이어야 함
-    cmds = [f"mytool run_{i:02d}.sp" for i in range(1, 11)]
-    assert detect_array_template(cmds) is None
-
-    # zero-padding 없는 1..N은 여전히 array 가능
-    cmds2 = [f"mytool run_{i}.sp" for i in range(1, 11)]
-    assert detect_array_template(cmds2) == "mytool run_${LSB_JOBINDEX}.sp"
-
-
 def test_leading_zero_commands_submitted_verbatim(qtbot, manager, fake_lsf):
     cmds = [f"sim case_{i:03d}.sp" for i in range(1, 6)]
-    js = manager.submit(cmds, auto_poll=False)        # auto → bulk여야 함
+    js = submit_cmds(manager, cmds, auto_poll=False)
     with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     submitted = sorted(j.command for j in fake_lsf.jobs.values())
@@ -58,7 +48,7 @@ def test_store_add_jobs_missing_jobset(store):
 # 버그 3: close 실패(전원 terminal 아님) 시 polling이 부수효과로 중지됨
 # ----------------------------------------------------------------------
 def test_failed_close_keeps_polling_and_handle(qtbot, manager, fake_lsf):
-    js = manager.submit([f"r {i}" for i in range(5)], mode="bulk",
+    js = submit_cmds(manager, [f"r {i}" for i in range(5)],
                         auto_poll=False)
     with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
@@ -97,7 +87,7 @@ def test_tags_string_not_exploded():
 
 
 def test_tags_string_end_to_end(qtbot, manager, fake_lsf):
-    js = manager.submit(["x"], tags="sweep", auto_poll=False)
+    js = submit_cmds(manager, ["x"], tags="sweep", auto_poll=False)
     with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     assert manager.store.get_jobset(js.id).tags == ["sweep"]
@@ -115,12 +105,14 @@ def test_manager_only_kwargs_validated(fake_lsf):
 # ----------------------------------------------------------------------
 # 버그 7: submit([]) — finished가 핸들 생성 전에 동기 emit되어 유실
 # ----------------------------------------------------------------------
-def test_empty_submit_finished_reaches_handle(qtbot, manager, fake_lsf):
-    js = manager.submit([], auto_poll=False)
-    with qtbot.waitSignal(js.submit_finished, timeout=5000) as blocker:
-        pass
-    rpt = blocker.args[0]
-    assert rpt.total == 0 and rpt.ok == 0
+def test_empty_jobset_submit_rejected(manager, fake_lsf):
+    """v9: 빈 제출은 아예 불가 — create_jobs가 빈 목록을 거부하고,
+    job 없는 jobset의 submit은 LsfmgrError."""
+    js = manager.create_jobset()
+    with pytest.raises(ValueError):
+        manager.create_jobs(js, [])
+    with pytest.raises(LsfmgrError):
+        manager.submit(js)
     assert js.summary["total"] == 0
 
 
@@ -131,7 +123,7 @@ def test_empty_submit_finished_reaches_handle(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_kill_falls_through_when_group_rejected(qtbot, manager, fake_lsf):
     fake_lsf.reject_group = True            # 모든 job이 group 없이 submit됨
-    js = manager.submit([f"r {i}" for i in range(20)], mode="bulk",
+    js = submit_cmds(manager, [f"r {i}" for i in range(20)],
                         auto_poll=False)
     with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
@@ -149,33 +141,42 @@ def test_kill_falls_through_when_group_rejected(qtbot, manager, fake_lsf):
 # 버그 10 (2차): array 부분 kill이 parent id로 전체를 죽임
 # ----------------------------------------------------------------------
 def test_array_partial_kill_only_pend(qtbot, manager, fake_lsf):
-    from lsfmgr import ArrayJobSpec
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        jsid = manager.submit_array(ArrayJobSpec(command="r", count=10))
-    parent = manager.get_jobs(jsid)[0].job_id
-    # element 1~5는 RUN으로 (fake + store 모두 반영)
-    for i in range(1, 6):
-        fake_lsf.set_job(parent, "RUN", array_index=i)
-        manager.store.transition(jsid, f"{jsid}[{i}]", JobState.RUN)
+    """array element 부분 kill — parent id가 아니라 "id[idx]"로 지정해
+    PEND element만 죽어야 한다 (v9: array는 wrapper 제출 산물로만 존재 —
+    레코드/LSF를 수동 구성해 element 계약을 검증)."""
+    from tests.fake_lsf import FakeJob
 
-    with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
-        manager.kill(jsid, only_state=JobState.PEND)
-    rpt = blocker.args[1]
-    assert rpt.requested == 5                    # PEND element만
-    alive = fake_lsf.alive_jobs()
-    assert len(alive) == 5, "parent id kill로 RUN element까지 죽음"
-    assert all(j.stat == "RUN" for j in alive)
+    js = manager.create_jobset(intended_count=10)
+    jsid, parent = js.id, 9000
+    manager.store.add_jobs([JobRecord(
+        job_id=parent, array_index=i, jobset_id=jsid,
+        lsf_job_name=f"{jsid}[{i}]",
+        state=JobState.RUN if i <= 5 else JobState.PEND, command="r")
+        for i in range(1, 11)])
+    for i in range(1, 11):
+        fake_lsf.jobs[f"{parent}[{i}]"] = FakeJob(
+            job_id=parent, array_index=i, name=f"{jsid}[{i}]", group=None,
+            queue="q", command="r", stat="RUN" if i <= 5 else "PEND")
 
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000):
+        manager.kill(js, only_state=JobState.PEND)
+
+    stats = {f"{parent}[{i}]": fake_lsf.jobs[f"{parent}[{i}]"].stat
+             for i in range(1, 11)}
+    assert all(v == "RUN" for k, v in stats.items()
+               if int(k.split("[")[1][:-1]) <= 5), stats   # RUN은 생존
+    assert all(v == "EXIT" for k, v in stats.items()
+               if int(k.split("[")[1][:-1]) > 5), stats    # PEND만 kill
 
 # ----------------------------------------------------------------------
 # 버그 11 (2차): SqliteStore._Tx — connection 생성 실패 시 wlock 누수
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
-# 버그 12 (2차): 저수준 submit_bulk/submit_array의 tags="..." 문자 분해
+# 버그 12 (2차): tags="..." 문자열이 문자 단위로 분해되던 버그
 # ----------------------------------------------------------------------
 def test_lowlevel_submit_tags_string(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        jsid = manager.submit_bulk([JobSpec(command="x")], tags="sweep")
+        jsid = submit_cmds(manager, [JobSpec(command="x")], tags="sweep").id
     assert manager.store.get_jobset(jsid).tags == ["sweep"]
 
 
@@ -183,7 +184,7 @@ def test_lowlevel_submit_tags_string(qtbot, manager, fake_lsf):
 # 버그 8: ReconcileReport.checked 이중 계산
 # ----------------------------------------------------------------------
 def test_query_result_checked_count(qtbot, manager, fake_lsf):
-    js = manager.submit([f"r {i}" for i in range(10)], mode="bulk",
+    js = submit_cmds(manager, [f"r {i}" for i in range(10)],
                         auto_poll=False)
     with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass

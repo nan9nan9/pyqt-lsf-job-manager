@@ -10,6 +10,7 @@ import time
 
 from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager, SubmitProgress
 from tests.fake_lsf import FakeLsf
+from tests.conftest import submit_cmds
 
 
 def _gated_runner(fake: FakeLsf, gate: threading.Event):
@@ -30,8 +31,7 @@ def test_submit_is_nonblocking_and_snapshot(qtbot, tmp_path):
                         runner=_gated_runner(fake, gate))
     try:
         t0 = time.monotonic()
-        js = mgr.submit([f"echo {i}" for i in range(20)],
-                        mode="bulk", auto_poll=False)
+        js = submit_cmds(mgr, [f"echo {i}" for i in range(20)], auto_poll=False)
         # submit()은 즉시 반환 (bsub가 붙잡혀 있어도 블로킹 안 함)
         assert time.monotonic() - t0 < 1.0
         assert js.is_submitting                      # 백그라운드로 도는 중
@@ -59,7 +59,7 @@ def test_submit_is_nonblocking_and_snapshot(qtbot, tmp_path):
 
 def test_snapshot_none_when_not_submitting(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
+        js = submit_cmds(manager, ["echo a"], auto_poll=False)
     assert not js.is_submitting
     assert js.submit_state is None
 
@@ -77,8 +77,7 @@ def test_snapshot_counts_progress(qtbot, tmp_path):
         seen_snaps = []
         # 진행 중 여러 번 스냅샷 — done 단조 증가 관찰
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            js = mgr.submit([f"echo {i}" for i in range(10)],
-                            mode="bulk", auto_poll=False, max_retry=0)
+            js = submit_cmds(mgr, [f"echo {i}" for i in range(10)], auto_poll=False, max_retry=0)
             for _ in range(30):
                 s = js.submit_state
                 if s is not None:

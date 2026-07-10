@@ -13,6 +13,7 @@ import threading
 import time
 
 from lsfmgr import InMemoryStore, LsfJobManager
+from tests.conftest import submit_cmds
 from lsfmgr.states import JobState
 
 
@@ -39,7 +40,7 @@ def test_kill_during_submit_cancels_unsubmitted_and_kills_submitted(
     runner = GatedBsub(fake_lsf)
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=runner)
     try:
-        js = mgr.submit(["echo 1", "echo 2", "echo 3"], mode="bulk",
+        js = submit_cmds(mgr, ["echo 1", "echo 2", "echo 3"],
                         workers=1, auto_poll=False)
         assert runner.entered.wait(5)        # worker가 bsub 진입 (제출 중)
 
@@ -64,7 +65,7 @@ def test_kill_during_submit_invariant_no_survivors(qtbot, manager, fake_lsf):
     LSF 생존자(on-lsf)는 없고 각 job은 EXIT/CREATED/SUBMIT_FAILED 중 하나다."""
     with qtbot.waitSignals([manager.submit_finished, manager.kill_finished],
                            timeout=15000):
-        js = manager.submit([f"echo {i}" for i in range(30)], mode="bulk",
+        js = submit_cmds(manager, [f"echo {i}" for i in range(30)],
                             auto_poll=False)
         manager.kill(js.id)
 
@@ -72,55 +73,6 @@ def test_kill_during_submit_invariant_no_survivors(qtbot, manager, fake_lsf):
     allowed = {JobState.EXIT, JobState.CREATED, JobState.SUBMIT_FAILED}
     got = {r.state for r in js.jobs()}
     assert got <= allowed, got               # SUBMITTING/PEND 잔존 금지
-
-
-def test_kill_during_array_submit_no_leak(qtbot, config, fake_lsf):
-    """array submit(bsub 1회) 진행 중 kill — quiesce가 제출 완료를 기다린 뒤
-    array_id로 죽여 전 element가 EXIT로 정리된다 (유출 없음)."""
-    runner = GatedBsub(fake_lsf)
-    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=runner)
-    try:
-        js = mgr.submit("echo x", count=3, mode="array", auto_poll=False)
-        assert runner.entered.wait(5)        # array bsub 진입
-
-        with qtbot.waitSignals([mgr.submit_finished, mgr.kill_finished],
-                               timeout=15000):
-            mgr.kill(js.id)
-            runner.gate.set()
-
-        assert all(r.state is JobState.EXIT for r in js.jobs())
-        assert fake_lsf.alive_jobs() == []
-    finally:
-        mgr.shutdown()
-
-
-def test_array_cancel_before_bsub_returns_created(qtbot, manager, fake_lsf):
-    """cancel이 bsub 이전에 걸린 array task는 제출 없이 전 element CREATED
-    복귀 (bulk _task_cancelled와 대칭인 안전 지점 중단)."""
-    from lsfmgr.config import ArrayJobSpec
-    from lsfmgr.options import Options
-    from lsfmgr.qt import QThreadPool
-    from lsfmgr.states import JobRecord
-    from lsfmgr.submitter import _ArraySubmitTask, _SubmitContext
-    from lsfmgr.util import TokenBucketLimiter
-
-    jsid = manager.create_jobset(2).id
-    manager.store.add_jobs([
-        JobRecord(job_id=None, array_index=i, jobset_id=jsid,
-                  lsf_job_name=f"{jsid}[{i}]", state=JobState.SUBMITTING,
-                  command="echo x")
-        for i in (1, 2)])
-    ctx = _SubmitContext(jobset_id=jsid, total=1, max_retry=0,
-                         pool=QThreadPool(), limiter=TokenBucketLimiter(None),
-                         options=Options())
-    ctx.cancel_event.set()                   # kill/cancel이 먼저 도착한 상황
-
-    _ArraySubmitTask(manager.submitter, ctx,
-                     ArrayJobSpec(command="echo x", count=2), 0).run()
-
-    assert all(r.state is JobState.CREATED
-               for r in manager.store.get_jobs(jsid))
-    assert fake_lsf.calls_of("bsub") == []   # 제출 자체가 안 나감
 
 
 class _StubScope:
@@ -172,9 +124,9 @@ def test_merge_during_active_kill_rejected(qtbot, manager, fake_lsf):
     from lsfmgr.errors import LsfmgrError
 
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        a = manager.submit(["echo a"], mode="bulk", auto_poll=False)
+        a = submit_cmds(manager, ["echo a"], auto_poll=False)
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        b = manager.submit(["echo b"], mode="bulk", auto_poll=False)
+        b = submit_cmds(manager, ["echo b"], auto_poll=False)
 
     gate = threading.Event()
     try:
@@ -200,7 +152,7 @@ def test_kill_started_pull_consistency(qtbot, manager, fake_lsf):
     """kill_started slot에서 pull API(is_killing/kill_state)를 조회하면
     이미 True/값이어야 한다 — 신호와 pull의 착수측 일치 계약."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
+        js = submit_cmds(manager, ["echo a"], auto_poll=False)
 
     pulled = {}
     js.kill_started.connect(lambda: pulled.update(
@@ -232,7 +184,7 @@ def test_quiesce_timeout_recorded_in_kill_report(qtbot, manager, fake_lsf):
     표시도 억제된다 — 유출 가능성이 '전부 정리됨'으로 오보되지 않는다.
     barrier는 실패해도 반드시 release된다."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
+        js = submit_cmds(manager, ["echo a"], auto_poll=False)
 
     stub = _StubScope(quiesced=False)        # 대기 초과 재현
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
@@ -281,7 +233,7 @@ def test_kill_started_emitted_synchronously(qtbot, manager, fake_lsf):
     quiesce로 kill_finished가 수십 초 늦어지는 케이스에서도 UI가 착수를
     바로 표시할 수 있다 (submit_started와 대칭인 착수 피드백)."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
+        js = submit_cmds(manager, ["echo a"], auto_poll=False)
 
     order = []
     manager.kill_started.connect(lambda jsid: order.append(("started", jsid)))
@@ -327,7 +279,7 @@ def test_submit_during_kill_barrier_is_born_cancelled(qtbot, manager,
     from lsfmgr.options import Options
 
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
+        js = submit_cmds(manager, ["echo a"], auto_poll=False)
     rec = js.jobs()[0]
     fake_lsf.set_all("DONE", 0)
     manager.querier.query(js.id)             # DONE 확정 (원상 기준점)

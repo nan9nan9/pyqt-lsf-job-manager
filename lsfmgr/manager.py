@@ -20,12 +20,11 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from .command import LsfCommand, Runner
-from .config import (ArrayJobSpec, JobSpec, LsfConfig, spec_from_json,
-                     spec_to_json)
+from .config import JobSpec, LsfConfig, spec_from_json, spec_to_json
 from .errors import JobNotFoundError, LsfmgrError
 from .handle import JobSet
 from .handlers import HandlerContext, JobSetHandlerService, StateSpec
-from .jobset_core import JobSetManager, detect_array_template
+from .jobset_core import JobSetManager
 from .killer import Killer
 from .monitor import JobsetQuerier, PollingService
 from .options import (
@@ -217,126 +216,31 @@ class LsfJobManager(QObject):
     # ------------------------------------------------------------------
     # High-level submit (v7 §1.1) — JobSet 핸들 반환
     # ------------------------------------------------------------------
-    def submit(self, jobs: Union["JobSet", str, Sequence[Union[str, JobSpec]]],
-               count: Optional[int] = None, *,
+    def submit(self, js, *,
                pre_submit: Optional[Callable[[List[str]], bool]] = None,
                **kwargs: Any) -> JobSet:
-        """[async→Signal] 통합 submit 진입점 — JobSet 핸들 반환.
+        """[async→Signal] jobset 제출 — **유일한 제출 경로** (v9).
 
-        **JobSet을 주면 그 jobset의 전 job (재)제출** (v9 기본 흐름):
-        전원 비활성이어야 하며(can_submit로 선확인) 리셋 후 재실행된다.
-        pre_submit 게이트는 리셋 이전에 돌아 False/예외면 레코드 원상 유지.
-        리스트/문자열을 주면 one-shot(jobset 자동 생성 + 제출 — 스크립트용).
+        jobset의 **전 job**을 (재)제출한다: 전원 비활성(CREATED/DONE/EXIT/
+        SUBMIT_FAILED/LOST)이어야 하며 활성이 있으면 LsfmgrError —
+        can_submit(js)로 선확인. 리셋 후 재실행되므로 같은 jobset/job_key가
+        전이된다(핸들·테이블 연속). 흐름:
 
-        - list[str] 또는 list[JobSpec] 허용 (str은 JobSpec 자동 변환)
-        - 단일 str + count=N: 동일 command N개 ($LSB_JOBINDEX 활용 array)
-        - AUTO-4: mode="auto"(기본)면 동일 command 패턴/$LSB_JOBINDEX 치환
-          가능 시 array, 아니면 bulk parallel. mode="array"|"bulk"로 강제 가능
-        - AUTO-1: 반환 직전 polling 자동 시작 (auto_poll=False로 해제)
-        - 결과는 핸들의 progress/finished/updated/failed Signal로 도착
-        - pre_submit(commands)->bool: 지정 시 실제 제출 전에 커맨드 리스트
-          전체를 단일 worker에서 검사(FR-9). True면 제출 진행, False면 제출
-          안 함. 신호 순서: ready_started → ready_finished(ok) →
-          (ok일 때만) submit_started → … → submit_finished.
-          ※ 콜백은 worker 스레드 실행 — GUI 접근 금지.
-        """
-        if isinstance(jobs, JobSet):
-            if count is not None:
-                raise ValueError("count는 one-shot(커맨드 리스트)과만 사용")
-            return self._submit_jobset(jobs, pre_submit=pre_submit, **kwargs)
-        opts = self.resolve_options(kwargs, context="submit")
+            js = mgr.create_jobset(label="sweep")
+            mgr.create_job(js, "customwrapper_sub -q normal run_0.sp",
+                           merge_id="run_0")     # job마다 다른 wrapper 가능
+            mgr.create_job(js, "customwrapper_sub -q long tb_1.v",
+                           merge_id="tb_1")
+            mgr.submit(js, workers=8)
 
-        # 단일 str + count → array 표현 (README §4.2)
-        if isinstance(jobs, str):
-            if count is None:
-                jobs = [jobs]                     # 단일 job으로 취급
-            elif count < 1:
-                raise ValueError(f"count는 1 이상 (got {count})")
-            elif opts.mode == "bulk":             # 강제 bulk → 동일 command N개
-                jobs = [jobs] * count
-            else:
-                spec = ArrayJobSpec(command=jobs, count=count)
-                jsid = self._submit_array_impl(spec, opts, pre_submit=pre_submit)
-                return self._post_submit(jsid, opts, gated=pre_submit is not None)
-        elif count is not None:
-            raise ValueError("count는 단일 command 문자열과만 사용 가능")
-
-        specs, plain = _normalize_jobs(jobs)
-        commands = [s.command for s in specs]
-
-        mode = opts.mode
-        template: Optional[str] = None
-        if mode == "auto":                        # AUTO-4
-            template = detect_array_template(commands) if plain else None
-            mode = "array" if template else "bulk"
-
-        if mode == "array" and len(specs) >= 2:
-            if template is None:
-                template = detect_array_template(commands)
-            common = _common_spec_options(specs)  # 상이 옵션이면 ValueError
-            if template is not None:
-                spec = ArrayJobSpec(command=template, count=len(specs),
-                                    **common)
-            else:                                 # 상이 command → dispatch
-                spec = ArrayJobSpec(commands=tuple(commands), **common)
-            jsid = self._submit_array_impl(spec, opts, pre_submit=pre_submit)
-        else:
-            jsid = self._submit_bulk_impl(specs, opts, pre_submit=pre_submit)
-
-        return self._post_submit(jsid, opts, gated=pre_submit is not None)
-
-    # ------------------------------------------------------------------
-    # submit_wrapper (v8) — wrapper 커맨드로 제출, job_id 기반 관리
-    # ------------------------------------------------------------------
-    def submit_wrapper(self,
-                       commands: Union[str, Sequence[Union[str, Sequence[str]]]],
-                       *,
-                       pre_submit: Optional[Callable[[List[str]], bool]] = None,
-                       **kwargs: Any) -> JobSet:
-        """[async→Signal] wrapper 커맨드로 job 제출 — JobSet 핸들 반환.
-
-        실제 환경에서 job 마다 `customwrapper_sub` 같은 제출
-        wrapper 를 쓰는 구조를 그대로 지원한다. lsfmgr 는 각 커맨드를 **그대로**
-        subprocess 실행하고 stdout 의 `Job <id>` 만 파싱해, 그 job_id 로 모니터링·
-        kill 을 수행한다(‑q/‑J/‑g 등 인자 조립·주입 없음, 그룹/이름 부착물 없음).
-
-        commands:
-          - 단일 문자열 `"customwrapper_sub -i a.sp"` → job 1개 (공백 분해)
-          - 리스트의 각 항목이 job 1개. 항목은 문자열(공백 분해) 또는 토큰 리스트
-            `["customwrapper_sub", "-i", "a.sp"]` (셸 파싱 없이 그대로).
-
-        옵션(kwargs): workers / max_retry / rate_limit_per_s / label / tags /
-        description / auto_poll / poll_interval_s. 재시도는 **비정상 종료(non-zero)
-        만** 대상이며, 파싱 실패(NO_JOBID_PARSED)·timeout 은 재시도하지 않는다.
-        """
-        opts = self.resolve_options(kwargs, context="submit")
-        argvs = _normalize_wrapper_commands(commands)
-        if not argvs:
-            raise ValueError("submit_wrapper: commands가 비어 있습니다")
-
-        # job_id 만으로 관리 → 그룹/이름 부착물 없는 jobset 생성.
-        js = self.jobsets.create_jobset(
-            len(argvs), label=opts.label, tags=opts.tags,
-            description=opts.description, with_attachments=False)
-        if pre_submit is None:                    # 게이트면 통과 후 submitter가 발화
-            self.submit_started.emit(js.jobset_id)
-        self.submitter.submit_wrappers(js.jobset_id, argvs, opts,
-                                       pre_submit=pre_submit)
-        return self._post_submit(js.jobset_id, opts,
-                                 gated=pre_submit is not None)
-
-    def _post_submit(self, jsid: str, opts: Options,
-                     gated: bool = False) -> JobSet:
-        """핸들 발급 + AUTO-1 (submit 반환 직전 polling 자동 시작).
-        gated=True(pre_submit 게이트)면 polling을 게이트 통과 후로 미룬다 —
-        _on_ready_finished가 통과 시 시작한다."""
-        handle = self.jobset(jsid)
-        if opts.auto_poll:                        # AUTO-1
-            if gated:
-                self._pending_autopoll[jsid] = opts.poll_interval_s
-            else:
-                self.start_polling(jsid, opts.poll_interval_s)
-        return handle
+        pre_submit(commands)->bool: 지정 시 제출 전에 커맨드 리스트 전체를
+        게이트 워커에서 검사(FR-9) — **리셋 이전**이라 False/예외면 레코드
+        원상 유지. 신호: (ready_started → ready_finished(ok)) →
+        submit_started → jobs_updated/progress → submit_finished.
+        ※ 게이트 콜백은 worker 스레드 실행 — GUI 접근 금지.
+        옵션(kwargs): workers/max_retry/rate_limit_per_s/auto_poll/
+        poll_interval_s/queue/submit_timeout_s 등 (§1.2)."""
+        return self._submit_jobset(js, pre_submit=pre_submit, **kwargs)
 
     def _on_ready_finished(self, jsid: str, ok: bool) -> None:
         """pre_submit 게이트 종료 — 통과 시 미뤄둔 rearm/AUTO-1 polling.
@@ -373,42 +277,6 @@ class LsfJobManager(QObject):
     # ------------------------------------------------------------------
     # Low-level submit (v6 유지)
     # ------------------------------------------------------------------
-    def submit_bulk(self, jobs: Sequence[JobSpec], *, parallel: bool = True,
-                    workers: Optional[int] = None,
-                    max_retry: Optional[int] = None,
-                    rate_limit_per_s: Optional[float] = None,
-                    label: str = "", tags: Sequence[str] = (),
-                    description: str = "",
-                    jobset_id: Optional[str] = None) -> str:
-        """[async→Signal] 대량 submit (Low-level) — jobset_id 반환.
-        결과는 Facade Signal. polling은 자동 시작하지 않는다 (v6 계약)."""
-        # tags는 원형 그대로 — tuple(str)은 문자 단위로 분해되므로
-        # 정규화는 options._validate에 일임
-        kw: Dict[str, Any] = {"label": label, "tags": tags,
-                              "description": description}
-        if not parallel:
-            kw["workers"] = 1
-        elif workers is not None:
-            kw["workers"] = workers
-        if max_retry is not None:
-            kw["max_retry"] = max_retry
-        if rate_limit_per_s is not None:
-            kw["rate_limit_per_s"] = rate_limit_per_s
-        opts = self.resolve_options(kw, context="submit")
-        specs, _ = _normalize_jobs(jobs)
-        return self._submit_bulk_impl(specs, opts, jobset_id=jobset_id)
-
-    def submit_array(self, spec: ArrayJobSpec, *,
-                     max_retry: Optional[int] = None, label: str = "",
-                     tags: Sequence[str] = (),
-                     jobset_id: Optional[str] = None) -> str:
-        """[async→Signal] array job submit (Low-level) — jobset_id 반환."""
-        kw: Dict[str, Any] = {"label": label, "tags": tags}
-        if max_retry is not None:
-            kw["max_retry"] = max_retry
-        opts = self.resolve_options(kw, context="submit")
-        return self._submit_array_impl(spec, opts, jobset_id=jobset_id)
-
     def cancel_submit(self, jobset_id: str) -> None:
         """[async→Signal] 진행 중 submit 중단 — submit된 job은 유지 (QT-6)."""
         jobset_id = self._jsid(jobset_id)
@@ -443,37 +311,6 @@ class LsfJobManager(QObject):
         return self.killer.progress_snapshot(jobset_id)
 
     # --- 내부 submit 구현 (High/Low 공유) ---
-    def _submit_bulk_impl(self, specs: List[JobSpec], opts: Options,
-                          jobset_id: Optional[str] = None,
-                          pre_submit=None) -> str:
-        js = self.jobsets.create_jobset(
-            len(specs), label=opts.label, tags=opts.tags,
-            description=opts.description, jobset_id=jobset_id)
-        if pre_submit is None:                    # 게이트면 통과 후 submitter가 발화
-            self.submit_started.emit(js.jobset_id)
-        self.submitter.submit_bulk(js.jobset_id, specs, opts,
-                                   pre_submit=pre_submit)
-        return js.jobset_id
-
-    def _submit_array_impl(self, spec: ArrayJobSpec, opts: Options,
-                           jobset_id: Optional[str] = None,
-                           pre_submit=None) -> str:
-        js = self.jobsets.create_jobset(
-            spec.size, label=opts.label, tags=opts.tags,
-            description=opts.description, jobset_id=jobset_id)
-        # array의 LSF job name은 "<jsid>[idx]" 형태 → 패턴도 그에 맞춤
-        self.store.update_jobset(
-            _with_pattern(self.store.get_jobset(js.jobset_id),
-                          f"{js.jobset_id}[*]"))
-        if pre_submit is None:
-            self.submit_started.emit(js.jobset_id)
-        self.submitter.submit_array(js.jobset_id, spec, opts,
-                                    pre_submit=pre_submit)
-        return js.jobset_id
-
-    # ------------------------------------------------------------------
-    # 모니터링 (FR-4)
-    # ------------------------------------------------------------------
     def start_polling(self, jobset_id: str,
                       interval_s: Optional[float] = None) -> None:
         """[async→Signal] 주기 polling 시작 — 갱신은 jobset_updated."""
@@ -630,12 +467,14 @@ class LsfJobManager(QObject):
         핸들에 테이블/신호를 바인딩한다. 흐름:
 
             js = mgr.create_jobset(label="sweep")
-            js.create_job("customwrapper_sub -i a.sp",
-                          merge_id="a", ud_data={"run": "..."})
-            if js.can_submit():
-                js.submit(workers=8)          # 전 job (재)제출
+            mgr.create_job(js, "customwrapper_sub -i a.sp",
+                           merge_id="a", ud_data={"run": "..."})
+            if mgr.can_submit(js):
+                mgr.submit(js, workers=8)     # 전 job (재)제출
 
         intended_count는 보통 0으로 두면 create_job이 늘려간다."""
+        if isinstance(tags, str):             # 편의: 단일 태그 문자열 허용
+            tags = [tags]
         rec = self.jobsets.create_jobset(
             intended_count, label=label, tags=tags, parent=parent)
         return self.jobset(rec.jobset_id)
@@ -1114,69 +953,6 @@ class _CallTask(QRunnable):
             self._fn()
         except Exception:                    # noqa: BLE001 — CS-5
             log.exception("백그라운드 작업 실패")
-
-
-def _common_spec_options(specs: List[JobSpec]) -> Dict[str, Any]:
-    """array 모드용 — 전 spec의 옵션이 동일해야 하며, 동일하면 그 값을
-    ArrayJobSpec 인자로 반환한다. 조용히 버리면 -q/-R/-o/-e/env가 소실되어
-    기본 queue·기본 리소스로 오실행되므로 상이하면 즉시 거부."""
-    fields = ("queue", "resources", "outfile", "errfile", "env",
-              "extra_args")
-    for name in fields:
-        values = {getattr(s, name) for s in specs}
-        if len(values) > 1:
-            raise ValueError(
-                f"mode='array'는 job별 상이 옵션({name})을 지원하지 않습니다"
-                f" — 동일 옵션으로 통일하거나 mode='bulk'를 사용하세요")
-    first = specs[0]
-    return {name: getattr(first, name) for name in fields}
-
-
-def _normalize_jobs(jobs: Sequence[Union[str, JobSpec]]
-                    ) -> Tuple[List[JobSpec], bool]:
-    """list[str] → list[JobSpec] 변환. plain=True면 command 외 옵션이 없어
-    AUTO-4 array 치환 후보가 될 수 있다."""
-    specs: List[JobSpec] = []
-    plain = True
-    for j in jobs:
-        if isinstance(j, str):
-            specs.append(JobSpec(command=j))
-        elif isinstance(j, JobSpec):
-            specs.append(j)
-            if (j.queue is not None or j.resources is not None
-                    or j.outfile is not None or j.errfile is not None
-                    or j.env is not None or j.extra_args):
-                plain = False
-        else:
-            raise TypeError(
-                f"submit()은 str 또는 JobSpec 목록만 허용 (got {type(j)!r})")
-    return specs, plain
-
-
-def _normalize_wrapper_commands(
-        commands: Union[str, Sequence[Union[str, Sequence[str]]]]
-        ) -> List[List[str]]:
-    """submit_wrapper 입력을 argv(토큰 리스트) 목록으로 정규화.
-
-    - 최상위 문자열 → job 1개 (shlex 분해)
-    - 리스트의 각 항목이 job 1개: 문자열이면 shlex 분해, 토큰 리스트면 그대로
-    """
-    if isinstance(commands, str):
-        commands = [commands]
-    argvs: List[List[str]] = []
-    for c in commands:
-        if isinstance(c, str):
-            argv = shlex.split(c)
-        elif isinstance(c, (list, tuple)):
-            argv = [str(t) for t in c]
-        else:
-            raise TypeError(
-                "submit_wrapper: 각 커맨드는 str 또는 토큰 리스트여야 함 "
-                f"(got {type(c)!r})")
-        if not argv:
-            raise ValueError("submit_wrapper: 빈 커맨드는 허용되지 않습니다")
-        argvs.append(argv)
-    return argvs
 
 
 def _with_pattern(js: JobSetRecord, pattern: str) -> JobSetRecord:

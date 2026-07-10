@@ -24,7 +24,6 @@ def test_builtin_defaults_only():
     assert opts.rate_limit_per_s is None
     assert opts.poll_interval_s == 10.0
     assert opts.auto_poll is True
-    assert opts.mode == "auto"
     assert opts.verify_kill is False
 
 
@@ -78,7 +77,6 @@ def test_kill_context_allows_only_verify():
     {"workers": 0}, {"workers": 65},
     {"max_retry": -1},
     {"poll_interval_s": 4}, {"poll_interval_s": 61},
-    {"mode": "banana"},
     {"retry_backoff": "linear:3"}, {"retry_backoff": "fixed"},
     {"rate_limit_per_s": 0},
     {"submit_timeout_s": -1},

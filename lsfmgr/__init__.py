@@ -3,7 +3,7 @@
 qtpy 기반 (PyQt5/PySide2/PyQt6/PySide6 호환). 모든 LSF 호출은 백그라운드
 스레드에서 실행되고 결과는 Qt Signal로 통지된다 — GUI freeze 없음.
 """
-from .config import ArrayJobSpec, JobSpec, LsfConfig
+from .config import JobSpec, LsfConfig
 from .errors import (
     ArgMaxExceededError,
     JobNotFoundError,
@@ -36,7 +36,6 @@ __all__ = [
     "JobSetClosedError",
     "LsfConfig",
     "JobSpec",
-    "ArrayJobSpec",
     "JobState",
     "JobRecord",
     "JobSetRecord",

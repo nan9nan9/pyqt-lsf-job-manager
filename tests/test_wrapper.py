@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
+from tests.conftest import submit_cmds
 from lsfmgr.command import LsfCommand
 from lsfmgr.config import cmd_tokens
 from lsfmgr.states import JobState
@@ -30,7 +31,7 @@ def test_submit_through_wrapper_parses_jobid(qtbot, fake_lsf, tmp_path):
                 bsub_path=["customwrapper_sub", "--proj", "demo"])
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=15000) as blk:
-            js = mgr.submit([f"run {i}" for i in range(3)], mode="bulk")
+            js = submit_cmds(mgr, [f"run {i}" for i in range(3)])
         _, report = blk.args
         assert report.succeeded == 3
         recs = mgr.get_jobs(js.id)
@@ -52,7 +53,7 @@ def test_wrapper_submit_then_group_kill(qtbot, fake_lsf, tmp_path):
     mgr = _make(fake_lsf, tmp_path, bsub_path=["customwrapper_sub"])
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=15000):
-            js = mgr.submit([f"run {i}" for i in range(4)], mode="bulk")
+            js = submit_cmds(mgr, [f"run {i}" for i in range(4)])
         with qtbot.waitSignal(mgr.kill_finished, timeout=15000) as blk:
             mgr.kill(js.id)
         _, report = blk.args
@@ -70,7 +71,7 @@ def test_wrapper_via_manager_kwarg(qtbot, fake_lsf, tmp_path):
                         retry_backoff="fixed:0.05")
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=15000):
-            mgr.submit("echo hi")
+            submit_cmds(mgr, "echo hi")
         assert fake_lsf.calls_of("customwrapper_sub")
     finally:
         mgr.shutdown()

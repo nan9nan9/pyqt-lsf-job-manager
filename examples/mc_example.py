@@ -10,13 +10,13 @@ env(cshrc)를 `source` 한 뒤 bkill 해야 죽는다. 이 예제는 mocklsf 의
 흐름:
   1) MC 켠 mocklsf 로 job 여러 개 제출 → 일부가 forward 된다.
   2) `collect_clusters=True` 폴링으로 각 job 의 `forward_cluster` 를 확인.
-  3) forward 된 job 하나를 **그냥** `js.kill_jobs([key])` — 안 죽는 것을 확인.
+  3) forward 된 job 하나를 **그냥** `mgr.kill_jobs(js, [key])` — 안 죽는 것을 확인.
   4) 남은 job 을 `forward_cluster` 로 분류해, forward 는 그 클러스터 env 를
      source 한 kill(`envpath=`), 로컬은 일반 kill → 전부 종료.
 
 핵심 API:
   - LsfJobManager(collect_clusters=True)   # forward_cluster 를 폴링으로 채움
-  - js.kill_jobs(keys, envpath="<cshrc 경로>")
+  - mgr.kill_jobs(js, keys, envpath="<cshrc 경로>")
         → tcsh -c "source <cshrc> && set noglob && exec bkill <ids>" 로 실행
 
 실행:  python examples/mc_example.py
@@ -54,8 +54,10 @@ def main():
 
     cmds = [wrapper("customwrapper_sub", "-q", "normal", f"run_{i}.sp")
             for i in range(N_JOBS)]
-    js = mgr.submit_wrapper(cmds, label="mc-demo", auto_poll=False)
-    js.start_polling(interval_s=1)
+    js = mgr.create_jobset(label="mc-demo")
+    mgr.create_jobs(js, cmds)                    # wrapper 커맨드 그대로
+    mgr.submit(js, auto_poll=False)
+    mgr.start_polling(js, 1)
     print(f"제출: {N_JOBS} jobs → jobset {js.id}  "
           f"(MC forward 대상: {FORWARD_CLUSTERS}, 확률 0.7)\n")
 
@@ -89,7 +91,7 @@ def main():
             fc = next(r.forward_cluster for r in jobs if r.job_key == key)
             print(f"\n=== 1) forward job {key}(→{fc}) 를 그냥 kill 시도 "
                   f"(envpath 없이) ===")
-            js.kill_jobs([key])          # 로컬 bkill — forward job 엔 안 닿는다
+            mgr.kill_jobs(js, [key])     # 로컬 bkill — forward job 엔 안 닿는다
             state["ticks"] = 0
             state["phase"] = "check_survived"
 
@@ -119,10 +121,10 @@ def main():
                     envpath = cluster_env_path(cluster)
                     print(f"  {cluster}: {len(keys)}개 → "
                           f"source {os.path.basename(envpath)} && bkill")
-                    js.kill_jobs(keys, envpath=envpath)
+                    mgr.kill_jobs(js, keys, envpath=envpath)
                 else:                    # 로컬 job — 일반 bkill
                     print(f"  (로컬): {len(keys)}개 → 일반 bkill")
-                    js.kill_jobs(keys)
+                    mgr.kill_jobs(js, keys)
             state["phase"] = "wait_dead"
 
         elif phase == "wait_dead":

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 
 from lsfmgr import InMemoryStore, LsfJobManager
+from tests.conftest import submit_cmds
 from lsfmgr.states import JobState
 
 
@@ -31,7 +32,7 @@ def test_gate_pass_order_and_commands(qtbot, manager, fake_lsf):
         return True
 
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit(["echo a", "echo b"], mode="bulk",
+        js = submit_cmds(manager, ["echo a", "echo b"],
                             auto_poll=False, pre_submit=gate)
     assert got["cmds"] == ["echo a", "echo b"]
     kinds = [e[0] for e in log]
@@ -49,7 +50,7 @@ def test_gate_reject_default_emits_finished(qtbot, manager, fake_lsf):
     _record(manager, log)
 
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit(["echo a", "echo b"], mode="bulk",
+        js = submit_cmds(manager, ["echo a", "echo b"],
                             auto_poll=False, pre_submit=lambda c: False)
     kinds = [e[0] for e in log]
     assert "submit_started" not in kinds          # 게이트 미통과 → 제출 시작 안 함
@@ -73,7 +74,7 @@ def test_gate_reject_option_suppresses_finished(qtbot, fake_lsf, config):
         log = []
         _record(mgr, log)
         with qtbot.waitSignal(mgr.ready_finished, timeout=10000):
-            js = mgr.submit(["echo a"], mode="bulk", auto_poll=False,
+            js = submit_cmds(mgr, ["echo a"], auto_poll=False,
                            pre_submit=lambda c: False)
         qtbot.wait(150)
         kinds = [e[0] for e in log]
@@ -99,16 +100,17 @@ def test_gate_exception_always_reports(qtbot, fake_lsf, config):
             raise RuntimeError("전처리 실패!")
 
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            js = mgr.submit(["echo a", "echo b"], mode="bulk",
+            js = submit_cmds(mgr, ["echo a", "echo b"],
                            auto_poll=False, pre_submit=boom)
         assert log[1] == ("ready_finished", False)
         fin = [e for e in log if e[0] == "submit_finished"][0]
         assert fin == ("submit_finished", 0, 0, 2)    # failed=2
         assert any("전처리 실패" in m for m in errs)
         recs = js.jobs()
-        assert all(r.state is JobState.SUBMIT_FAILED for r in recs)
-        assert all(r.fail_reason == "PRE_SUBMIT_FAILED" for r in recs)
-        assert all("전처리 실패" in (r.fail_message or "") for r in recs)
+        # v9: 게이트 예외도 레코드 원상 유지 — 리셋 이전에 검사하므로
+        # CREATED 그대로 남고, 실패는 finished(failed=N)+error로만 보고
+        assert all(r.state is JobState.CREATED for r in recs)
+        assert all(r.fail_reason is None for r in recs)
     finally:
         mgr.shutdown()
 
@@ -124,16 +126,16 @@ def test_gate_wrapper_path(qtbot, manager, fake_lsf):
         return True
 
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit_wrapper(
+        js = submit_cmds(manager, 
             ["customwrapper_sub -i a.sp", ["customwrapper_sub", "-q", "long", "tb.v"]],
-            auto_poll=False, pre_submit=gate)
+            auto_poll=False, pre_submit=gate, wrapper=True)
     assert got["cmds"] == ["customwrapper_sub -i a.sp", "customwrapper_sub -q long tb.v"]
     assert all(r.state is JobState.PEND for r in js.jobs())
 
 
 def test_gate_wrapper_reject(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000) as blocker:
-        js = manager.submit_wrapper(["customwrapper_sub -i a.sp"], auto_poll=False,
+        js = submit_cmds(manager, ["customwrapper_sub -i a.sp"], wrapper=True, auto_poll=False,
                                     pre_submit=lambda c: False)
     assert blocker.args[1].cancelled == 1
     assert fake_lsf.calls_of("customwrapper_sub") == []
@@ -145,7 +147,7 @@ def test_gate_wrapper_reject(qtbot, manager, fake_lsf):
 def test_gate_array_pass(qtbot, manager, fake_lsf):
     got = {}
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit("run_task", count=3, auto_poll=False,
+        js = submit_cmds(manager, "run_task", count=3, auto_poll=False,
                             pre_submit=lambda c: got.setdefault("c", c) or True)
     assert all(r.state is JobState.PEND for r in js.jobs())
     assert len(js.jobs()) == 3
@@ -153,7 +155,7 @@ def test_gate_array_pass(qtbot, manager, fake_lsf):
 
 def test_gate_array_reject(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit("run_task", count=3, auto_poll=False,
+        js = submit_cmds(manager, "run_task", count=3, auto_poll=False,
                             pre_submit=lambda c: False)
     assert manager.summary(js.id).get("CREATED") == 3
     assert fake_lsf.calls_of("bsub") == []
@@ -163,7 +165,7 @@ def test_gate_array_reject(qtbot, manager, fake_lsf):
 # 핸들 신호 — js.ready_started / js.ready_finished 중계
 # ----------------------------------------------------------------------
 def test_handle_ready_signals(qtbot, manager, fake_lsf):
-    js = manager.submit(["echo a"], mode="bulk", auto_poll=False,
+    js = submit_cmds(manager, ["echo a"], auto_poll=False,
                         pre_submit=lambda c: True)
     got = []
     js.ready_finished.connect(lambda ok: got.append(ok))
@@ -179,7 +181,7 @@ def test_no_gate_no_ready_signals(qtbot, manager, fake_lsf):
     log = []
     _record(manager, log)
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        manager.submit(["echo a"], mode="bulk", auto_poll=False)
+        submit_cmds(manager, ["echo a"], auto_poll=False)
     kinds = [e[0] for e in log]
     assert "ready_started" not in kinds
     assert kinds[0] == "submit_started"
@@ -191,7 +193,7 @@ def test_no_gate_no_ready_signals(qtbot, manager, fake_lsf):
 def test_gate_autopoll_deferred_until_pass(qtbot, manager, fake_lsf):
     """게이트 통과 시 미뤄둔 auto-poll이 시작되고, 이후 query가 RUN을 반영."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit(["echo a"], mode="bulk", auto_poll=True,
+        js = submit_cmds(manager, ["echo a"], auto_poll=True,
                             pre_submit=lambda c: True)
     qtbot.wait(50)
     assert js.id in manager._poll_intervals          # 통과 후 start_polling됨
@@ -206,7 +208,7 @@ def test_gate_autopoll_deferred_until_pass(qtbot, manager, fake_lsf):
 
 def test_gate_reject_no_autopoll(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit(["echo a"], mode="bulk", auto_poll=True,
+        js = submit_cmds(manager, ["echo a"], auto_poll=True,
                             pre_submit=lambda c: False)
     qtbot.wait(100)
     # 거부됐으므로 polling이 켜지지 않아 pending/interval 모두 비어야 함
@@ -219,18 +221,19 @@ def test_gate_reject_no_autopoll(qtbot, manager, fake_lsf):
 # (미방어 시 게이트 워커가 죽어 submit_finished 미발화 → jobset 잠김)
 # ----------------------------------------------------------------------
 def test_gate_do_launch_failure_still_finishes(qtbot, manager, fake_lsf):
+    """게이트 통과 후 착수(리셋) 단계의 store 장애 — jobset이 잠기지 않고
+    finished가 반드시 발화돼야 한다 (v9: 리셋 실패 키는 건너뛰고 취소 계상)."""
     def gate(cmds):
-        def boom(recs):
+        def boom(*a, **k):
             raise RuntimeError("store down")
-        manager.store.add_jobs = boom            # do_launch의 add_jobs 사보타주
+        manager.store.transition = boom          # do_launch의 리셋 사보타주
         return True
-    errs = []
-    manager.error_occurred.connect(lambda j, m: errs.append(m))
     with qtbot.waitSignal(manager.submit_finished, timeout=5000) as b:
-        js = manager.submit(["echo a"], mode="bulk", auto_poll=False,
+        js = submit_cmds(manager, ["echo a"], auto_poll=False,
                             pre_submit=gate)
-    assert b.args[1].failed == 1                  # 잠기지 않고 failed로 마무리
-    assert any("store down" in m for m in errs)
+    rpt = b.args[1]
+    assert rpt.succeeded == 0 and rpt.cancelled == 1   # 잠기지 않고 마무리
+    assert not manager.submitter.is_active(js.id)
 
 
 # ----------------------------------------------------------------------
@@ -238,6 +241,7 @@ def test_gate_do_launch_failure_still_finishes(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_gate_shutdown_during_callback(qtbot, fake_lsf, config):
     import threading
+    import time
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf)
     started, release = threading.Event(), threading.Event()
 
@@ -246,8 +250,17 @@ def test_gate_shutdown_during_callback(qtbot, fake_lsf, config):
         release.wait(5)
         return True
 
-    js = mgr.submit(["echo a"], mode="bulk", auto_poll=False, pre_submit=slow)
+    js = submit_cmds(mgr, ["echo a"], auto_poll=False, pre_submit=slow)
     assert started.wait(3)
+    # shutdown이 취소 플래그를 세운 뒤 게이트를 풀어준다 — 통과 직후
+    # 재확인(cancel/shutdown 체크)에서 반드시 걸리게 (결정적 순서)
+    t = threading.Thread(target=mgr.shutdown)
+    t.start()
+    for _ in range(300):
+        if mgr.submitter._shutdown:
+            break
+        time.sleep(0.01)
     release.set()
-    mgr.shutdown()
+    t.join(10)
+    assert not t.is_alive(), "shutdown이 게이트 대기에서 행"
     assert fake_lsf.calls_of("bsub") == []

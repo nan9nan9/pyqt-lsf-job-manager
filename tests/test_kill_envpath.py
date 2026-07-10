@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
+from tests.conftest import submit_cmds
 from lsfmgr.command import LsfCommand, CommandResult
 from lsfmgr.states import JobState
 
@@ -67,7 +68,7 @@ def test_kill_jobs_envpath_kills_forwarded(qtbot, fake_lsf, config):
                         collect_clusters=True, kill_status_policy="actual")
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            js = mgr.submit(["echo a", "echo b"], mode="bulk", auto_poll=False)
+            js = submit_cmds(mgr, ["echo a", "echo b"], auto_poll=False)
         for r in js.jobs():
             fake_lsf.jobs[str(r.job_id)].stat = "RUN"
             fake_lsf.jobs[str(r.job_id)].forward_cluster = "busan"
@@ -99,7 +100,7 @@ def test_multi_cluster_split_by_caller(qtbot, fake_lsf, config):
                         collect_clusters=True)
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            js = mgr.submit(["a", "b", "c"], mode="bulk", auto_poll=False)
+            js = submit_cmds(mgr, ["a", "b", "c"], auto_poll=False)
         recs = sorted(js.jobs(), key=lambda r: r.job_key)
         clusters = ["busan", "busan", "daegu"]
         profiles = {"busan": "/lsf/busan/cshrc.lsf",
@@ -134,7 +135,7 @@ def test_whole_kill_envpath(qtbot, fake_lsf, config):
                         collect_clusters=True)
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            js = mgr.submit(["a", "b"], mode="bulk", auto_poll=False)
+            js = submit_cmds(mgr, ["a", "b"], auto_poll=False)
         for r in js.jobs():
             fake_lsf.jobs[str(r.job_id)].stat = "RUN"
             fake_lsf.jobs[str(r.job_id)].forward_cluster = "busan"
@@ -152,7 +153,7 @@ def test_whole_kill_envpath(qtbot, fake_lsf, config):
 # ----------------------------------------------------------------------
 def test_no_envpath_keeps_group_strategy(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit(["a", "b"], mode="bulk", auto_poll=False)
+        js = submit_cmds(manager, ["a", "b"], auto_poll=False)
     fake_lsf.set_all("RUN")
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as b:
         manager.kill(js)
@@ -169,12 +170,21 @@ def test_kill_array_element_envpath(qtbot, fake_lsf, config):
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
                         collect_clusters=True)
     try:
-        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            js = mgr.submit("run_task", count=3, auto_poll=False)   # array
-        aid = js.jobs()[0].job_id
+        # v9: array는 wrapper 제출 산물로만 존재 — 레코드/LSF 수동 구성
+        from tests.fake_lsf import FakeJob
+        from lsfmgr import JobRecord
+
+        js = mgr.create_jobset(intended_count=3)
+        jsid, aid = js.id, 9300
+        mgr.store.add_jobs([JobRecord(
+            job_id=aid, array_index=i, jobset_id=jsid,
+            lsf_job_name=f"{jsid}[{i}]", state=JobState.RUN, command="r")
+            for i in (1, 2, 3)])
         for i in (1, 2, 3):
-            fake_lsf.set_job(aid, "RUN", array_index=i)
-            fake_lsf.jobs[f"{aid}[{i}]"].forward_cluster = "busan"
+            fake_lsf.jobs[f"{aid}[{i}]"] = FakeJob(
+                job_id=aid, array_index=i, name=f"{jsid}[{i}]", group=None,
+                queue="q", command="r", stat="RUN",
+                forward_cluster="busan")
         mgr.querier.query(js.id)
         # element 2만 kill (id[idx] target)
         key2 = next(r.job_key for r in js.jobs() if r.array_index == 2)
@@ -198,7 +208,7 @@ def test_optimistic_exit_with_envpath(qtbot, fake_lsf, config):
                         collect_clusters=True)  # optimistic(기본)
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            js = mgr.submit(["a", "b"], mode="bulk", auto_poll=False)
+            js = submit_cmds(mgr, ["a", "b"], auto_poll=False)
         for r in js.jobs():
             fake_lsf.jobs[str(r.job_id)].stat = "RUN"
             fake_lsf.jobs[str(r.job_id)].forward_cluster = "busan"

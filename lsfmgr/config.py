@@ -1,4 +1,4 @@
-"""설정 (LsfConfig) 및 job 명세 (JobSpec / ArrayJobSpec) — Qt 비의존."""
+"""설정 (LsfConfig) 및 job 명세 (JobSpec) — Qt 비의존."""
 from __future__ import annotations
 
 import json
@@ -145,31 +145,3 @@ def spec_from_json(s: str) -> JobSpec:
     return JobSpec(**d)
 
 
-@dataclass(frozen=True)
-class ArrayJobSpec:
-    """Array job submit 명세 (FR-1.3).
-
-    - command 단일 + count: 동일 command, $LSB_JOBINDEX 활용
-    - commands 리스트: element별 command 상이 → dispatch 스크립트 자동 생성
-    """
-    command: Optional[str] = None
-    commands: Optional[Tuple[str, ...]] = None
-    count: Optional[int] = None
-    queue: Optional[str] = None
-    resources: Optional[str] = None
-    outfile: Optional[str] = None
-    errfile: Optional[str] = None
-    env: Optional[Tuple[Tuple[str, str], ...]] = None
-    extra_args: Tuple[str, ...] = ()
-
-    def __post_init__(self):
-        if self.commands is not None and not isinstance(self.commands, tuple):
-            object.__setattr__(self, "commands", tuple(self.commands))
-
-    @property
-    def size(self) -> int:
-        if self.commands is not None:
-            return len(self.commands)
-        if self.count is None:
-            raise ValueError("ArrayJobSpec: count 또는 commands 중 하나는 필수")
-        return int(self.count)

@@ -9,6 +9,7 @@ import threading
 
 from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager, KillProgress
 from tests.fake_lsf import FakeLsf
+from tests.conftest import submit_cmds
 
 
 def _gated_bkill_runner(fake: FakeLsf, gate: threading.Event):
@@ -31,8 +32,7 @@ def test_kill_is_nonblocking_and_snapshot(qtbot, tmp_path):
                         lsf_group_root="")     # group 부착물 없이 → chunk 경로
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            js = mgr.submit([f"echo {i}" for i in range(20)],
-                            mode="bulk", auto_poll=False)
+            js = submit_cmds(mgr, [f"echo {i}" for i in range(20)], auto_poll=False)
         fake.set_all("RUN")
         mgr.querier.query(js.id)
 
@@ -57,7 +57,7 @@ def test_kill_is_nonblocking_and_snapshot(qtbot, tmp_path):
 
 def test_kill_snapshot_none_when_idle(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
+        js = submit_cmds(manager, ["echo a"], auto_poll=False)
     assert not js.is_killing
     assert js.kill_state is None
 
@@ -71,8 +71,7 @@ def test_kill_snapshot_progresses(qtbot, tmp_path):
                         collect_clusters=True)
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            js = mgr.submit([f"echo {i}" for i in range(12)],
-                            mode="bulk", auto_poll=False)
+            js = submit_cmds(mgr, [f"echo {i}" for i in range(12)], auto_poll=False)
         for r in js.jobs():
             fake.jobs[str(r.job_id)].stat = "RUN"
             fake.jobs[str(r.job_id)].forward_cluster = "busan"

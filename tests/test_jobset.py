@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from lsfmgr import JobSpec, JobState
+from tests.conftest import submit_cmds
 from lsfmgr.errors import LsfmgrError
 from lsfmgr.states import JobRecord
 
@@ -12,7 +13,7 @@ from lsfmgr.states import JobRecord
 def submitted(qtbot, manager, fake_lsf):
     jobs = [JobSpec(command=f"r {i}") for i in range(10)]
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        jsid = manager.submit_bulk(jobs)
+        jsid = submit_cmds(manager, jobs).id
     return jsid
 
 
@@ -118,10 +119,10 @@ def test_remove_job_decrements_intended_count(qtbot, manager, fake_lsf, submitte
 # ----------------------------------------------------------------------
 def test_search_by_tag(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        a = manager.submit_bulk([JobSpec(command="x")],
+        a = submit_cmds(manager, [JobSpec(command="x")],
                                 label="tt_sweep", tags=["sweep", "tt"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        manager.submit_bulk([JobSpec(command="y")], tags=["other"])
+        submit_cmds(manager, [JobSpec(command="y")], tags=["other"])
     hits = manager.search_jobsets(tag="sweep")
-    assert [j.jobset_id for j in hits] == [a]
-    assert manager.search_jobsets(label="tt_sweep")[0].jobset_id == a
+    assert [j.jobset_id for j in hits] == [a.id]
+    assert manager.search_jobsets(label="tt_sweep")[0].jobset_id == a.id

@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from lsfmgr import JobSpec, JobState
+from tests.conftest import submit_cmds
 
 
 @pytest.fixture
@@ -11,7 +12,7 @@ def submitted(qtbot, manager, fake_lsf):
     """job 20개 submit 완료된 jobset."""
     jobs = [JobSpec(command=f"r {i}") for i in range(20)]
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        jsid = manager.submit_bulk(jobs)
+        jsid = submit_cmds(manager, jobs).id
     return jsid
 
 
@@ -195,7 +196,7 @@ def test_graceful_degradation_without_attachments(qtbot, manager, fake_lsf,
 def test_polling_shutdown_cleans_timers_in_thread(qtbot, manager, fake_lsf,
                                                   capfd):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = manager.submit(["echo a"], mode="bulk", auto_poll=False)
+        js = submit_cmds(manager, ["echo a"], auto_poll=False)
     fake_lsf.set_all("RUN")
     manager.start_polling(js, 5.0)          # 여유 없이 바로 shutdown
     worker = manager.polling._worker

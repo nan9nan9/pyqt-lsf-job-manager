@@ -2,7 +2,7 @@
 """lsfmgr 기본 예제 — 단일 GUI 대시보드로 주요 기능을 모두 다룬다.
 
 하나의 화면에서 lsfmgr 의 주요 기능을 모두 다룬다:
-  - submit_wrapper 로 제출 + 진행률 바 / 취소   (QT-5/QT-6, rate limit)
+  - create_jobset → create_jobs → submit 으로 제출 + 진행률 바 / 취소 (QT-5/QT-6, rate limit)
   - job 마다 wrapper 커맨드 (customwrapper_sub 등) 또는 '혼합'
   - 다중 JobSet 관리 + 요약 실시간 갱신        (Facade Signal, README §8)
   - 선택 JobSet 의 job 단위 모니터링 테이블     (상태별 색, jobs_updated 배치)
@@ -91,10 +91,10 @@ _STATE_COLOR = {
 
 
 class SubmitForm(QGroupBox):
-    """submit_wrapper 옵션 폼. job 마다 wrapper(customwrapper_sub 등)로 제출한다."""
+    """submit 옵션 폼. job 마다 wrapper(customwrapper_sub 등)로 제출한다."""
 
     def __init__(self, on_submit):
-        super().__init__("Submit 옵션 (submit_wrapper)")
+        super().__init__("Submit 옵션")
         self.count = QSpinBox(minimum=1, maximum=10000, value=30)
         self.workers = QSpinBox(minimum=1, maximum=32, value=8)
         self.max_retry = QSpinBox(minimum=0, maximum=10, value=3)
@@ -282,11 +282,14 @@ class Dashboard(QWidget):
         pend, run = self.form.timing()
         configure_mocklsf(pend=pend, run=run)
         kw = self.form.call_kwargs()
+        label = kw.pop("label", "")
         cmds = self.form.commands()
-        # 각 job 을 wrapper 커맨드로 제출 — lsfmgr 는 커맨드를 그대로 실행하고
-        # 'Job <id>' 를 파싱해 job_id 로 관리한다(인자 조립·주입 없음).
-        js = self.mgr.submit_wrapper(cmds, **kw)
-        self._add_row(js.id, kw.get("label", ""))
+        # v9: jobset 생성 → job 생성(CREATED) → jobset 기준 제출.
+        # wrapper 커맨드는 그대로 실행되고 'Job <id>' 파싱으로 관리된다.
+        js = self.mgr.create_jobset(label=label)
+        self.mgr.create_jobs(js, cmds)
+        self.mgr.submit(js, **kw)
+        self._add_row(js.id, label)
         self._active_submit = js.id
         self.bar.setMaximum(self.form.count.value())
         self.bar.setValue(0)
@@ -298,7 +301,7 @@ class Dashboard(QWidget):
             self.bar.setValue(done)
 
     def _on_finished(self, jsid, rpt):
-        # submit_wrapper 는 커맨드 1개 = job 1개(job_id 1개).
+        # wrapper 제출은 커맨드 1개 = job 1개(job_id 1개).
         recs = self.mgr.jobset(jsid).jobs()
         n_ids = len({r.job_id for r in recs if r.job_id is not None})
         self._log(jsid, f"submit_finished ok={rpt.ok} failed={rpt.failed} "
