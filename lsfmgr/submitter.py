@@ -192,8 +192,8 @@ class BulkSubmitter(QObject):
     error = Signal(str, str)                  # jobset_id, message
     jobs_changed = Signal(str, list)          # jobset_id, [JobRecord] 전이 배치
     started = Signal(str)                     # jobset_id — 게이트 통과 후 제출 착수
-    ready_started = Signal(str)               # jobset_id — pre_submit 게이트 시작
-    ready_finished = Signal(str, bool)        # jobset_id, ok — 게이트 종료(True=통과)
+    pre_processing_started = Signal(str)               # jobset_id — pre_submit 게이트 시작
+    pre_processing_finished = Signal(str, bool)        # jobset_id, ok — 게이트 종료(True=통과)
     # 내부용 — worker 스레드에서 emit → submitter 소속 스레드에서 QTimer 스케줄
     _retry_requested = Signal(str, str)       # jobset_id, 원장 키
 
@@ -695,19 +695,19 @@ class _GateTask(QRunnable):
 
     def run(self):
         sub, ctx = self.submitter, self.ctx
-        sub.ready_started.emit(ctx.jobset_id)
+        sub.pre_processing_started.emit(ctx.jobset_id)
         if sub._shutdown or ctx.cancel_event.is_set():
-            sub.ready_finished.emit(ctx.jobset_id, False)
+            sub.pre_processing_finished.emit(ctx.jobset_id, False)
             sub._gate_reject(ctx, finish=True)      # 취소 — 항상 finished
             return
         try:
             ok = bool(self.pre_submit(list(self.commands)))
         except Exception as e:                       # noqa: BLE001 — CS-5
             log.exception("pre_submit 게이트 예외: %s", ctx.jobset_id)
-            sub.ready_finished.emit(ctx.jobset_id, False)
+            sub.pre_processing_finished.emit(ctx.jobset_id, False)
             sub._gate_fail(ctx, self.make_failed(repr(e)[:4000]), repr(e))
             return
-        sub.ready_finished.emit(ctx.jobset_id, ok)
+        sub.pre_processing_finished.emit(ctx.jobset_id, ok)
         if not ok:
             sub._gate_reject(
                 ctx, finish=sub.config.submit_finished_on_gate_reject)

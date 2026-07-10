@@ -163,7 +163,7 @@ class JobSet(QObject):
     kill_finished   = Signal(object)   # KillReport
     handler_finished= Signal(str, object)      # name, HandlerResult
     job_detail_ready= Signal(str, str)         # job_key, text
-    ready_started/ready_finished        # pre_submit 게이트 (FR-9)
+    pre_processing_started/pre_processing_finished        # pre_submit 게이트 (FR-9)
     error_occurred  = Signal(str)
 
     # 조회 (전부 sync — Store 스냅샷, LSF 호출 없음)
@@ -305,7 +305,7 @@ JobSetStore(ABC) ── InMemoryStore
 - **FR-9 pre_submit 게이트**: `mgr.submit(js, pre_submit=fn)` — 실제 제출 전에
   **커맨드 리스트 전체를 단일 worker에서 1회 검사**, `bool` 반환. 게이트는 레코드
   리셋 **이전**에 돌아 `False`/예외면 레코드 **원상 유지**(제출 없음). 신호 순서:
-  `ready_started → ready_finished(ok) → (ok일 때만) submit_started → … → submit_finished`.
+  `pre_processing_started → pre_processing_finished(ok) → (ok일 때만) submit_started → … → submit_finished`.
   게이트 통과 후에 rearm/AUTO-1 polling. 콜백은 worker 스레드 실행(GUI 접근 금지,
   멱등 권장).
 

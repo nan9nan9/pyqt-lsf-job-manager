@@ -47,7 +47,7 @@ mgr.submit(js)
                                 → jobset_updated(최종 요약)     # 순서 보장
 ```
 
-Signal 순서(보장): `(ready_started → ready_finished)`* → `submit_started` →
+Signal 순서(보장): `(pre_processing_started → pre_processing_finished)`* → `submit_started` →
 `jobs_updated[SUBMITTING 전원]` → `submit_progress`+`jobs_updated`(스로틀 배치)
 → `submit_finished` → `jobset_updated`.  (*pre_submit 게이트 지정 시)
 

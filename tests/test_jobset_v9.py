@@ -363,7 +363,7 @@ def test_submit_jobset_gate_reject_keeps_records(qtbot, manager, fake_lsf):
     old = js.jobs()[0]                          # DONE + job_id 보유
     n_lsf = len(fake_lsf.jobs)
 
-    with qtbot.waitSignal(manager.ready_finished, timeout=10000) as blk:
+    with qtbot.waitSignal(manager.pre_processing_finished, timeout=10000) as blk:
         manager.submit(js, pre_submit=lambda cmds: False, auto_poll=False)
     assert blk.args == [js.id, False]
 

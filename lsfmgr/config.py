@@ -70,7 +70,7 @@ class LsfConfig:
     #: pre_submit 게이트가 False를 반환(제출 거부)했을 때 submit_finished를
     #: 발화할지. True(기본)면 게이트 거부도 submit_finished(cancelled=N)로
     #: 마무리해 기존 완료 핸들러 하나로 다 받는다. False면 발화하지 않고
-    #: 종료 통지는 ready_finished(False)만으로 한다. (게이트 예외는 이 옵션과
+    #: 종료 통지는 pre_processing_finished(False)만으로 한다. (게이트 예외는 이 옵션과
     #: 무관하게 항상 error_occurred + submit_finished(failed=N)로 보고한다)
     submit_finished_on_gate_reject: bool = True
 
