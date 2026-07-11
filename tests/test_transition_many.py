@@ -14,9 +14,9 @@ from lsfmgr.states import JobRecord, JobSetRecord, JobState
 
 
 def _seed(store, n=5):
-    store.insert_jobset(JobSetRecord(jobset_id="js", intended_count=n,
+    store.store_insert_jobset(JobSetRecord(jobset_id="js", intended_count=n,
                                      created_at=datetime.now()))
-    store.add_jobs([
+    store.store_add_jobs([
         JobRecord(job_id=1000 + i, array_index=None, jobset_id="js",
                   lsf_job_name=f"js_{i}", state=JobState.PEND, command="e")
         for i in range(n)])

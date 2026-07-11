@@ -660,7 +660,7 @@ class BulkSubmitter(QObject):
                    msg: str) -> None:
         """게이트 예외 — 전원 SUBMIT_FAILED 레코드 + error + finished(항상)."""
         try:
-            created = self.store.add_jobs(failed_records)
+            created = self.store.store_add_jobs(failed_records)
             if created:
                 self.jobs_changed.emit(ctx.jobset_id, list(created))
         except Exception:                    # noqa: BLE001 — CS-5

@@ -4,9 +4,10 @@ Store와 LsfCommand만 사용 (Qt 비의존). LSF 호출이 필요한 메서드
 (detect_lost, close_jobset의 bgdel)는 호출 스레드에서 blocking 실행되므로,
 GUI 앱에서는 manager(Facade)가 worker 스레드에서 호출한다.
 
-이름 규약: 도메인 계층은 공개 API(mgr.create_jobset/remove_job/close)와 저장소
-(store.insert_jobset/delete_job)와 구분되게 — new_jobset/new_jobs(생성),
-merge_from(흡수), remove_jobs/clear_jobs(삭제), close_jobset(종결).
+이름 규약(계층이 이름에 드러나게): 공개 API=mgr.create_jobset/remove_job/close,
+도메인=local_* (local_create_jobset/local_create_jobs, local_remove_jobs/
+local_clear_jobs, local_close_jobset, merge_from), 저장소=store_*
+(store_insert_jobset/store_add_jobs/store_delete_job/store_dispose).
 """
 from __future__ import annotations
 
@@ -58,11 +59,11 @@ class JobSetManager:
         """사용자 격리 LSF group 경로 (CS-10)."""
         return f"{self.config.lsf_group_root}/{getpass.getuser()}/{jobset_id}"
 
-    def new_jobset(self, intended_count: int, *, label: str = "",
-                      tags: Sequence[str] = (), description: str = "",
-                      parent: Optional[str] = None,
-                      jobset_id: Optional[str] = None,
-                      with_attachments: bool = True) -> JobSetRecord:
+    def local_create_jobset(self, intended_count: int, *, label: str = "",
+                            tags: Sequence[str] = (), description: str = "",
+                            parent: Optional[str] = None,
+                            jobset_id: Optional[str] = None,
+                            with_attachments: bool = True) -> JobSetRecord:
         jsid = jobset_id or generate_jobset_id()
         record = JobSetRecord(
             jobset_id=jsid, intended_count=intended_count,
@@ -73,13 +74,13 @@ class JobSetManager:
             parent_jobset_id=parent, created_by=getpass.getuser(),
             created_at=datetime.now(), merged_from=[], session_id="",
             closed=False)
-        return self.store.insert_jobset(record)
+        return self.store.store_insert_jobset(record)
 
     # ------------------------------------------------------------------
-    # job 추가 (FR-5.4) — 생성은 new_jobs, 이후 추가는 merge_from만
+    # job 추가 (FR-5.4) — 생성은 local_create_jobs, 이후 추가는 merge_from만
     # ------------------------------------------------------------------
-    def new_jobs(self, jobset_id: str,
-                    records: Sequence[JobRecord]) -> List[JobRecord]:
+    def local_create_jobs(self, jobset_id: str,
+                          records: Sequence[JobRecord]) -> List[JobRecord]:
         """제출 전(CREATED) 레코드 일괄 생성 — 바구니 누적 (FR-5.4 확장).
 
         job_key 중복 + merge_id 중복(None 제외)을 선검사하고 단일 배치로
@@ -102,7 +103,7 @@ class JobSetManager:
                 keys.add(rec.job_key)
                 if rec.merge_id is not None:
                     mids.add(rec.merge_id)
-            out = self.store.add_jobs(records)
+            out = self.store.store_add_jobs(records)
             js = self.store.get_jobset(jobset_id)
             if len(keys) > js.intended_count:
                 self.store.update_jobset(
@@ -150,15 +151,15 @@ class JobSetManager:
                     # replace — 물리 키(job_key)는 target 것 유지
                     new = replace(rec, jobset_id=target_id,
                                   lsf_job_name=old.job_key)
-                    self.store.delete_job(target_id, old.job_key)
-                    self.store.add_job(new)
+                    self.store.store_delete_job(target_id, old.job_key)
+                    self.store.store_add_job(new)
                     changed.append(new)
                 else:
                     if rec.job_key in tgt_keys:
                         raise ValueError(
                             f"merge 불가 — job 이름 충돌: {rec.job_key!r}")
                     new = replace(rec, jobset_id=target_id)
-                    self.store.add_job(new)
+                    self.store.store_add_job(new)
                     tgt_keys.add(new.job_key)
                     changed.append(new)
             # 부착물 누적 (조회/kill 시 전부 순회, §1.1)
@@ -170,10 +171,10 @@ class JobSetManager:
                 name_patterns=_dedup(tgt.name_patterns + src.name_patterns),
                 array_job_ids=_dedup(tgt.array_job_ids + src.array_job_ids),
                 merged_from=_dedup(tgt.merged_from + [source_id])))
-            self.store.delete_jobset(source_id)
+            self.store.store_delete_jobset(source_id)
         return changed
 
-    def remove_jobs(self, jobset_id: str, *,
+    def local_remove_jobs(self, jobset_id: str, *,
                     job_id: Optional[int] = None,
                     merge_id: Optional[str] = None,
                     job_key: Optional[str] = None,
@@ -205,14 +206,14 @@ class JobSetManager:
                     f"(force=True로 레코드만 강제 삭제 가능)",
                     jobset_id=jobset_id, job_keys=busy)
             for r in targets:
-                self.store.delete_job(jobset_id, r.job_key)
+                self.store.store_delete_job(jobset_id, r.job_key)
             js = self.store.get_jobset(jobset_id)
             n = len(self.store.get_jobs(jobset_id))
             if js.intended_count != n:
                 self.store.update_jobset(replace(js, intended_count=n))
         return targets
 
-    def clear_jobs(self, jobset_id: str, *,
+    def local_clear_jobs(self, jobset_id: str, *,
                    force: bool = False) -> List[JobRecord]:
         """전 job 삭제 — remove_jobs와 동일 가드 (활성이 있으면 예외,
         force로 강제). intended_count는 0이 된다."""
@@ -225,7 +226,7 @@ class JobSetManager:
                     f"{busy[:5]} (force=True로 강제 가능)",
                     jobset_id=jobset_id, job_keys=busy)
             for r in jobs:
-                self.store.delete_job(jobset_id, r.job_key)
+                self.store.store_delete_job(jobset_id, r.job_key)
             js = self.store.get_jobset(jobset_id)
             if js.intended_count != 0:
                 self.store.update_jobset(replace(js, intended_count=0))
@@ -280,7 +281,7 @@ class JobSetManager:
     # ------------------------------------------------------------------
     # 종결 (FR-5.7)
     # ------------------------------------------------------------------
-    def close_jobset(self, jobset_id: str, *, force: bool = False,
+    def local_close_jobset(self, jobset_id: str, *, force: bool = False,
                      run_bgdel: bool = True) -> JobSetRecord:
         """전원 terminal이면 close. LSF group은 bgdel로 정리.
 

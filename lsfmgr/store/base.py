@@ -27,7 +27,7 @@ class JobSetStore(ABC):
     # JobSet CRUD
     # ------------------------------------------------------------------
     @abstractmethod
-    def insert_jobset(self, record: JobSetRecord) -> JobSetRecord: ...
+    def store_insert_jobset(self, record: JobSetRecord) -> JobSetRecord: ...
 
     @abstractmethod
     def get_jobset(self, jobset_id: str) -> JobSetRecord:
@@ -37,7 +37,7 @@ class JobSetStore(ABC):
     def update_jobset(self, record: JobSetRecord) -> JobSetRecord: ...
 
     @abstractmethod
-    def delete_jobset(self, jobset_id: str) -> None:
+    def store_delete_jobset(self, jobset_id: str) -> None:
         """jobset과 소속 job 전부 삭제."""
 
     @abstractmethod
@@ -48,15 +48,15 @@ class JobSetStore(ABC):
     # JobRecord
     # ------------------------------------------------------------------
     @abstractmethod
-    def add_job(self, record: JobRecord) -> JobRecord: ...
+    def store_add_job(self, record: JobRecord) -> JobRecord: ...
 
-    def add_jobs(self, records: Sequence[JobRecord]) -> List[JobRecord]:
+    def store_add_jobs(self, records: Sequence[JobRecord]) -> List[JobRecord]:
         """여러 JobRecord 일괄 추가 — 대량 submit의 CREATED 선생성용.
         백엔드는 단일 lock/트랜잭션으로 최적화할 것 (기본: 순차 add_job)."""
-        return [self.add_job(r) for r in records]
+        return [self.store_add_job(r) for r in records]
 
     @abstractmethod
-    def delete_job(self, jobset_id: str, job_key: str) -> JobRecord:
+    def store_delete_job(self, jobset_id: str, job_key: str) -> JobRecord:
         """job 1건을 저장소에서 제거하고 제거된 레코드를 반환.
         없으면 JobNotFoundError. LSF의 실제 job은 건드리지 않는다 —
         저장소 추적에서만 제외한다(필요하면 호출 전에 kill할 것)."""
@@ -141,7 +141,7 @@ class JobSetStore(ABC):
     # ------------------------------------------------------------------
     # 수명
     # ------------------------------------------------------------------
-    def dispose(self) -> None:
+    def store_dispose(self) -> None:
         """저장소 자원 해제 (connection close 등). 기본은 no-op."""
 
 

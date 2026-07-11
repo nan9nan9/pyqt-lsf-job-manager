@@ -23,7 +23,7 @@ class InMemoryStore(JobSetStore):
     # ------------------------------------------------------------------
     # JobSet CRUD
     # ------------------------------------------------------------------
-    def insert_jobset(self, record: JobSetRecord) -> JobSetRecord:
+    def store_insert_jobset(self, record: JobSetRecord) -> JobSetRecord:
         with self._lock:
             if record.jobset_id in self._jobsets:
                 raise ValueError(f"jobset 중복: {record.jobset_id}")
@@ -47,7 +47,7 @@ class InMemoryStore(JobSetStore):
             self._jobsets[record.jobset_id] = record
             return record
 
-    def delete_jobset(self, jobset_id: str) -> None:
+    def store_delete_jobset(self, jobset_id: str) -> None:
         with self._lock:
             self._jobsets.pop(jobset_id, None)
             self._jobs.pop(jobset_id, None)
@@ -59,7 +59,7 @@ class InMemoryStore(JobSetStore):
     # ------------------------------------------------------------------
     # JobRecord
     # ------------------------------------------------------------------
-    def add_job(self, record: JobRecord) -> JobRecord:
+    def store_add_job(self, record: JobRecord) -> JobRecord:
         with self._lock:
             if record.jobset_id not in self._jobsets:
                 raise JobSetNotFoundError(record.jobset_id)
@@ -68,7 +68,7 @@ class InMemoryStore(JobSetStore):
             self._jobs[record.jobset_id][record.job_key] = record
             return record
 
-    def add_jobs(self, records) -> List[JobRecord]:
+    def store_add_jobs(self, records) -> List[JobRecord]:
         records = list(records)
         out: List[JobRecord] = []
         now = datetime.now()
@@ -85,7 +85,7 @@ class InMemoryStore(JobSetStore):
                 out.append(record)
         return out
 
-    def delete_job(self, jobset_id: str, job_key: str) -> JobRecord:
+    def store_delete_job(self, jobset_id: str, job_key: str) -> JobRecord:
         with self._lock:
             jobs = self._jobs.get(jobset_id)
             if jobs is None or job_key not in jobs:

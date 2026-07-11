@@ -305,9 +305,9 @@ JobSetStore(ABC) ── InMemoryStore
 
 | 개념 | 공개 API (`mgr.*`) | 도메인 (`jobsets.*`) | 저장소 (`store.*`) |
 |---|---|---|---|
-| jobset 생성 | `create_jobset(commands)` → JobSet 핸들 | `new_jobset(intended_count)` → Record | `insert_jobset(record)` → Record |
-| job 삭제 | `remove_job(js, ...)` (가드) | `remove_jobs(...)`/`clear_jobs()` | `delete_job(jsid, key)` / `delete_jobset()` |
-| 종결/해제 | `close(js)` (jobset 종결) | `close_jobset(jsid)` | `dispose()` (저장소 자원 해제) |
+| jobset 생성 | `create_jobset(commands)` → JobSet 핸들 | `local_create_jobset(...)` → Record | `store_insert_jobset(record)` → Record |
+| job 삭제 | `remove_job(js, ...)` (가드) | `local_remove_jobs(...)`/`local_clear_jobs()` | `store_delete_job(...)` / `store_delete_jobset()` |
+| 종결/해제 | `close(js)` (jobset 종결) | `local_close_jobset(jsid)` | `store_dispose()` (저장소 자원 해제) |
 
 - 읽기 통과(`get_jobs`/`summary`/`list_jobsets`)는 세 계층 동일 이름을 유지한다 —
   **의미가 같은 facade read-through**라 혼동 없음(공개 API가 store 조회를 그대로 위임).
@@ -441,7 +441,7 @@ lsfmgr/
 ├── monitor.py           # PollingService (QThread+QTimer) + query_once + chunk 격리/회로차단
 ├── killer.py            # kill 전략 + verify + 확인 재시도 + slot ledger
 ├── handlers.py          # JobSetHandlerService — job별 주기 handler (FR-7)
-├── jobset_core.py       # JobSet 도메인 로직 (new_jobset/new_jobs/merge_from/remove_jobs/clear_jobs/close_jobset)
+├── jobset_core.py       # JobSet 도메인 로직 — local_* (local_create_jobset/jobs, local_remove/clear_jobs, local_close_jobset, merge_from)
 ├── handle.py            # JobSet 핸들 (조회 + Signal 전용 뷰)
 └── manager.py           # LsfJobManager: 명령 일원화 진입점 + 옵션 해석 + AUTO-1~3 + shutdown
 ```

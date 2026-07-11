@@ -29,8 +29,8 @@ def test_leading_zero_commands_submitted_verbatim(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_store_add_jobs_batch_contract(store):
     """add_jobs 배치 API — 두 백엔드 동일 계약."""
-    store.insert_jobset(make_jobset(n=100))
-    recs = store.add_jobs([make_job(idx=i) for i in range(100)])
+    store.store_insert_jobset(make_jobset(n=100))
+    recs = store.store_add_jobs([make_job(idx=i) for i in range(100)])
     assert len(recs) == 100
     assert all(r.updated_at is not None for r in recs)
     assert len(store.get_jobs("js1")) == 100
@@ -41,7 +41,7 @@ def test_store_add_jobs_batch_contract(store):
 def test_store_add_jobs_missing_jobset(store):
     from lsfmgr.errors import JobSetNotFoundError
     with pytest.raises(JobSetNotFoundError):
-        store.add_jobs([make_job(jsid="nope")])
+        store.store_add_jobs([make_job(jsid="nope")])
 
 
 # ----------------------------------------------------------------------
@@ -149,7 +149,7 @@ def test_array_partial_kill_only_pend(qtbot, manager, fake_lsf):
 
     js = manager.create_jobset(intended_count=10)
     jsid, parent = js.id, 9000
-    manager.store.add_jobs([JobRecord(
+    manager.store.store_add_jobs([JobRecord(
         job_id=parent, array_index=i, jobset_id=jsid,
         lsf_job_name=f"{jsid}[{i}]",
         state=JobState.RUN if i <= 5 else JobState.PEND, command="r")

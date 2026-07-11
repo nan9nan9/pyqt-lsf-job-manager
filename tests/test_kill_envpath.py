@@ -176,7 +176,7 @@ def test_kill_array_element_envpath(qtbot, fake_lsf, config):
 
         js = mgr.create_jobset(intended_count=3)
         jsid, aid = js.id, 9300
-        mgr.store.add_jobs([JobRecord(
+        mgr.store.store_add_jobs([JobRecord(
             job_id=aid, array_index=i, jobset_id=jsid,
             lsf_job_name=f"{jsid}[{i}]", state=JobState.RUN, command="r")
             for i in (1, 2, 3)])

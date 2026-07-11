@@ -210,7 +210,7 @@ def test_revert_to_created_clears_failure_residue(qtbot, manager, fake_lsf):
 
     jsid = manager.create_jobset(intended_count=1).id
     key = f"{jsid}_0"
-    manager.store.add_jobs([JobRecord(
+    manager.store.store_add_jobs([JobRecord(
         job_id=None, array_index=None, jobset_id=jsid, lsf_job_name=key,
         state=JobState.RETRY_WAIT, fail_reason="BSUB_TIMEOUT",
         fail_message="bsub: timeout after 30s", retry_count=2,

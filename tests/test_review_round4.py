@@ -91,7 +91,7 @@ def test_kill_jobs_single_array_element(qtbot, manager, fake_lsf):
 
     js = manager.create_jobset(intended_count=3)
     jsid, parent = js.id, 9400
-    manager.store.add_jobs([JobRecord(
+    manager.store.store_add_jobs([JobRecord(
         job_id=parent, array_index=i, jobset_id=jsid,
         lsf_job_name=f"{jsid}[{i}]", state=JobState.RUN, command="r")
         for i in (1, 2, 3)])

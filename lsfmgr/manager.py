@@ -514,14 +514,14 @@ class LsfJobManager(QObject):
         생성 즉시 jobs_updated/jobset_updated가 발행돼 표가 갱신된다."""
         if isinstance(tags, str):             # 편의: 단일 태그 문자열 허용
             tags = [tags]
-        rec = self.jobsets.new_jobset(
+        rec = self.jobsets.local_create_jobset(
             intended_count, label=label, tags=tags, parent=parent)
         jsid = rec.jobset_id
         items = list(commands)
         if items:
             records = self._build_job_records(
                 jsid, items, merge_ids, user_datas, wrapper)
-            out = self.jobsets.new_jobs(jsid, records)
+            out = self.jobsets.local_create_jobs(jsid, records)
             self._relay_jobs_changed(jsid, list(out))     # 표 즉시 갱신
         return self.jobset(jsid)
 
@@ -685,7 +685,7 @@ class LsfJobManager(QObject):
         비활성만 삭제 가능(활성이면 LsfmgrError, force로 레코드만 강제
         삭제 — LSF job 정리는 caller 책임). 삭제분은 jobset_updated로 반영."""
         jobset_id = self._jsid(jobset_id)
-        removed = self.jobsets.remove_jobs(
+        removed = self.jobsets.local_remove_jobs(
             jobset_id, job_id=job_id, merge_id=merge_id, job_key=job_key,
             force=force)
         self._emit_summary(jobset_id)
@@ -695,7 +695,7 @@ class LsfJobManager(QObject):
                    ) -> List[JobRecord]:
         """[sync] 전 job 삭제 — remove_jobs와 동일 가드."""
         jobset_id = self._jsid(jobset_id)
-        removed = self.jobsets.clear_jobs(jobset_id, force=force)
+        removed = self.jobsets.local_clear_jobs(jobset_id, force=force)
         self._emit_summary(jobset_id)
         return removed
 
@@ -805,7 +805,7 @@ class LsfJobManager(QObject):
         전원 terminal이 아니면 예외 — polling/핸들은 건드리지 않고 유지.
         LSF group 정리(bgdel)는 worker 스레드에서 비동기 수행 (QT-1)."""
         jobset_id = self._jsid(jobset_id)
-        js = self.jobsets.close_jobset(jobset_id, force=force,
+        js = self.jobsets.local_close_jobset(jobset_id, force=force,
                                        run_bgdel=False)   # 실패 시 여기서 예외
         self.polling.stop_polling(jobset_id)
         self.handlers.remove_all(jobset_id)
@@ -868,7 +868,7 @@ class LsfJobManager(QObject):
                          ("post_pool", lambda: self._post_pool.waitForDone(-1)),
                          ("polling", self.polling.shutdown),
                          ("killer", self.killer.shutdown),
-                         ("store", self.store.dispose)):
+                         ("store", self.store.store_dispose)):
             try:
                 fn()
             except Exception:                    # noqa: BLE001 — CS-5/‏CS-8
