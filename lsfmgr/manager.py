@@ -521,7 +521,7 @@ class LsfJobManager(QObject):
         if items:
             records = self._build_job_records(
                 jsid, items, merge_ids, user_datas, wrapper)
-            out = self.jobsets.create_jobs(jsid, records)
+            out = self.jobsets.new_jobs(jsid, records)
             self._relay_jobs_changed(jsid, list(out))     # 표 즉시 갱신
         return self.jobset(jsid)
 

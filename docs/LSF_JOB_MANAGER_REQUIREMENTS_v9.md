@@ -441,7 +441,7 @@ lsfmgr/
 ├── monitor.py           # PollingService (QThread+QTimer) + query_once + chunk 격리/회로차단
 ├── killer.py            # kill 전략 + verify + 확인 재시도 + slot ledger
 ├── handlers.py          # JobSetHandlerService — job별 주기 handler (FR-7)
-├── jobset_core.py       # JobSet 도메인 로직 (create_jobs/merge_from/remove_jobs/clear)
+├── jobset_core.py       # JobSet 도메인 로직 (new_jobset/new_jobs/merge_from/remove_jobs/clear_jobs/close_jobset)
 ├── handle.py            # JobSet 핸들 (조회 + Signal 전용 뷰)
 └── manager.py           # LsfJobManager: 명령 일원화 진입점 + 옵션 해석 + AUTO-1~3 + shutdown
 ```

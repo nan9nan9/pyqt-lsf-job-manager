@@ -1,8 +1,12 @@
 """JobSetManager — JobSet CRUD / 요약 / 손실 감지 / merge / close (FR-5).
 
 Store와 LsfCommand만 사용 (Qt 비의존). LSF 호출이 필요한 메서드
-(detect_lost, close의 bgdel, add_job의 sync_lsf)는 호출 스레드에서 blocking
-실행되므로, GUI 앱에서는 manager(Facade)가 worker 스레드에서 호출한다.
+(detect_lost, close_jobset의 bgdel)는 호출 스레드에서 blocking 실행되므로,
+GUI 앱에서는 manager(Facade)가 worker 스레드에서 호출한다.
+
+이름 규약: 도메인 계층은 공개 API(mgr.create_jobset/remove_job/close)와 저장소
+(store.insert_jobset/delete_job)와 구분되게 — new_jobset/new_jobs(생성),
+merge_from(흡수), remove_jobs/clear_jobs(삭제), close_jobset(종결).
 """
 from __future__ import annotations
 
@@ -43,13 +47,12 @@ class JobSetManager:
         self.command = command
         self.config = config or command.config
         # JobSetRecord read-modify-write 직렬화 — Store는 개별 연산만
-        # 원자적이므로, intended_count/부착물 갱신처럼 "읽고-고쳐-쓰는"
-        # 경로가 겹치면 한쪽 갱신이 유실된다 (예: worker의
-        # add_array_attachment vs 사용자 스레드의 add_job)
+        # 원자적이므로, intended_count 갱신처럼 "읽고-고쳐-쓰는" 경로가 겹치면
+        # 한쪽 갱신이 유실된다 (예: new_jobs vs merge_from의 intended_count 갱신).
         self._meta_lock = threading.RLock()
 
     # ------------------------------------------------------------------
-    # 생성/부착물
+    # 생성
     # ------------------------------------------------------------------
     def group_path_for(self, jobset_id: str) -> str:
         """사용자 격리 LSF group 경로 (CS-10)."""
@@ -72,17 +75,10 @@ class JobSetManager:
             closed=False)
         return self.store.insert_jobset(record)
 
-    def add_array_attachment(self, jobset_id: str, array_job_id: int) -> None:
-        with self._meta_lock:
-            js = self.store.get_jobset(jobset_id)
-            if array_job_id not in js.array_job_ids:
-                self.store.update_jobset(replace(
-                    js, array_job_ids=js.array_job_ids + [array_job_id]))
-
     # ------------------------------------------------------------------
-    # job 추가 (FR-5.4) — 생성은 create_jobs, 이후 추가는 merge_from만
+    # job 추가 (FR-5.4) — 생성은 new_jobs, 이후 추가는 merge_from만
     # ------------------------------------------------------------------
-    def create_jobs(self, jobset_id: str,
+    def new_jobs(self, jobset_id: str,
                     records: Sequence[JobRecord]) -> List[JobRecord]:
         """제출 전(CREATED) 레코드 일괄 생성 — 바구니 누적 (FR-5.4 확장).
 

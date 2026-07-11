@@ -58,7 +58,7 @@ def test_submit_emits_jobset_updated_with_initial_pend(qtbot, manager,
 
 
 def test_submit_emits_submitting_immediately(qtbot, manager, fake_lsf):
-    """v9: create_jobs가 CREATED를 즉시 발행해 표를 채우고, submit 착수가
+    """v9: create_jobset가 CREATED를 즉시 발행해 표를 채우고, submit 착수가
     SUBMITTING 리셋을 완료 전에 발행한다 — 대량 submit이 오래 걸려도
     표가 바로 갱신된다."""
     batches = []
