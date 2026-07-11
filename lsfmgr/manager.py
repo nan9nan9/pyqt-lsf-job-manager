@@ -514,7 +514,7 @@ class LsfJobManager(QObject):
         생성 즉시 jobs_updated/jobset_updated가 발행돼 표가 갱신된다."""
         if isinstance(tags, str):             # 편의: 단일 태그 문자열 허용
             tags = [tags]
-        rec = self.jobsets.create_jobset(
+        rec = self.jobsets.new_jobset(
             intended_count, label=label, tags=tags, parent=parent)
         jsid = rec.jobset_id
         items = list(commands)
@@ -868,7 +868,7 @@ class LsfJobManager(QObject):
                          ("post_pool", lambda: self._post_pool.waitForDone(-1)),
                          ("polling", self.polling.shutdown),
                          ("killer", self.killer.shutdown),
-                         ("store", self.store.close)):
+                         ("store", self.store.dispose)):
             try:
                 fn()
             except Exception:                    # noqa: BLE001 — CS-5/‏CS-8

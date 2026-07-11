@@ -23,7 +23,7 @@ class InMemoryStore(JobSetStore):
     # ------------------------------------------------------------------
     # JobSet CRUD
     # ------------------------------------------------------------------
-    def create_jobset(self, record: JobSetRecord) -> JobSetRecord:
+    def insert_jobset(self, record: JobSetRecord) -> JobSetRecord:
         with self._lock:
             if record.jobset_id in self._jobsets:
                 raise ValueError(f"jobset 중복: {record.jobset_id}")
@@ -85,7 +85,7 @@ class InMemoryStore(JobSetStore):
                 out.append(record)
         return out
 
-    def remove_job(self, jobset_id: str, job_key: str) -> JobRecord:
+    def delete_job(self, jobset_id: str, job_key: str) -> JobRecord:
         with self._lock:
             jobs = self._jobs.get(jobset_id)
             if jobs is None or job_key not in jobs:

@@ -31,7 +31,7 @@ def make_job(jsid="js1", idx=0, **kw) -> JobRecord:
 # JobSet CRUD
 # ----------------------------------------------------------------------
 def test_jobset_crud(store):
-    js = store.create_jobset(make_jobset())
+    js = store.insert_jobset(make_jobset())
     assert js.created_at is not None
     got = store.get_jobset("js1")
     assert got.intended_count == 3
@@ -48,14 +48,14 @@ def test_jobset_crud(store):
 
 
 def test_duplicate_jobset_rejected(store):
-    store.create_jobset(make_jobset())
+    store.insert_jobset(make_jobset())
     with pytest.raises(ValueError):
-        store.create_jobset(make_jobset())
+        store.insert_jobset(make_jobset())
 
 
 def test_list_jobsets(store):
-    store.create_jobset(make_jobset("a", 1))
-    store.create_jobset(make_jobset("b", 2))
+    store.insert_jobset(make_jobset("a", 1))
+    store.insert_jobset(make_jobset("b", 2))
     assert {j.jobset_id for j in store.list_jobsets()} == {"a", "b"}
 
 
@@ -63,7 +63,7 @@ def test_list_jobsets(store):
 # JobRecord
 # ----------------------------------------------------------------------
 def test_job_add_get(store):
-    store.create_jobset(make_jobset())
+    store.insert_jobset(make_jobset())
     store.add_job(make_job(idx=0))
     rec = store.get_job("js1", "js1_0")
     assert rec.state is JobState.CREATED
@@ -76,7 +76,7 @@ def test_add_job_requires_jobset(store):
 
 
 def test_get_jobs_with_state_filter(store):
-    store.create_jobset(make_jobset(n=3))
+    store.insert_jobset(make_jobset(n=3))
     store.add_job(make_job(idx=0, state=JobState.PEND, job_id=1))
     store.add_job(make_job(idx=1, state=JobState.RUN, job_id=2))
     store.add_job(make_job(idx=2))
@@ -86,7 +86,7 @@ def test_get_jobs_with_state_filter(store):
 
 
 def test_transition(store):
-    store.create_jobset(make_jobset())
+    store.insert_jobset(make_jobset())
     store.add_job(make_job(idx=0))
     rec = store.transition("js1", "js1_0", JobState.PEND, job_id=123)
     assert rec.state is JobState.PEND
@@ -95,17 +95,17 @@ def test_transition(store):
 
 
 def test_transition_missing_job(store):
-    store.create_jobset(make_jobset())
+    store.insert_jobset(make_jobset())
     with pytest.raises(JobNotFoundError):
         store.transition("js1", "nope", JobState.PEND)
 
 
 def test_remove_job(store):
-    store.create_jobset(make_jobset(n=3))
+    store.insert_jobset(make_jobset(n=3))
     for i in range(3):
         store.add_job(make_job(idx=i, job_id=100 + i))
     # 제거 → 제거된 레코드 반환 + 나머지 유지
-    rec = store.remove_job("js1", "js1_1")
+    rec = store.delete_job("js1", "js1_1")
     assert rec.lsf_job_name == "js1_1" and rec.job_id == 101
     assert {r.lsf_job_name for r in store.get_jobs("js1")} == {"js1_0", "js1_2"}
     with pytest.raises(JobNotFoundError):
@@ -113,14 +113,14 @@ def test_remove_job(store):
 
 
 def test_remove_job_missing(store):
-    store.create_jobset(make_jobset())
+    store.insert_jobset(make_jobset())
     with pytest.raises(JobNotFoundError):
-        store.remove_job("js1", "nope")
+        store.delete_job("js1", "nope")
 
 
 def test_transition_guard_cas(store):
     # guard(CAS)가 False면 전이가 무시되고 None — 스냅샷 stale write 방어
-    store.create_jobset(make_jobset(n=1))
+    store.insert_jobset(make_jobset(n=1))
     store.add_job(make_job(idx=0, job_id=100, state=JobState.RUN))
     # 스냅샷 이후 다른 경로가 레코드를 바꿨다고 가정 (job_id 100→200)
     store.transition("js1", "js1_0", JobState.PEND, job_id=200)
@@ -140,8 +140,8 @@ def test_transition_guard_cas(store):
 
 def test_find_jobs_global(store):
     # job_id로 jobset 무관 전역 검색 (kill_jobs optimistic용)
-    store.create_jobset(make_jobset("a", n=2))
-    store.create_jobset(make_jobset("b", n=1))
+    store.insert_jobset(make_jobset("a", n=2))
+    store.insert_jobset(make_jobset("b", n=1))
     store.add_job(make_job("a", 0, job_id=101))
     store.add_job(make_job("a", 1, job_id=102))
     store.add_job(make_job("b", 0, job_id=201))
@@ -152,7 +152,7 @@ def test_find_jobs_global(store):
 
 
 def test_via_wrapper_roundtrip(store):
-    store.create_jobset(make_jobset(n=2))
+    store.insert_jobset(make_jobset(n=2))
     store.add_job(make_job(idx=0, via_wrapper=True))
     store.add_job(make_job(idx=1))
     assert store.get_job("js1", "js1_0").via_wrapper is True
@@ -161,7 +161,7 @@ def test_via_wrapper_roundtrip(store):
 
 def test_runtime_fields_roundtrip(store):
     # run_time_s/start_time/finish_time 저장·복원 (sqlite 컬럼 포함)
-    store.create_jobset(make_jobset(n=1))
+    store.insert_jobset(make_jobset(n=1))
     store.add_job(make_job(idx=0, job_id=7))
     st = datetime(2026, 7, 5, 14, 0, 0)
     ft = datetime(2026, 7, 5, 14, 5, 30)
@@ -176,7 +176,7 @@ def test_runtime_fields_roundtrip(store):
 # summary 불변식 (FR-5.2, 수용 기준 4)
 # ----------------------------------------------------------------------
 def test_summary_invariant(store):
-    store.create_jobset(make_jobset(n=5))
+    store.insert_jobset(make_jobset(n=5))
     for i in range(5):
         store.add_job(make_job(idx=i))
     store.transition("js1", "js1_0", JobState.PEND, job_id=1)
@@ -192,7 +192,7 @@ def test_summary_invariant(store):
 
 def test_summary_counts_missing_records_as_created(store):
     # 레코드 미생성분도 CREATED로 계상 → 합계 == intended
-    store.create_jobset(make_jobset(n=10))
+    store.insert_jobset(make_jobset(n=10))
     store.add_job(make_job(idx=0, state=JobState.PEND, job_id=1))
     s = store.summary("js1")
     assert s["total"] == 10
@@ -205,10 +205,10 @@ def test_summary_counts_missing_records_as_created(store):
 # ----------------------------------------------------------------------
 def test_search_by_tag_label_since(store):
     old = datetime.now() - timedelta(days=2)
-    store.create_jobset(make_jobset("a", tags=["sweep"], label="x",
+    store.insert_jobset(make_jobset("a", tags=["sweep"], label="x",
                                     created_at=old))
-    store.create_jobset(make_jobset("b", tags=["sweep", "tt"], label="y"))
-    store.create_jobset(make_jobset("c", tags=[], label="x"))
+    store.insert_jobset(make_jobset("b", tags=["sweep", "tt"], label="y"))
+    store.insert_jobset(make_jobset("c", tags=[], label="x"))
 
     assert {j.jobset_id for j in store.search(tag="sweep")} == {"a", "b"}
     assert {j.jobset_id for j in store.search(label="x")} == {"a", "c"}
@@ -221,7 +221,7 @@ def test_search_by_tag_label_since(store):
 # ----------------------------------------------------------------------
 def test_concurrent_transitions(store):
     n_jobs, n_threads = 50, 8
-    store.create_jobset(make_jobset(n=n_jobs))
+    store.insert_jobset(make_jobset(n=n_jobs))
     for i in range(n_jobs):
         store.add_job(make_job(idx=i))
 

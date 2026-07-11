@@ -172,7 +172,7 @@ def test_merge_rejects_duplicate_job_keys(qtbot, manager, fake_lsf):
 # R3-10: get_jobs(states=빈 set) 계약 — 두 백엔드 모두 0건
 # ----------------------------------------------------------------------
 def test_get_jobs_empty_states_contract(store):
-    store.create_jobset(make_jobset(n=2))
+    store.insert_jobset(make_jobset(n=2))
     store.add_job(make_job(idx=0, state=JobState.PEND, job_id=1))
     assert store.get_jobs("js1", states=set()) == []
     assert len(store.get_jobs("js1", states=None)) == 1
@@ -183,7 +183,7 @@ def test_get_jobs_empty_states_contract(store):
 # ----------------------------------------------------------------------
 def test_add_jobs_atomic_on_failure(store):
     from lsfmgr.errors import JobSetNotFoundError
-    store.create_jobset(make_jobset(n=2))
+    store.insert_jobset(make_jobset(n=2))
     with pytest.raises(JobSetNotFoundError):
         store.add_jobs([make_job(idx=0), make_job(jsid="nope", idx=1)])
     assert store.get_jobs("js1") == [], "실패한 배치의 일부가 반영됨"
@@ -225,7 +225,7 @@ def test_array_bhist_fallback_per_element(qtbot, manager, fake_lsf):
 # R3-14: transition으로 키 필드 변경 시 이중 계상 → 거부
 # ----------------------------------------------------------------------
 def test_transition_rejects_key_fields(store):
-    store.create_jobset(make_jobset(n=1))
+    store.insert_jobset(make_jobset(n=1))
     store.add_job(make_job(idx=0))
     with pytest.raises(ValueError):
         store.transition("js1", "js1_0", JobState.PEND,

@@ -25,7 +25,7 @@ def store():
     """계약 테스트용 store (InMemory 단일 백엔드)."""
     s = InMemoryStore()
     yield s
-    s.close()
+    s.dispose()
 
 
 @pytest.fixture

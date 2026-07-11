@@ -27,7 +27,7 @@ class JobSetStore(ABC):
     # JobSet CRUD
     # ------------------------------------------------------------------
     @abstractmethod
-    def create_jobset(self, record: JobSetRecord) -> JobSetRecord: ...
+    def insert_jobset(self, record: JobSetRecord) -> JobSetRecord: ...
 
     @abstractmethod
     def get_jobset(self, jobset_id: str) -> JobSetRecord:
@@ -56,7 +56,7 @@ class JobSetStore(ABC):
         return [self.add_job(r) for r in records]
 
     @abstractmethod
-    def remove_job(self, jobset_id: str, job_key: str) -> JobRecord:
+    def delete_job(self, jobset_id: str, job_key: str) -> JobRecord:
         """job 1건을 저장소에서 제거하고 제거된 레코드를 반환.
         없으면 JobNotFoundError. LSF의 실제 job은 건드리지 않는다 —
         저장소 추적에서만 제외한다(필요하면 호출 전에 kill할 것)."""
@@ -141,8 +141,8 @@ class JobSetStore(ABC):
     # ------------------------------------------------------------------
     # 수명
     # ------------------------------------------------------------------
-    def close(self) -> None:
-        """저장소 정리 (connection close 등). 기본은 no-op."""
+    def dispose(self) -> None:
+        """저장소 자원 해제 (connection close 등). 기본은 no-op."""
 
 
 def make_summary(jobset: JobSetRecord,

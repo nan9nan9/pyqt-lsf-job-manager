@@ -29,7 +29,7 @@ def test_leading_zero_commands_submitted_verbatim(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_store_add_jobs_batch_contract(store):
     """add_jobs 배치 API — 두 백엔드 동일 계약."""
-    store.create_jobset(make_jobset(n=100))
+    store.insert_jobset(make_jobset(n=100))
     recs = store.add_jobs([make_job(idx=i) for i in range(100)])
     assert len(recs) == 100
     assert all(r.updated_at is not None for r in recs)

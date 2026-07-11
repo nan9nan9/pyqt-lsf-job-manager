@@ -55,7 +55,7 @@ class JobSetManager:
         """사용자 격리 LSF group 경로 (CS-10)."""
         return f"{self.config.lsf_group_root}/{getpass.getuser()}/{jobset_id}"
 
-    def create_jobset(self, intended_count: int, *, label: str = "",
+    def new_jobset(self, intended_count: int, *, label: str = "",
                       tags: Sequence[str] = (), description: str = "",
                       parent: Optional[str] = None,
                       jobset_id: Optional[str] = None,
@@ -70,7 +70,7 @@ class JobSetManager:
             parent_jobset_id=parent, created_by=getpass.getuser(),
             created_at=datetime.now(), merged_from=[], session_id="",
             closed=False)
-        return self.store.create_jobset(record)
+        return self.store.insert_jobset(record)
 
     def add_array_attachment(self, jobset_id: str, array_job_id: int) -> None:
         with self._meta_lock:
@@ -154,7 +154,7 @@ class JobSetManager:
                     # replace — 물리 키(job_key)는 target 것 유지
                     new = replace(rec, jobset_id=target_id,
                                   lsf_job_name=old.job_key)
-                    self.store.remove_job(target_id, old.job_key)
+                    self.store.delete_job(target_id, old.job_key)
                     self.store.add_job(new)
                     changed.append(new)
                 else:
@@ -209,7 +209,7 @@ class JobSetManager:
                     f"(force=True로 레코드만 강제 삭제 가능)",
                     jobset_id=jobset_id, job_keys=busy)
             for r in targets:
-                self.store.remove_job(jobset_id, r.job_key)
+                self.store.delete_job(jobset_id, r.job_key)
             js = self.store.get_jobset(jobset_id)
             n = len(self.store.get_jobs(jobset_id))
             if js.intended_count != n:
@@ -229,7 +229,7 @@ class JobSetManager:
                     f"{busy[:5]} (force=True로 강제 가능)",
                     jobset_id=jobset_id, job_keys=busy)
             for r in jobs:
-                self.store.remove_job(jobset_id, r.job_key)
+                self.store.delete_job(jobset_id, r.job_key)
             js = self.store.get_jobset(jobset_id)
             if js.intended_count != 0:
                 self.store.update_jobset(replace(js, intended_count=0))

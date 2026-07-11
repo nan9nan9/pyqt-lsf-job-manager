@@ -300,6 +300,18 @@ JobSetStore(ABC) ── InMemoryStore
   수동 확인/정리 가능.
 - *(mocklsf 내부 SQLite는 가상 스케줄러 구현일 뿐 본 저장소와 무관.)*
 
+**계층별 이름 규약(같은 개념도 계층마다 다른 동사 — 혼동 방지):** 세 계층이
+동시에 존재하므로, 같은 대상이라도 계층이 이름에서 드러나게 한다.
+
+| 개념 | 공개 API (`mgr.*`) | 도메인 (`jobsets.*`) | 저장소 (`store.*`) |
+|---|---|---|---|
+| jobset 생성 | `create_jobset(commands)` → JobSet 핸들 | `new_jobset(intended_count)` → Record | `insert_jobset(record)` → Record |
+| job 삭제 | `remove_job(js, ...)` (가드) | `remove_jobs(...)`/`clear_jobs()` | `delete_job(jsid, key)` / `delete_jobset()` |
+| 종결/해제 | `close(js)` (jobset 종결) | `close_jobset(jsid)` | `dispose()` (저장소 자원 해제) |
+
+- 읽기 통과(`get_jobs`/`summary`/`list_jobsets`)는 세 계층 동일 이름을 유지한다 —
+  **의미가 같은 facade read-through**라 혼동 없음(공개 API가 store 조회를 그대로 위임).
+
 ---
 
 ## 6. 기능 요구사항 (FR)
