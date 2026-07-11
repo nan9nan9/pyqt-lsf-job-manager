@@ -1,8 +1,8 @@
 """LsfJobManager — 앱이 사용하는 단일 진입점 (QObject Facade + 핸들 발급).
 
-- High-level: submit() → JobSet 핸들 (v7 §1.1~1.3), AUTO-1~4 자동화
-- Low-level: 전역 Facade Signal (v6 §1.4 유지) — 핸들 Signal은 그 위의
-  편의 계층으로 동일 이벤트를 이중 발행한다.
+- 명령 일원화(v9): 모든 명령은 mgr.* 한 곳, JobSet 핸들은 조회+Signal 뷰.
+  AUTO-1~3 라이프사이클 자동화. 전역 Facade Signal(jsid 포함) 위에 핸들
+  Signal이 같은 이벤트를 이중 발행한다.
 - 옵션은 defaults → manager kwargs → call kwargs 3단 계층 (§1.2, options.py)
 
 QT-0 표기 규약: [async→Signal] = 즉시 반환·결과는 Signal /
@@ -22,7 +22,9 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Un
 from .command import LsfCommand, Runner
 from .config import JobSpec, LsfConfig, spec_from_json, spec_to_json
 from .errors import (
+    CloseNotAllowedError,
     JobNotFoundError,
+    JobSetClosedError,
     LsfmgrError,
     MergeNotAllowedError,
     SubmitNotAllowedError,
@@ -49,7 +51,7 @@ log = logging.getLogger("lsfmgr.manager")
 
 #: LsfConfig 필드로 직접 전달되는 manager 전용 키
 _CONFIG_KEYS = ("bsub_path", "bjobs_path", "bkill_path", "bhist_path",
-                "bgdel_path", "script_dir", "lsf_group_root",
+                "bgdel_path", "lsf_group_root",
                 "arg_max", "default_queue", "chunk_size",
                 "kill_status_policy", "kill_max_retry", "kill_retry_delay_s",
                 "progress_min_interval_s", "progress_min_step_ratio",
@@ -175,7 +177,10 @@ class LsfJobManager(QObject):
         # post_process — jobset이 전원 terminal에 도달하면 1회 실행되는 후처리
         # 콜백. submit(post_process=fn)으로 무장, 완료 감지(_on_poll_updated)
         # 시점에 worker에서 실행하고 post_processing_started/finished로 통지.
+        # 게이트 경로는 _pending_post_process에 보류했다가 통과 후 무장한다
+        # (먼저 무장하면 이전 실행의 terminal 레코드로 오발화).
         self._post_process: Dict[str, Callable] = {}
+        self._pending_post_process: Dict[str, Callable] = {}
         self._post_pool = QThreadPool(self)
         self._post_pool.setMaxThreadCount(2)
 
@@ -266,15 +271,20 @@ class LsfJobManager(QObject):
                                    post_process=post_process, **kwargs)
 
     def _on_pre_submit_finished(self, jsid: str, ok: bool) -> None:
-        """pre_submit 게이트 종료 — 통과 시 미뤄둔 rearm/AUTO-1 polling.
-        rearm을 폴링 시작보다 먼저(같은 main slot) 해야 재실행 첫 tick에서
-        핸들러가 새 주기로 돈다."""
+        """pre_submit 게이트 종료 — 통과 시 미뤄둔 rearm/post_process 무장/
+        AUTO-1 polling. rearm을 폴링 시작보다 먼저(같은 main slot) 해야
+        재실행 첫 tick에서 핸들러가 새 주기로 돈다. 거부(ok=False)면 보류분을
+        전부 폐기한다 — 재실행이 없으므로 무장하면 이전 실행의 낡은 레코드로
+        post_process가 오발화한다."""
         keys = self._pending_rearm.pop(jsid, None)
         iv = self._pending_autopoll.pop(jsid, None)
+        pp = self._pending_post_process.pop(jsid, None)
         if not ok:
             return
         if keys:
             self.handlers.rearm(jsid, keys)
+        if pp is not None:
+            self._post_process[jsid] = pp
         if iv is not None:
             self.start_polling(jsid, iv)
 
@@ -288,11 +298,15 @@ class LsfJobManager(QObject):
         return js
 
     def jobset(self, jobset_id: str) -> JobSet:
-        """[sync, snapshot] JobSet 핸들 재획득 (복원/검색 결과에서)."""
+        """[sync, snapshot] JobSet 핸들 재획득 (복원/검색 결과에서).
+        close된 jobset은 JobSetClosedError — 닫힌 jobset에 새 열린 핸들을
+        발급하면 close 계약이 우회된다(부착물은 이미 bgdel로 정리됨)."""
         handle = self._handles.get(jobset_id)
         if handle is not None:
             return handle
-        self.store.get_jobset(jobset_id)          # 존재 검증
+        rec = self.store.get_jobset(jobset_id)    # 존재 검증
+        if rec.closed:
+            raise JobSetClosedError(f"닫힌 jobset: {jobset_id}")
         handle = JobSet(self, jobset_id)
         self._handles[jobset_id] = handle
         return handle
@@ -420,6 +434,11 @@ class LsfJobManager(QObject):
         verify 미지정 시 verify_kill 옵션(②) 적용.
         envpath 지정 시 그 LSF env를 source한 bkill (MC forward job)."""
         jobset_id = self._jsid(jobset_id)
+        if self._shutdown_done:
+            # shutdown 후 kill은 join되지 않는 worker를 만들고 kill_started만
+            # 발화된 채 finished가 영영 안 와 UI가 고착된다 — no-op으로 무시
+            log.warning("shutdown 후 kill 요청 무시: %s", jobset_id)
+            return
         if verify is None:
             verify = bool(self._defaults.get("verify_kill", False))
         scope = None
@@ -460,6 +479,9 @@ class LsfJobManager(QObject):
         jobset 컨텍스트가 있으면 optimistic EXIT 전이·verify가 켜지고 결과가
         핸들 kill_finished로도 중계된다. envpath 지정 시 그 LSF env를
         source한 bkill (MC forward job)."""
+        if self._shutdown_done:
+            log.warning("shutdown 후 kill_jobs 요청 무시")
+            return
         if verify is None:
             verify = bool(self._defaults.get("verify_kill", False))
         if isinstance(job_ids_or_jobset, JobSet) or job_keys is not None:
@@ -519,9 +541,16 @@ class LsfJobManager(QObject):
         jsid = rec.jobset_id
         items = list(commands)
         if items:
-            records = self._build_job_records(
-                jsid, items, merge_ids, user_datas, wrapper)
-            out = self.jobsets.local_create_jobs(jsid, records)
+            try:
+                records = self._build_job_records(
+                    jsid, items, merge_ids, user_datas, wrapper)
+                out = self.jobsets.local_create_jobs(jsid, records)
+            except BaseException:
+                # 검증 실패(길이 불일치·빈 커맨드·merge_id 중복 등) — 방금
+                # 넣은 jobset 레코드를 되돌린다. 안 하면 핸들도 없는 유령
+                # 빈 jobset이 list/search에 영구 잔류한다.
+                self.store.store_delete_jobset(jsid)
+                raise
             self._relay_jobs_changed(jsid, list(out))     # 표 즉시 갱신
         return self.jobset(jsid)
 
@@ -636,6 +665,10 @@ class LsfJobManager(QObject):
         tid = self._jsid(target_id)
         sid = self._jsid(source_id)
         for jsid in (tid, sid):
+            if self.store.get_jobset(jsid).closed:
+                raise MergeNotAllowedError(
+                    f"{jsid}: 닫힌(close) jobset은 merge할 수 없습니다",
+                    jobset_id=jsid)
             if self.submitter.is_active(jsid) or self.killer.is_active(jsid):
                 raise MergeNotAllowedError(
                     f"{jsid}: submit/kill 진행 중에는 merge할 수 없습니다",
@@ -646,6 +679,7 @@ class LsfJobManager(QObject):
         # 가장 짧은 interval로 target에 이어받는다.
         src_iv = self._poll_intervals.pop(sid, None)
         self._post_process.pop(sid, None)        # source 소멸 — 후처리 무장 해제
+        self._pending_post_process.pop(sid, None)
         self.polling.stop_polling(sid)
         self.handlers.remove_all(sid)
         self._invalidate_handle(sid)
@@ -729,6 +763,16 @@ class LsfJobManager(QObject):
                        **kwargs: Any) -> JobSet:
         """jobset 전 job (재)제출 — mgr.submit(js, ...)의 구현."""
         jobset_id = self._jsid(js)
+        if self._shutdown_done:
+            # shutdown 후 제출은 아무도 join하지 않는 스레드/영영 안 오는
+            # 완료 신호를 만든다 — 조용히 고착시키지 말고 명확히 거부한다
+            raise SubmitNotAllowedError(
+                f"{jobset_id}: shutdown 이후에는 submit할 수 없습니다",
+                jobset_id=jobset_id)
+        if self.store.get_jobset(jobset_id).closed:
+            raise SubmitNotAllowedError(
+                f"{jobset_id}: 닫힌(close) jobset에는 submit할 수 없습니다",
+                jobset_id=jobset_id)
         if (self.submitter.is_active(jobset_id)
                 or self.killer.is_active(jobset_id)):
             raise SubmitNotAllowedError(
@@ -744,32 +788,49 @@ class LsfJobManager(QObject):
                 f"{jobset_id}: 활성(진행 중) job이 있어 submit 불가 — "
                 f"{busy[:5]} (먼저 kill 하거나 완료를 기다리세요)",
                 jobset_id=jobset_id, job_keys=busy)
-        # post_process 무장 — 이번 실행이 전원 terminal에 도달하면 1회 발화.
-        # (게이트 거부/취소 시 job은 CREATED로 남아 terminal이 아니므로 안 뜬다)
-        if post_process is not None:
-            self._post_process[jobset_id] = post_process
-        else:
-            self._post_process.pop(jobset_id, None)   # 재제출 시 이전 무장 해제
+        # 이전 제출의 잔여 post_process 무장 해제 — 이번 호출 기준으로만 무장
+        self._post_process.pop(jobset_id, None)
+        self._pending_post_process.pop(jobset_id, None)
         opts = self.resolve_options(kwargs, context="submit")
         keyed = [(r.job_key, self._record_to_item(r)) for r in jobs]
         keys = [k for k, _ in keyed]
         if pre_submit is None:
-            # handler 재무장 — 재실행 job의 진행 상태 리셋 (새 실행에서
-            # start/end 주기가 다시 돌게). 게이트 경로는 통과 확정 후에.
-            self.handlers.rearm(jobset_id, keys)
             self.submit_started.emit(jobset_id)
-            self.submitter.resubmit_existing(jobset_id, keyed, opts)
+            ok = self.submitter.resubmit_existing(jobset_id, keyed, opts)
+            if not ok:
+                # 착수 안 됨(born-cancelled — kill barrier 경합). 완료 정산은
+                # _gate_reject의 finished(cancelled=N)가 이미 발행했다.
+                # rearm/무장/폴링 등 착수 전제 후속 작업은 전부 생략한다.
+                return self.jobset(jobset_id)
+            # handler 재무장 — 재실행 job의 진행 상태 리셋 (새 실행에서
+            # start/end 주기가 다시 돌게). 착수 확정 후에 해야 취소된 제출의
+            # terminal 레코드에 _PENDING 핸들러가 남지 않는다.
+            self.handlers.rearm(jobset_id, keys)
+            # post_process 무장 — 착수 확정 후. 먼저 무장하면 게이트/취소
+            # 창에서 이전 실행의 terminal 레코드로 오발화한다.
+            if post_process is not None:
+                self._post_process[jobset_id] = post_process
             if opts.auto_poll:                    # AUTO-1
                 self.start_polling(jobset_id, opts.poll_interval_s)
         else:
-            # 게이트 경로 — rearm/폴링은 게이트 통과(pre_submit_finished True)
-            # 후에 한다: 거부되면 재실행이 없는데 rearm하면 terminal 레코드에
-            # _PENDING 핸들러가 남아 end 핸들러가 중복 발화한다
+            # 게이트 경로 — rearm/무장/폴링은 게이트 통과(pre_submit_finished
+            # True) 후에 한다: 거부되면 재실행이 없는데 rearm하면 terminal
+            # 레코드에 _PENDING 핸들러가 남아 end 핸들러가 중복 발화하고,
+            # post_process는 이전 실행의 낡은 레코드로 발화한다
             self._pending_rearm[jobset_id] = keys
             if opts.auto_poll:
                 self._pending_autopoll[jobset_id] = opts.poll_interval_s
-            self.submitter.resubmit_existing(jobset_id, keyed, opts,
-                                             pre_submit=pre_submit)
+            if post_process is not None:
+                self._pending_post_process[jobset_id] = post_process
+            ok = self.submitter.resubmit_existing(jobset_id, keyed, opts,
+                                                  pre_submit=pre_submit)
+            if not ok:
+                # born-cancelled — 게이트가 아예 시작되지 않아 pre_submit_*
+                # 신호도 없다. 보류분이 영구 잔류하지 않게 즉시 정리한다.
+                # (완료 정산은 finished(cancelled=N)로 이미 발행됨)
+                self._pending_rearm.pop(jobset_id, None)
+                self._pending_autopoll.pop(jobset_id, None)
+                self._pending_post_process.pop(jobset_id, None)
         return self.jobset(jobset_id)
 
     @staticmethod
@@ -805,12 +866,22 @@ class LsfJobManager(QObject):
         전원 terminal이 아니면 예외 — polling/핸들은 건드리지 않고 유지.
         LSF group 정리(bgdel)는 worker 스레드에서 비동기 수행 (QT-1)."""
         jobset_id = self._jsid(jobset_id)
+        if (self.submitter.is_active(jobset_id)
+                or self.killer.is_active(jobset_id)):
+            # pre_submit 게이트 대기 중엔 레코드가 아직 전원 terminal이라
+            # 아래 local_close_jobset 검사를 통과해 버린다 — 게이트가 통과하면
+            # '닫힌 jobset'에 실제 LSF job이 제출되므로(merge와 동일 가드)
+            # 진행 중 submit/kill이 있으면 close를 거부한다.
+            raise CloseNotAllowedError(
+                f"{jobset_id}: submit/kill 진행 중에는 close할 수 없습니다",
+                jobset_id=jobset_id)
         js = self.jobsets.local_close_jobset(jobset_id, force=force,
                                        run_bgdel=False)   # 실패 시 여기서 예외
         self.polling.stop_polling(jobset_id)
         self.handlers.remove_all(jobset_id)
         self._poll_intervals.pop(jobset_id, None)
         self._post_process.pop(jobset_id, None)
+        self._pending_post_process.pop(jobset_id, None)
         self._invalidate_handle(jobset_id)
         if js.lsf_group_paths:
             paths = list(js.lsf_group_paths)
@@ -883,6 +954,11 @@ class LsfJobManager(QObject):
         """polling 결과 relay — 요약 + 변경분 batch (QT-4). 이어서 등록된
         handler를 평가한다 — Store가 방금 갱신됐으므로 handler는 최신 상태를
         본다 (handler는 폴링 사이클에 tie돼 있음, FR-7)."""
+        if self._shutdown_done:
+            # 명시적 shutdown() 후 main 큐에 남아 있던 polling.updated —
+            # 여기서 신호를 중계하거나 post_pool에 새 task를 시작하면
+            # 이미 drain된 pool에 join되지 않는 스레드가 생긴다 (CS-8)
+            return
         self.jobset_updated.emit(jobset_id, summary)
         if changed:
             self.jobs_updated.emit(jobset_id, changed)
@@ -893,8 +969,14 @@ class LsfJobManager(QObject):
         """전원 terminal 도달 시 등록된 post_process를 worker에서 1회 실행.
         폴링/query_once 완료 감지의 공통 지점에서 호출된다 — 감지 즉시 무장을
         해제(pop)하므로 이어지는 폴링 사이클에서 중복 발화하지 않는다."""
+        if self._shutdown_done:
+            return
         fn = self._post_process.get(jobset_id)
         if fn is None:
+            return
+        if self.submitter.is_active(jobset_id):
+            # 제출(게이트 포함) 진행 중 — 레코드가 아직 이전 실행의 terminal
+            # 상태로 남아 있는 창이다. 이번 실행의 완료가 아니므로 미룬다.
             return
         try:
             recs = self.store.get_jobs(jobset_id)
@@ -1026,8 +1108,3 @@ class _PostProcessTask(QRunnable):
         log.info("post_process 완료 %s", self.jsid)
         self.mgr.post_processing_finished.emit(self.jsid, result)
 
-
-def _with_pattern(js: JobSetRecord, pattern: str) -> JobSetRecord:
-    if pattern in js.name_patterns:
-        return js
-    return dc_replace(js, name_patterns=js.name_patterns + [pattern])

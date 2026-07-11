@@ -24,7 +24,7 @@ CALL_ONLY_KEYS = frozenset({"label", "tags", "description"})
 #: ②(manager) 전용 — Options에 포함되지 않고 config/store 구성에 쓰이는 키
 MANAGER_ONLY_KEYS = frozenset({
     "chunk_size", "default_queue", "lsf_group_root",
-    "script_dir", "arg_max",
+    "arg_max",
     "bsub_path", "bjobs_path", "bkill_path", "bhist_path", "bgdel_path",
     "kill_status_policy", "kill_max_retry", "kill_retry_delay_s",
     "progress_min_interval_s", "progress_min_step_ratio",

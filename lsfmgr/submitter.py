@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 import os
 import shlex
-import stat as stat_mod
 import threading
 import time
 from dataclasses import dataclass, field
@@ -39,7 +38,7 @@ log = logging.getLogger("lsfmgr.submit")
 
 @dataclass
 class _PendingRetry:
-    """QTimer 대기 중인 재시도 1건 (bulk job 1개 또는 array 1회분)."""
+    """QTimer 대기 중인 재시도 1건 (job 1개)."""
     keys: List[str]                     # 포기 시 SUBMIT_FAILED 확정할 job_key들
     delay_s: float
     make_task: Callable[[], QRunnable]  # 발화 시 pool에 넣을 task 생성
@@ -221,7 +220,7 @@ class BulkSubmitter(QObject):
     def resubmit_existing(self, jobset_id: str,
                           keyed_items: Sequence, options: Options,
                           pre_submit=None) -> bool:
-        """[async→Signal] 기존 레코드 재제출 (resubmit_jobs 용).
+        """[async→Signal] 기존 레코드 재제출 — mgr.submit(js)의 실행부 (v9).
 
         keyed_items: [(job_key, JobSpec | argv토큰리스트), ...] — item 타입으로
         제출 경로를 job 단위로 고른다(JobSpec=bsub 조립, list=wrapper 그대로).
@@ -707,13 +706,17 @@ class _GateTask(QRunnable):
             sub.pre_submit_finished.emit(ctx.jobset_id, False)
             sub._gate_fail(ctx, self.make_failed(repr(e)[:4000]), repr(e))
             return
+        if ok and (ctx.cancel_event.is_set() or sub._shutdown):
+            # 통과했지만 그새 취소/종료 — ok=True를 먼저 알리면 manager가
+            # rearm/AUTO-1 폴링 재개를 수행해, 재실행이 없는데 terminal
+            # 레코드의 최종 핸들러가 중복 발화한다. False로 강등해 알린다.
+            sub.pre_submit_finished.emit(ctx.jobset_id, False)
+            sub._gate_reject(ctx, finish=True)
+            return
         sub.pre_submit_finished.emit(ctx.jobset_id, ok)
         if not ok:
             sub._gate_reject(
                 ctx, finish=sub.config.submit_finished_on_gate_reject)
-            return
-        if ctx.cancel_event.is_set() or sub._shutdown:
-            sub._gate_reject(ctx, finish=True)       # 통과했지만 그새 취소됨
             return
         sub.started.emit(ctx.jobset_id)              # 게이트 통과 → 제출 착수
         try:

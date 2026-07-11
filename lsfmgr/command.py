@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import (
@@ -197,6 +198,10 @@ class LsfCommand:
             if self.config.collect_clusters
             else [self._BJOBS_FULL_FMT, self._BJOBS_CORE_FMT])
         self._bjobs_fmt_idx = 0
+        # 강등은 폴링 스레드·killer verify 워커·detect_lost 호출 스레드가
+        # 동시에 시도할 수 있다 — 무락 증가면 같은 필드 오류에 이중 강등돼
+        # FULL을 건너뛰고 CORE로 떨어진다. 사용한 인덱스 기준 CAS로 1단만.
+        self._bjobs_fmt_lock = threading.Lock()
 
     @property
     def _bjobs_fmt(self) -> str:
@@ -375,14 +380,18 @@ class LsfCommand:
         # 한 호출에서 지원 가능한 단계까지 도달해, MC·run_time을 둘 다 거부하는
         # 사이트도 즉시 살아난다. 일시 장애(필드 오류 아님)는 강등 없이 전파.
         while True:
+            used_idx = self._bjobs_fmt_idx
             try:
-                res = run(self._bjobs_fmt)
+                res = run(self._bjobs_formats[used_idx])
                 break
             except LsfCommandError as e:
-                if (self._bjobs_fmt_idx < len(self._bjobs_formats) - 1
+                if (used_idx < len(self._bjobs_formats) - 1
                         and _looks_like_field_error(e.stderr or str(e))):
-                    self._bjobs_fmt_idx += 1
-                    log.warning("bjobs -o 확장 필드 미지원 — 포맷 강등 (→ %s). "
+                    with self._bjobs_fmt_lock:      # CAS — 동시 강등 1단만
+                        if self._bjobs_fmt_idx == used_idx:
+                            self._bjobs_fmt_idx = used_idx + 1
+                            log.warning(
+                                "bjobs -o 확장 필드 미지원 — 포맷 강등 (→ %s). "
                                 "원인: %s", self._bjobs_fmt,
                                 (e.stderr or str(e)).strip()[:200])
                     continue
@@ -650,9 +659,6 @@ class LsfCommand:
             if on_progress:
                 on_progress(processed)
         return calls
-
-    def bkill_by_ids(self, job_ids: Sequence[int], envpath: str = "") -> int:
-        return self.bkill_targets([str(i) for i in job_ids], envpath=envpath)
 
     def bkill_targets_confirm(self, targets: Sequence[str],
                               on_progress: Optional[Callable[[int], None]] = None,

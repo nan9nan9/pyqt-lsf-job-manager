@@ -147,7 +147,7 @@ class JobSetHandlerService(QObject):
         self._handlers.pop((jobset_id, name), None)
 
     def rearm(self, jobset_id: str, job_keys: Iterable[str]) -> None:
-        """[main] 지정 job들의 handler 진행 상태를 리셋 (resubmit_jobs 용).
+        """[main] 지정 job들의 handler 진행 상태를 리셋 (mgr.submit 재제출 용).
         _FINISHED로 남으면 재실행에서 handler가 영영 침묵하므로 _PENDING으로
         되돌려 새 실행의 start/end 주기를 다시 돌게 한다."""
         keys = set(job_keys)

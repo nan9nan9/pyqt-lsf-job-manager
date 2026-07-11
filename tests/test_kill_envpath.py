@@ -19,8 +19,7 @@ CSHRC = "/user/mcr1spool/lsfmcr1/conf/cshrc.lsf"
 
 @pytest.fixture
 def config(tmp_path):
-    return LsfConfig(retry_delay_s=0.05, kill_retry_delay_s=0.02,
-                     script_dir=str(tmp_path / "s"))
+    return LsfConfig(retry_delay_s=0.05, kill_retry_delay_s=0.02)
 
 
 # ----------------------------------------------------------------------

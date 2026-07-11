@@ -26,7 +26,7 @@ def test_kill_is_nonblocking_and_snapshot(qtbot, tmp_path):
     fake = FakeLsf()
     gate = threading.Event()
     # chunk_size 작게 → 여러 chunk로 증분 진행 발생. 부착물 없이 id-chunk 강제
-    cfg = LsfConfig(script_dir=str(tmp_path / "s"), chunk_size=5)
+    cfg = LsfConfig(chunk_size=5)
     mgr = LsfJobManager(store=InMemoryStore(), config=cfg,
                         runner=_gated_bkill_runner(fake, gate),
                         lsf_group_root="")     # group 부착물 없이 → chunk 경로
@@ -66,7 +66,7 @@ def test_kill_snapshot_progresses(qtbot, tmp_path):
     """chunk가 진행되며 done이 단조 증가하는지 (envpath+chunk 경로)."""
     fake = FakeLsf()
     gate = threading.Event(); gate.set()       # 붙잡지 않음 — 자연 완료
-    cfg = LsfConfig(script_dir=str(tmp_path / "s"), chunk_size=3)
+    cfg = LsfConfig(chunk_size=3)
     mgr = LsfJobManager(store=InMemoryStore(), config=cfg, runner=fake,
                         collect_clusters=True)
     try:

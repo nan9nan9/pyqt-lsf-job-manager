@@ -31,8 +31,6 @@ class LsfConfig:
     arg_max: int = 131072                # 명령줄 인자 총 길이 상한 (NFR-5, 보수적)
 
     lsf_group_root: str = "/lsfmgr"      # → /lsfmgr/<user>/<jobset_id> (CS-10)
-    script_dir: str = ""                 # array dispatch 스크립트 저장 위치
-                                         # 빈 문자열이면 ~/.lsfmgr/scripts
 
     workers: int = 32                    # 병렬 submit worker 수 (1~64)
                                          # 상한↑ 시 submit 호스트 CPU/RAM·master
@@ -105,12 +103,6 @@ class LsfConfig:
             raise ValueError("progress_min_interval_s는 0 이상")
         if not (0.0 <= self.progress_min_step_ratio <= 1.0):
             raise ValueError("progress_min_step_ratio는 0~1")
-
-    def resolve_script_dir(self) -> str:
-        path = self.script_dir or os.path.join(
-            os.path.expanduser("~"), ".lsfmgr", "scripts")
-        os.makedirs(path, exist_ok=True)
-        return path
 
 
 def cmd_tokens(path: CmdPath) -> List[str]:

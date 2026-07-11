@@ -172,10 +172,10 @@ def test_bkill_group_single_call(cmd, fake_lsf):
     assert fake_lsf.alive_jobs() == []
 
 
-def test_bkill_by_ids_chunked(fake_lsf):
+def test_bkill_targets_chunked(fake_lsf):
     cmd = LsfCommand(LsfConfig(chunk_size=20), fake_lsf)
     ids = [cmd.bsub(f"r {i}") for i in range(45)]
-    calls = cmd.bkill_by_ids(ids)
+    calls = cmd.bkill_targets([str(i) for i in ids])
     assert calls == 3
     assert fake_lsf.alive_jobs() == []
 

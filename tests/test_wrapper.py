@@ -14,8 +14,7 @@ from lsfmgr.states import JobState
 
 
 def _make(fake_lsf, tmp_path, **kwargs):
-    cfg = LsfConfig(retry_delay_s=0.05, retry_backoff=1.0,
-                    script_dir=str(tmp_path / "scripts"), **kwargs)
+    cfg = LsfConfig(retry_delay_s=0.05, retry_backoff=1.0, **kwargs)
     return LsfJobManager(store=InMemoryStore(), config=cfg, runner=fake_lsf)
 
 

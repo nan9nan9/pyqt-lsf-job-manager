@@ -128,9 +128,10 @@ def test_closed_handle_raises(qtbot, manager, fake_lsf):
         _ = js.summary
     with pytest.raises(JobSetClosedError):
         manager.kill(js)
-    # 재획득하면 새 핸들 (store에는 closed 상태로 남아있음)
-    js2 = manager.jobset(js.id)
-    assert js2 is not js
+    # 재획득도 거부 — 닫힌 jobset에 새 열린 핸들을 발급하면 close 계약이
+    # 우회된다 (LSF group 부착물은 이미 bgdel로 정리됨)
+    with pytest.raises(JobSetClosedError):
+        manager.jobset(js.id)
 
 
 def test_merge_from_invalidates_source(qtbot, manager, fake_lsf):

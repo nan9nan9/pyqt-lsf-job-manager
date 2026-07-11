@@ -45,6 +45,7 @@ class Killer(QObject):
         # 지우지 못한다. worker(update)와 조회 스레드(snapshot)가 공유.
         self._active: Dict[str, List[List[int]]] = {}
         self._active_lock = threading.Lock()
+        self._shutdown = False
 
     def is_active(self, jobset_id: str) -> bool:
         """이 jobset에 진행 중인 kill이 있는지 (pull)."""
@@ -106,6 +107,10 @@ class Killer(QObject):
         진행 스냅샷 등록(_reg)은 여기(호출 스레드)에서 한다 — 반환 시점에
         is_killing()/kill_snapshot()이 즉시 True/값을 주도록 (caller가 직후
         발행하는 kill_started와 pull API가 일치해야 한다)."""
+        if self._shutdown:
+            # shutdown 후 새 kill worker는 아무도 join하지 않는다 (CS-8)
+            log.warning("shutdown 후 kill 요청 무시: %s", jobset_id)
+            return
         slot = self._reg(jobset_id)
         self._pool.start(_KillTask(
             self, jobset_id=jobset_id, only_state=only_state, verify=verify,
@@ -116,12 +121,16 @@ class Killer(QObject):
         """job_ids: int(job 전체) 또는 "id[idx]" 문자열(array element 1개).
         envpath 지정 시 그 LSF env를 source한 bkill (MC forward job — 클러스터별로
         나눠 각 envpath로 호출)."""
+        if self._shutdown:
+            log.warning("shutdown 후 kill_jobs 요청 무시")
+            return
         slot = self._reg(jobset_id)
         self._pool.start(_KillTask(
             self, jobset_id=jobset_id, job_ids=list(job_ids), verify=verify,
             envpath=envpath, slot=slot))
 
     def shutdown(self) -> None:
+        self._shutdown = True
         self._pool.waitForDone(-1)
 
 
