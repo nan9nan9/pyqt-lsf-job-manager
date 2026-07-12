@@ -906,8 +906,13 @@ class LsfJobManager(QObject):
                 scope = self._gate.kill_scope(jobset_id)
 
                 def _quiesce_bgdel():
-                    scope.acquire()          # 진행 중 제출 취소 + 정지 대기
+                    # acquire()도 try 안에 둔다 — barrier↑ 뒤 정지 대기(wait
+                    # 콜백)에서 예외가 나면 release가 반드시 돌아 barrier가
+                    # 영구 잔류(이후 그 jobset의 모든 submit이 born-cancelled로
+                    # 거부)하지 않게 한다. _barrier_down은 0 이하면 no-op이라
+                    # acquire가 barrier_up 전에 죽어도 안전하다.
                     try:
+                        scope.acquire()      # 진행 중 제출 취소 + 정지 대기
                         for p in paths:
                             self.command.bgdel(p)
                     finally:

@@ -292,18 +292,26 @@ class BulkSubmitter(QObject):
                 if rec is not None:
                     reset_recs.append(rec)
                 launch.append((key, item))
+            # task 객체를 **먼저 전부** 만든다 — 생성이 실패하면 어느 task도
+            # 시작하기 전에 예외가 난다. 부분 착수(일부 task는 이미 실행 중인데
+            # do_launch가 죽어 _gate_fail이 그 레코드를 SUBMIT_FAILED로 되돌리면
+            # 실행 중 bsub가 고아가 된다)를 원천 차단한다.
+            tasks = [(key, self._make_resubmit_task(ctx, key, item))
+                     for key, item in launch]
             # 리셋된 SUBMITTING 즉시 발행 — 완료를 안 기다리고 표에 반영.
-            # user slot 예외를 격리한다(CS-5): 여기서 전파되면 do_launch가
-            # 죽어 ctx가 미완으로 고착되고 jobset이 영구 잠긴다.
+            # user slot 예외를 격리한다(CS-5): 전파되면 do_launch가 죽어 ctx가
+            # 미완으로 고착되고 jobset이 영구 잠긴다.
             if reset_recs:
                 self._safe_emit(self.jobs_changed, jobset_id, reset_recs)
-            for key, item in launch:
-                ctx.pool.start(self._make_resubmit_task(ctx, key, item))
-            # **착수 확정** = 레코드 리셋 + task 큐잉 완료. 이 시점에만 manager가
-            # rearm/post_process 무장/AUTO-1 폴링을 한다. 앞 단계에서 예외로
-            # 여기 못 오면 무장이 안 돼(실패 finalizer가 gate_rejected로 정리),
-            # 옛 terminal 레코드로 오발화하거나 SUBMITTING 고착 없이 마무리된다.
+            # **착수 확정** = 레코드 리셋 완료 + task 생성 성공. 이 시점(pool.start
+            # **직전**)에 manager가 rearm/post_process 무장/AUTO-1을 하도록 arming
+            # 신호를 보낸다. pool.start보다 먼저 발행해야 즉시 완주하는 task의
+            # finished가 records_reset보다 먼저 main에 도착해 무장 전에 post_process
+            # 판정(no-op)이 나는 유실을 막는다. (리셋은 위에서 끝나 레코드는
+            # SUBMITTING — 옛 terminal 오발화 창도 없다. pool.start는 예외 없음)
             self._safe_emit(self.records_reset, jobset_id, ctx.arm_token)
+            for _key, task in tasks:
+                ctx.pool.start(task)
             if not launch:
                 QTimer.singleShot(0,
                                   lambda: self._finish_if_done(ctx, force=True))
@@ -688,7 +696,7 @@ class BulkSubmitter(QObject):
             ctx.cancelled = ctx.total
             report = self._make_report(ctx)
             if finish:
-                self.finished.emit(ctx.jobset_id, report)
+                self._safe_emit(self.finished, ctx.jobset_id, report)
         log.info("pre_submit 게이트 거부 %s (finished 발화=%s)",
                  ctx.jobset_id, finish)
         self._drop_ctx(ctx)
@@ -701,18 +709,20 @@ class BulkSubmitter(QObject):
         try:
             created = self.store.store_add_jobs(failed_records)
             if created:
-                self.jobs_changed.emit(ctx.jobset_id, list(created))
+                self._safe_emit(self.jobs_changed, ctx.jobset_id, list(created))
         except Exception:                    # noqa: BLE001 — CS-5
             log.exception("게이트 실패 레코드 생성 실패: %s", ctx.jobset_id)
         # 리셋만 되고 착수 못 한 SUBMITTING 레코드 un-stick — 안 하면 재제출
-        # 가드(활성 job)에 걸려 jobset이 잠긴다. (실행 중 task가 있으면 그
-        # task의 전이가 우선 — 이미 PEND/EXIT면 SUBMITTING이 아니라 건너뜀)
+        # 가드(활성 job)에 걸려 jobset이 잠긴다. **CAS guard**: 그새 실행 중
+        # task가 SUBMITTING→PEND로 옮겼으면 되돌리지 않는다(실행 중 bsub를
+        # SUBMIT_FAILED로 덮으면 그 LSF job이 고아가 된다).
         stuck = []
         try:
             for r in self.store.get_jobs(ctx.jobset_id):
                 if r.state is JobState.SUBMITTING:
                     nr = self.store.transition(
                         ctx.jobset_id, r.job_key, JobState.SUBMIT_FAILED,
+                        guard=lambda cur: cur.state is JobState.SUBMITTING,
                         fail_reason="LAUNCH_FAILED", fail_message=msg[:4000])
                     if nr is not None:
                         stuck.append(nr)
@@ -720,7 +730,9 @@ class BulkSubmitter(QObject):
             log.exception("착수 실패 레코드 정리 실패: %s", ctx.jobset_id)
         if stuck:
             self._safe_emit(self.jobs_changed, ctx.jobset_id, stuck)
-        self.error.emit(ctx.jobset_id, f"pre_submit: {msg}")
+        # user error 슬롯 예외 격리 — main 스레드 direct 연결에서 전파되면
+        # 아래 ctx.finished 설정 전에 죽어 jobset이 영구 잠긴다 (CS-5)
+        self._safe_emit(self.error, ctx.jobset_id, f"pre_submit: {msg}")
         # gate_rejected를 finished보다 먼저 (무장 정리 우선 — _gate_reject 주석)
         self._safe_emit(self.gate_rejected, ctx.jobset_id, ctx.arm_token)
         with ctx.lock:
@@ -729,7 +741,7 @@ class BulkSubmitter(QObject):
                 ctx.failed = ctx.total
                 ctx.fail_reasons["PRE_SUBMIT_FAILED"] = ctx.total
                 report = self._make_report(ctx)
-                self.finished.emit(ctx.jobset_id, report)
+                self._safe_emit(self.finished, ctx.jobset_id, report)
         self._drop_ctx(ctx)
 
 

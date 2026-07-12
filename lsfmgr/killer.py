@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -276,8 +277,10 @@ class _KillTask(QRunnable):
                 strategies, errors)
             # 전체 kill은 group/name 전략(1명령)이라 per-id 확인이 없다 —
             # 전략이 오류 없이 수행됐으면 살아있던 대상 전부를 확인된 것으로
-            # 간주한다(kill 명령이 수락됨).
-            verify_targets = {self._id_str(r) for r in alive
+            # 간주한다(kill 명령이 수락됨). verify는 **bare job_id**(whole)로
+            # 센다 — 전체 kill은 그 job_id 전부가 대상이므로, kill 창에 rerun
+            # (bsub -r)으로 되살아난 element(스냅샷엔 없던)도 잔존으로 잡는다.
+            verify_targets = {str(r.job_id) for r in alive
                               if r.job_id is not None}
             if optimistic and not errors:
                 killed_recs = alive
@@ -463,23 +466,35 @@ class _KillTask(QRunnable):
         return matched
 
     def _verify(self, targets: set) -> int:
-        """재조회로 실제 종료 확인 (FR-3.3). kill 대상(targets: "id"/"id[idx]"
-        문자열) 중 아직 LSF에 잔존하는 job 수 반환 — 부분/개별 kill에서 대상
-        아닌 job은 세지 않는다. element 지정("id[idx]")은 그 element만,
-        bare id("id")는 그 job_id 전체(비array job 또는 array 전체)를 센다.
-        targets가 비면(대상 없음) 0."""
+        """재조회로 실제 종료 확인 (FR-3.3). kill 대상(targets: "id"/"id[idx]"/
+        "id[m-n]" 문자열) 중 아직 LSF에 잔존하는 job 수 반환 — 부분/개별
+        kill에서 대상 아닌 job은 세지 않는다. element 지정("id[idx]")은 그
+        element만, 범위("id[m-n]")는 그 범위 element만, bare id("id")는 그
+        job_id 전체를 센다. 파싱 불가한 target은 bare id로 관대 처리(강건성 —
+        예외로 kill_finished가 오보되지 않게). targets가 비면 0."""
         k = self.killer
         if not targets:
             return 0
-        exact: set = set()      # (job_id, array_index) — element 지정 대상
-        whole: set = set()      # job_id — bare id (비array/array 전체)
+        exact: set = set()          # (job_id, array_index) — element 지정
+        ranges: List[Tuple[int, int, int]] = []  # (job_id, lo, hi) — 범위 지정
+        whole: set = set()          # job_id — bare id (비array/array 전체)
         for t in targets:
             t = str(t)
-            if "[" in t:
-                pid, idx = t.split("[", 1)
-                exact.add((int(pid), int(idx.rstrip("]"))))
-            else:
-                whole.add(int(t))
+            m = re.match(r"^(\d+)(?:\[(\d+)(?:-(\d+))?\])?$", t)
+            if m is None:           # 예상 밖 형식 — bare id 시도, 그래도 안 되면 skip
+                head = t.split("[", 1)[0]
+                if head.isdigit():
+                    whole.add(int(head))
+                else:
+                    log.warning("kill verify: 파싱 불가 target 무시: %r", t)
+                continue
+            pid = int(m.group(1))
+            if m.group(2) is None:                 # bare id
+                whole.add(pid)
+            elif m.group(3) is None:               # 단일 element [idx]
+                exact.add((pid, int(m.group(2))))
+            else:                                  # 범위 [m-n]
+                ranges.append((pid, int(m.group(2)), int(m.group(3))))
         try:
             k.querier.query(self.jobset_id)      # Store 갱신 목적 (반환값 미사용)
         except LsfmgrError as e:
@@ -489,7 +504,11 @@ class _KillTask(QRunnable):
         def _hit(r) -> bool:
             if r.job_id in whole:                # bare id — element 전부 포함
                 return True
-            return (r.job_id, r.array_index) in exact
+            if (r.job_id, r.array_index) in exact:
+                return True
+            return any(r.job_id == pid and r.array_index is not None
+                       and lo <= r.array_index <= hi
+                       for pid, lo, hi in ranges)
 
         alive = [r for r in k.store.get_jobs(self.jobset_id)
                  if _hit(r) and r.state.is_on_lsf
