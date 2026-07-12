@@ -247,9 +247,11 @@ class _KillTask(QRunnable):
         optimistic = (k.command.config.kill_status_policy == "optimistic")
         killed_recs: List = []       # optimistic EXIT 대상 (kill 확인된 레코드)
 
-        # verify=True일 때 "잔존(still_alive)"을 셀 대상 job_id — kill 대상만
-        # 센다(부분/개별 kill에서 대상 아닌 RUN job까지 잔존으로 세지 않도록).
-        verify_ids: set = set()
+        # verify=True일 때 "잔존(still_alive)"을 셀 kill 대상 문자열("id" 또는
+        # "id[idx]"). job_id만으로 세면 array element 1개를 죽였을 때 같은
+        # parent job_id를 공유하는 형제 element들이 잔존으로 오집계된다 —
+        # target 문자열 기준으로 element는 (id,idx) 정확 매칭한다 (_verify).
+        verify_targets: set = set()
 
         if self.job_ids is not None:
             # 개별 ID kill — 확인 후 미확인분 재시도 (FR-3.4)
@@ -258,7 +260,7 @@ class _KillTask(QRunnable):
             calls, unconfirmed, retries, resolved = self._kill_confirm(
                 targets, errors)
             strategies.append("chunk")
-            verify_ids = {int(str(i).split("[", 1)[0]) for i in self.job_ids}
+            verify_targets = set(targets)
             if optimistic:
                 killed_recs = self._records_for(resolved)
         elif self.only_state is not None:
@@ -269,7 +271,7 @@ class _KillTask(QRunnable):
             recs = k.store.get_jobs(self.jobset_id, states={self.only_state})
             targets = [self._id_str(r) for r in recs if r.job_id is not None]
             requested = len(targets)
-            verify_ids = {r.job_id for r in recs if r.job_id is not None}
+            verify_targets = set(targets)
             if targets:
                 calls, unconfirmed, retries, resolved = self._kill_confirm(
                     targets, errors)
@@ -283,7 +285,8 @@ class _KillTask(QRunnable):
             # 전체 kill은 group/name 전략(1명령)이라 per-id 확인이 없다 —
             # 전략이 오류 없이 수행됐으면 살아있던 대상 전부를 확인된 것으로
             # 간주한다(kill 명령이 수락됨).
-            verify_ids = {r.job_id for r in alive if r.job_id is not None}
+            verify_targets = {self._id_str(r) for r in alive
+                              if r.job_id is not None}
             if optimistic and not errors:
                 killed_recs = alive
 
@@ -295,7 +298,7 @@ class _KillTask(QRunnable):
 
         still_alive: Optional[int] = None
         if self.verify and self.jobset_id:
-            still_alive = self._verify(verify_ids)
+            still_alive = self._verify(verify_targets)
 
         return KillReport(
             jobset_id=self.jobset_id, requested=requested,
@@ -467,19 +470,36 @@ class _KillTask(QRunnable):
         strategies.append(name if matched else f"{name}(no-match)")
         return matched
 
-    def _verify(self, target_ids: set) -> int:
-        """재조회로 실제 종료 확인 (FR-3.3). kill 대상(target_ids) 중 아직
-        LSF에 잔존하는 job 수 반환 — 부분/개별 kill에서 대상 아닌 job은 세지
-        않는다. target_ids가 비면(대상 없음) 0."""
+    def _verify(self, targets: set) -> int:
+        """재조회로 실제 종료 확인 (FR-3.3). kill 대상(targets: "id"/"id[idx]"
+        문자열) 중 아직 LSF에 잔존하는 job 수 반환 — 부분/개별 kill에서 대상
+        아닌 job은 세지 않는다. element 지정("id[idx]")은 그 element만,
+        bare id("id")는 그 job_id 전체(비array job 또는 array 전체)를 센다.
+        targets가 비면(대상 없음) 0."""
         k = self.killer
-        if not target_ids:
+        if not targets:
             return 0
+        exact: set = set()      # (job_id, array_index) — element 지정 대상
+        whole: set = set()      # job_id — bare id (비array/array 전체)
+        for t in targets:
+            t = str(t)
+            if "[" in t:
+                pid, idx = t.split("[", 1)
+                exact.add((int(pid), int(idx.rstrip("]"))))
+            else:
+                whole.add(int(t))
         try:
             k.querier.query(self.jobset_id)      # Store 갱신 목적 (반환값 미사용)
         except LsfmgrError as e:
             log.warning("kill verify 조회 실패: %s", e)
             return -1
+
+        def _hit(r) -> bool:
+            if r.job_id in whole:                # bare id — element 전부 포함
+                return True
+            return (r.job_id, r.array_index) in exact
+
         alive = [r for r in k.store.get_jobs(self.jobset_id)
-                 if r.job_id in target_ids and r.state.is_on_lsf
+                 if _hit(r) and r.state.is_on_lsf
                  and r.state not in (JobState.UNKWN, JobState.ZOMBI)]
         return len(alive)
