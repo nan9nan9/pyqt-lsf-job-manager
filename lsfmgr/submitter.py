@@ -70,6 +70,9 @@ class _SubmitContext:
     changed_buffer: list = field(default_factory=list)
     # SubmitGate 등록 토큰 — None이면 kill barrier에 거부돼 born-cancelled
     gate_token: object = None
+    # manager가 발급한 제출 사이클 token — records_reset/gate_rejected에 실어
+    # 돌려준다 (낡은 신호가 새 사이클의 보류분을 건드리지 못하게)
+    arm_token: object = None
 
 
 class _BaseSubmitTask(QRunnable):
@@ -191,6 +194,12 @@ class BulkSubmitter(QObject):
     error = Signal(str, str)                  # jobset_id, message
     jobs_changed = Signal(str, list)          # jobset_id, [JobRecord] 전이 배치
     started = Signal(str)                     # jobset_id — 게이트 통과 후 제출 착수
+    # 착수 확정/무산 — manager의 보류 무장분(_pending_arm) 처리 전용 내부 신호.
+    # records_reset: 레코드 리셋 완료(=이 사이클의 제출 착수 확정).
+    # gate_rejected: 게이트가 착수 없이 종료(거부/예외/통과 직후 취소/shutdown).
+    # 두 번째 인자는 manager가 발급한 사이클 token — 낡은 신호 식별용.
+    records_reset = Signal(str, object)       # jobset_id, arm_token
+    gate_rejected = Signal(str, object)       # jobset_id, arm_token
     pre_submit_started = Signal(str)               # jobset_id — pre_submit 게이트 시작
     pre_submit_finished = Signal(str, bool)        # jobset_id, ok — 게이트 종료(True=통과)
     # 내부용 — worker 스레드에서 emit → submitter 소속 스레드에서 QTimer 스케줄
@@ -219,7 +228,7 @@ class BulkSubmitter(QObject):
     # ------------------------------------------------------------------
     def resubmit_existing(self, jobset_id: str,
                           keyed_items: Sequence, options: Options,
-                          pre_submit=None) -> bool:
+                          pre_submit=None, arm_token=None) -> bool:
         """[async→Signal] 기존 레코드 재제출 — mgr.submit(js)의 실행부 (v9).
 
         keyed_items: [(job_key, JobSpec | argv토큰리스트), ...] — item 타입으로
@@ -241,6 +250,7 @@ class BulkSubmitter(QObject):
             return False
         keyed = list(keyed_items)
         ctx = self._new_context(jobset_id, len(keyed), options)
+        ctx.arm_token = arm_token
         if ctx.cancel_event.is_set():
             # born-cancelled (kill barrier 중 시작) — 아래 리셋은 기존
             # job_id/이력을 소거하는 파괴적 연산이라, 시작 전 취소면 레코드를
@@ -285,6 +295,9 @@ class BulkSubmitter(QObject):
             # 리셋된 SUBMITTING 즉시 발행 — 완료를 안 기다리고 표에 반영
             if reset_recs:
                 self.jobs_changed.emit(jobset_id, reset_recs)
+            # 리셋 완료 = 착수 확정 — manager가 이 시점에 rearm/무장/AUTO-1을
+            # 한다(그 전에 하면 옛 terminal 레코드로 오발화하는 창이 생긴다)
+            self.records_reset.emit(jobset_id, ctx.arm_token)
             for key, item in launch:
                 ctx.pool.start(self._make_resubmit_task(ctx, key, item))
             if not launch:
@@ -697,6 +710,7 @@ class _GateTask(QRunnable):
         sub.pre_submit_started.emit(ctx.jobset_id)
         if sub._shutdown or ctx.cancel_event.is_set():
             sub.pre_submit_finished.emit(ctx.jobset_id, False)
+            sub.gate_rejected.emit(ctx.jobset_id, ctx.arm_token)
             sub._gate_reject(ctx, finish=True)      # 취소 — 항상 finished
             return
         try:
@@ -704,6 +718,7 @@ class _GateTask(QRunnable):
         except Exception as e:                       # noqa: BLE001 — CS-5
             log.exception("pre_submit 게이트 예외: %s", ctx.jobset_id)
             sub.pre_submit_finished.emit(ctx.jobset_id, False)
+            sub.gate_rejected.emit(ctx.jobset_id, ctx.arm_token)
             sub._gate_fail(ctx, self.make_failed(repr(e)[:4000]), repr(e))
             return
         if ok and (ctx.cancel_event.is_set() or sub._shutdown):
@@ -711,10 +726,12 @@ class _GateTask(QRunnable):
             # rearm/AUTO-1 폴링 재개를 수행해, 재실행이 없는데 terminal
             # 레코드의 최종 핸들러가 중복 발화한다. False로 강등해 알린다.
             sub.pre_submit_finished.emit(ctx.jobset_id, False)
+            sub.gate_rejected.emit(ctx.jobset_id, ctx.arm_token)
             sub._gate_reject(ctx, finish=True)
             return
         sub.pre_submit_finished.emit(ctx.jobset_id, ok)
         if not ok:
+            sub.gate_rejected.emit(ctx.jobset_id, ctx.arm_token)
             sub._gate_reject(
                 ctx, finish=sub.config.submit_finished_on_gate_reject)
             return

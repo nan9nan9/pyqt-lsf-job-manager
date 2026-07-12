@@ -21,6 +21,10 @@ SHARED_KEYS = frozenset({
 })
 #: ③(call) 전용
 CALL_ONLY_KEYS = frozenset({"label", "tags", "description"})
+#: 제거된 옵션 — 받으면 TypeError 대신 경고 후 무시 (기존 앱 하위 호환).
+#: script_dir: array dispatch 제거(v9)로 무용.
+DEPRECATED_KEYS = frozenset({"script_dir"})
+
 #: ②(manager) 전용 — Options에 포함되지 않고 config/store 구성에 쓰이는 키
 MANAGER_ONLY_KEYS = frozenset({
     "chunk_size", "default_queue", "lsf_group_root",
@@ -180,8 +184,13 @@ def _validate(key: str, value: Any) -> Any:
 def validate_options(kwargs: Dict[str, Any], *, allowed: frozenset,
                      where: str) -> Dict[str, Any]:
     """키 집합 검증(OPT-2) + 값 검증(OPT-3) 후 정규화된 dict 반환."""
+    import logging
     out: Dict[str, Any] = {}
     for key, value in kwargs.items():
+        if key in DEPRECATED_KEYS:
+            logging.getLogger("lsfmgr.manager").warning(
+                "%s: 옵션 %r은 v9에서 제거됨 — 무시합니다", where, key)
+            continue
         if key not in allowed:
             raise TypeError(
                 f"{where}: 알 수 없는 옵션 {key!r} — 사용 가능: "

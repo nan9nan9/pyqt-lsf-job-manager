@@ -151,6 +151,9 @@ class LsfJobManager(QObject):
         self.submitter.started.connect(self.submit_started)     # 게이트 통과 후
         self.submitter.pre_submit_started.connect(self.pre_submit_started)
         self.submitter.pre_submit_finished.connect(self.pre_submit_finished)
+        # 착수 확정/무산 내부 신호 — 보류 무장분(_pending_arm) 처리 전용
+        self.submitter.records_reset.connect(self._on_records_reset)
+        self.submitter.gate_rejected.connect(self._on_gate_rejected)
 
         self.polling = PollingService(self.querier, parent=self)
         self.polling.updated.connect(self._on_poll_updated)
@@ -175,24 +178,27 @@ class LsfJobManager(QObject):
         self._shutdown_done = False
 
         # post_process — jobset이 전원 terminal에 도달하면 1회 실행되는 후처리
-        # 콜백. submit(post_process=fn)으로 무장, 완료 감지(_on_poll_updated)
-        # 시점에 worker에서 실행하고 post_processing_started/finished로 통지.
-        # 게이트 경로는 _pending_post_process에 보류했다가 통과 후 무장한다
-        # (먼저 무장하면 이전 실행의 terminal 레코드로 오발화).
+        # 콜백. submit(post_process=fn)으로 등록되며 실제 무장은 착수 확정
+        # (records_reset) 시점에 _pending_arm에서 승격된다. 완료 감지
+        # (_on_poll_updated)에서 worker로 실행, post_processing_*로 통지.
         self._post_process: Dict[str, Callable] = {}
-        self._pending_post_process: Dict[str, Callable] = {}
         self._post_pool = QThreadPool(self)
         self._post_pool.setMaxThreadCount(2)
 
-        # pre_submit 게이트 경로의 AUTO-1 지연 — 게이트 통과(pre_submit_finished True)
-        # 후에야 polling을 켠다. 게이트가 오래 걸리면 레코드가 없어 AUTO-2가
-        # polling을 조기 중지해 실제 job 전이를 놓치기 때문.
-        self._pending_autopoll: Dict[str, float] = {}
-        self._pending_rearm: Dict[str, list] = {}
+        # 제출 사이클별 보류 무장분 — jobset_id → (token, rearm keys,
+        # post_process, AUTO-1 interval). submitter의 records_reset(리셋 완료
+        # =착수 확정)에서 무장하고, gate_rejected(착수 없음 확정)에서 폐기한다.
+        # token(사이클 정체성)으로 낡은 신호가 새 사이클을 건드리지 못한다.
+        self._pending_arm: Dict[str, tuple] = {}
 
         # --- JobSet 핸들 계층 (v7) — Facade Signal 위에 이중 발행 ---
         self._handles: Dict[str, JobSet] = {}
         # 핸들 Signal 이름은 Facade와 동일 — relay 대상 attr명도 그대로
+        # 내부 정산 slot을 핸들 relay보다 먼저 연결한다 — 같은 신호의 slot은
+        # 연결 순서대로 실행되므로, kill의 EXIT 전이(jobs_updated)가 핸들
+        # kill_finished보다 먼저 나가야 finished-last 계약이 핸들 계층에서도
+        # 유지된다 (submit 경로는 submitter가 emit 순서로 보장).
+        self.kill_finished.connect(self._emit_updates_after_kill)
         self.submit_progress.connect(self._handle_relay("submit_progress"))
         self.jobset_updated.connect(self._handle_relay("jobset_updated"))
         self.kill_started.connect(self._handle_relay("kill_started"))
@@ -203,12 +209,10 @@ class LsfJobManager(QObject):
         self.job_detail_ready.connect(self._handle_relay("job_detail_ready"))
         self.pre_submit_started.connect(self._handle_relay("pre_submit_started"))
         self.pre_submit_finished.connect(self._handle_relay("pre_submit_finished"))
-        self.pre_submit_finished.connect(self._on_pre_submit_finished)
         self.post_processing_started.connect(self._handle_relay("post_processing_started"))
         self.post_processing_finished.connect(self._handle_relay("post_processing_finished"))
         self.submit_finished.connect(self._h_finished)
         self.submit_finished.connect(self._emit_summary_after_submit)
-        self.kill_finished.connect(self._emit_updates_after_kill)
         self.jobs_updated.connect(self._h_jobs_updated)
 
         # AUTO-3: 스레드 좀비/‏core dump 원천 차단 — shutdown을 아래 3중으로 보장.
@@ -269,24 +273,6 @@ class LsfJobManager(QObject):
         poll_interval_s/queue/submit_timeout_s 등 (§1.2)."""
         return self._submit_jobset(js, pre_submit=pre_submit,
                                    post_process=post_process, **kwargs)
-
-    def _on_pre_submit_finished(self, jsid: str, ok: bool) -> None:
-        """pre_submit 게이트 종료 — 통과 시 미뤄둔 rearm/post_process 무장/
-        AUTO-1 polling. rearm을 폴링 시작보다 먼저(같은 main slot) 해야
-        재실행 첫 tick에서 핸들러가 새 주기로 돈다. 거부(ok=False)면 보류분을
-        전부 폐기한다 — 재실행이 없으므로 무장하면 이전 실행의 낡은 레코드로
-        post_process가 오발화한다."""
-        keys = self._pending_rearm.pop(jsid, None)
-        iv = self._pending_autopoll.pop(jsid, None)
-        pp = self._pending_post_process.pop(jsid, None)
-        if not ok:
-            return
-        if keys:
-            self.handlers.rearm(jsid, keys)
-        if pp is not None:
-            self._post_process[jsid] = pp
-        if iv is not None:
-            self.start_polling(jsid, iv)
 
     @staticmethod
     def _jsid(js) -> str:
@@ -678,8 +664,8 @@ class LsfJobManager(QObject):
         # 폴링 연속성: target이 폴링을 안 쓰는데 source가 쓰고 있었다면
         # 가장 짧은 interval로 target에 이어받는다.
         src_iv = self._poll_intervals.pop(sid, None)
-        self._post_process.pop(sid, None)        # source 소멸 — 후처리 무장 해제
-        self._pending_post_process.pop(sid, None)
+        self._post_process.pop(sid, None)        # source 소멸 — 무장/보류 해제
+        self._pending_arm.pop(sid, None)
         self.polling.stop_polling(sid)
         self.handlers.remove_all(sid)
         self._invalidate_handle(sid)
@@ -699,6 +685,9 @@ class LsfJobManager(QObject):
         try:
             if target_id == source_id:
                 return False
+            if (self.store.get_jobset(target_id).closed
+                    or self.store.get_jobset(source_id).closed):
+                return False              # merge()는 closed면 예외 — 술어 일치
             if (self.submitter.is_active(target_id)
                     or self.submitter.is_active(source_id)
                     or self.killer.is_active(target_id)
@@ -748,6 +737,8 @@ class LsfJobManager(QObject):
         submit/kill이 없으면 True. GUI 버튼 활성화 판단용."""
         jobset_id = self._jsid(jobset_id)
         try:
+            if self.store.get_jobset(jobset_id).closed:
+                return False              # submit()은 closed면 예외 — 술어 일치
             if (self.submitter.is_active(jobset_id)
                     or self.killer.is_active(jobset_id)):
                 return False
@@ -788,50 +779,63 @@ class LsfJobManager(QObject):
                 f"{jobset_id}: 활성(진행 중) job이 있어 submit 불가 — "
                 f"{busy[:5]} (먼저 kill 하거나 완료를 기다리세요)",
                 jobset_id=jobset_id, job_keys=busy)
-        # 이전 제출의 잔여 post_process 무장 해제 — 이번 호출 기준으로만 무장
+        # 이전 제출의 잔여 무장 해제 — 이번 호출 기준으로만 무장
         self._post_process.pop(jobset_id, None)
-        self._pending_post_process.pop(jobset_id, None)
+        self._pending_arm.pop(jobset_id, None)
         opts = self.resolve_options(kwargs, context="submit")
         keyed = [(r.job_key, self._record_to_item(r)) for r in jobs]
         keys = [k for k, _ in keyed]
+        # rearm/post_process 무장/AUTO-1 폴링은 **레코드 리셋 완료**
+        # (submitter.records_reset — 착수 확정 그 자체) 시점에 한다.
+        # 먼저 하면 ① 게이트/취소 창에서 이전 실행의 terminal 레코드에
+        # end 핸들러가 중복 발화하고 post_process가 낡은 레코드로 오발화하며,
+        # ② 폴링 tick이 리셋 전 옛 레코드를 평가하는 경합 창이 생긴다.
+        # token은 이 제출 사이클의 정체성 — 큐에 남은 이전 사이클의 낡은
+        # 거부 신호가 새 사이클의 보류분을 폐기하지 못하게 한다.
+        token = object()
+        self._pending_arm[jobset_id] = (token, keys, post_process,
+                                        opts.poll_interval_s
+                                        if opts.auto_poll else None)
         if pre_submit is None:
             self.submit_started.emit(jobset_id)
-            ok = self.submitter.resubmit_existing(jobset_id, keyed, opts)
-            if not ok:
-                # 착수 안 됨(born-cancelled — kill barrier 경합). 완료 정산은
-                # _gate_reject의 finished(cancelled=N)가 이미 발행했다.
-                # rearm/무장/폴링 등 착수 전제 후속 작업은 전부 생략한다.
-                return self.jobset(jobset_id)
-            # handler 재무장 — 재실행 job의 진행 상태 리셋 (새 실행에서
-            # start/end 주기가 다시 돌게). 착수 확정 후에 해야 취소된 제출의
-            # terminal 레코드에 _PENDING 핸들러가 남지 않는다.
-            self.handlers.rearm(jobset_id, keys)
-            # post_process 무장 — 착수 확정 후. 먼저 무장하면 게이트/취소
-            # 창에서 이전 실행의 terminal 레코드로 오발화한다.
-            if post_process is not None:
-                self._post_process[jobset_id] = post_process
-            if opts.auto_poll:                    # AUTO-1
-                self.start_polling(jobset_id, opts.poll_interval_s)
-        else:
-            # 게이트 경로 — rearm/무장/폴링은 게이트 통과(pre_submit_finished
-            # True) 후에 한다: 거부되면 재실행이 없는데 rearm하면 terminal
-            # 레코드에 _PENDING 핸들러가 남아 end 핸들러가 중복 발화하고,
-            # post_process는 이전 실행의 낡은 레코드로 발화한다
-            self._pending_rearm[jobset_id] = keys
-            if opts.auto_poll:
-                self._pending_autopoll[jobset_id] = opts.poll_interval_s
-            if post_process is not None:
-                self._pending_post_process[jobset_id] = post_process
-            ok = self.submitter.resubmit_existing(jobset_id, keyed, opts,
-                                                  pre_submit=pre_submit)
-            if not ok:
-                # born-cancelled — 게이트가 아예 시작되지 않아 pre_submit_*
-                # 신호도 없다. 보류분이 영구 잔류하지 않게 즉시 정리한다.
-                # (완료 정산은 finished(cancelled=N)로 이미 발행됨)
-                self._pending_rearm.pop(jobset_id, None)
-                self._pending_autopoll.pop(jobset_id, None)
-                self._pending_post_process.pop(jobset_id, None)
+        ok = self.submitter.resubmit_existing(jobset_id, keyed, opts,
+                                              pre_submit=pre_submit,
+                                              arm_token=token)
+        if not ok:
+            # 착수 안 됨(shutdown/born-cancelled — kill barrier 경합).
+            # records_reset/gate_rejected 어느 신호도 오지 않으므로 보류분을
+            # 여기서 정리한다. (born-cancelled의 완료 정산은 _gate_reject의
+            # finished(cancelled=N)가 이미 발행했다)
+            ent = self._pending_arm.get(jobset_id)
+            if ent is not None and ent[0] is token:
+                self._pending_arm.pop(jobset_id, None)
         return self.jobset(jobset_id)
+
+    def _on_records_reset(self, jsid: str, token: object) -> None:
+        """[main] submitter가 레코드 리셋을 마친 직후(착수 확정) — 이 사이클의
+        보류분(rearm/post_process/AUTO-1)을 무장한다. 리셋 완료 후라 폴링
+        tick이 봐도 레코드는 이미 SUBMITTING — 옛 terminal 오발화 창이 없다.
+        token 불일치(다른 사이클의 낡은 신호)면 무시한다."""
+        ent = self._pending_arm.get(jsid)
+        if ent is None or ent[0] is not token:
+            return
+        self._pending_arm.pop(jsid, None)
+        _tok, keys, pp, interval = ent
+        if keys:
+            self.handlers.rearm(jsid, keys)
+        if pp is not None:
+            self._post_process[jsid] = pp
+        if interval is not None:
+            self.start_polling(jsid, interval)     # AUTO-1
+
+    def _on_gate_rejected(self, jsid: str, token: object) -> None:
+        """[main] 게이트가 착수 없이 끝남(거부/예외/통과 직후 취소/shutdown) —
+        이 사이클의 보류분을 폐기한다. token 불일치면 다른 사이클의 낡은
+        신호이므로 무시(새 사이클의 보류분을 파괴하지 않는다)."""
+        ent = self._pending_arm.get(jsid)
+        if ent is None or ent[0] is not token:
+            return
+        self._pending_arm.pop(jsid, None)
 
     @staticmethod
     def _record_to_item(r: JobRecord):
@@ -872,16 +876,23 @@ class LsfJobManager(QObject):
             # 아래 local_close_jobset 검사를 통과해 버린다 — 게이트가 통과하면
             # '닫힌 jobset'에 실제 LSF job이 제출되므로(merge와 동일 가드)
             # 진행 중 submit/kill이 있으면 close를 거부한다.
-            raise CloseNotAllowedError(
-                f"{jobset_id}: submit/kill 진행 중에는 close할 수 없습니다",
-                jobset_id=jobset_id)
+            # force=True(강제 종결 계약)면 거부 대신 진행 중 제출을 취소시키고
+            # 진행한다 — RETRY_WAIT 장기 backoff 중에도 강제 정리가 가능해야
+            # 한다 (LSF에 이미 제출된 job의 정리는 caller 책임).
+            if not force:
+                raise CloseNotAllowedError(
+                    f"{jobset_id}: submit/kill 진행 중에는 close할 수 없습니다"
+                    f" (force=True로 강제 가능 — 진행 중 제출은 취소됨)",
+                    jobset_id=jobset_id)
+            self.submitter.cancel_submit(jobset_id)
+            self.submitter.abort_retries(jobset_id)
         js = self.jobsets.local_close_jobset(jobset_id, force=force,
                                        run_bgdel=False)   # 실패 시 여기서 예외
         self.polling.stop_polling(jobset_id)
         self.handlers.remove_all(jobset_id)
         self._poll_intervals.pop(jobset_id, None)
         self._post_process.pop(jobset_id, None)
-        self._pending_post_process.pop(jobset_id, None)
+        self._pending_arm.pop(jobset_id, None)
         self._invalidate_handle(jobset_id)
         if js.lsf_group_paths:
             paths = list(js.lsf_group_paths)

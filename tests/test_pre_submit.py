@@ -197,7 +197,7 @@ def test_gate_autopoll_deferred_until_pass(qtbot, manager, fake_lsf):
                             pre_submit=lambda c: True)
     qtbot.wait(50)
     assert js.id in manager._poll_intervals          # 통과 후 start_polling됨
-    assert js.id not in manager._pending_autopoll     # pending 소진
+    assert js.id not in manager._pending_arm          # pending 소진
     # 폴링 워커 경유 1회 조회로 RUN 반영 확인
     fake_lsf.set_all("RUN")
     with qtbot.waitSignal(manager.jobset_updated, timeout=10000):
@@ -212,7 +212,7 @@ def test_gate_reject_no_autopoll(qtbot, manager, fake_lsf):
                             pre_submit=lambda c: False)
     qtbot.wait(100)
     # 거부됐으므로 polling이 켜지지 않아 pending/interval 모두 비어야 함
-    assert js.id not in manager._pending_autopoll
+    assert js.id not in manager._pending_arm
     assert js.id not in manager._poll_intervals
 
 
