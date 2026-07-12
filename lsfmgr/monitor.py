@@ -100,14 +100,18 @@ class JobsetQuerier:
             return st
 
         # lookup은 folded array의 _aggregate_elements(비쌈)를 포함하므로 target당
-        # 한 번만 계산해 캐시한다. 초기 None(리프트오버)만 아래 bjobs 재조회 뒤
-        # 채워질 수 있어 그때 다시 lookup한다 — 이미 해소된 대다수 레코드의
-        # 재집계(매 폴링 2배 CPU)를 없앤다.
+        # 한 번만 계산해 캐시한다. 단, 아래 by-id 재조회(leftover_ids)는 그
+        # job_id의 **전 element**를 새로 가져오므로, 같은 job_id를 공유하는
+        # 이미-resolved 레코드(형제 element)도 최신 데이터가 도착한다 — 그
+        # job_id는 재조회 뒤 다시 lookup해야 stale(직전 probe값)을 안 쓴다.
+        # (첫 probe로 완결돼 job_id가 재조회 대상이 아닌 대다수 레코드만 캐시로
+        #  재집계를 없앤다 — perf는 유지, 형제 staleness는 제거.)
         resolved: Dict[int, Optional[JobStatus]] = {id(r): lookup(r)
                                                      for r in targets}
         leftover_ids = sorted({r.job_id for r in targets
                                if r.job_id is not None
                                and resolved[id(r)] is None})
+        refreshed_ids = set(leftover_ids)   # by-id 재조회로 최신화될 job_id들
         # chunk 단위 실패 격리 (bhist와 대칭) — 한 chunk의 실패가 전역
         # probe_failed로 뭉개지면 성공 chunk에서 부재 확인된 job의 LOST
         # 확정까지 jobset 전체가 보류된다. 실패 chunk의 job만 보류한다.
@@ -118,7 +122,7 @@ class JobsetQuerier:
 
         # --- 3) 상태 반영 + bjobs 미발견분은 bhist fallback (FR-4.3) ---
         # 이 사이클은 시작 시점 스냅샷(targets) 기반이고 bjobs 왕복 동안 수 초가
-        # 흐른다 — 그 사이 레코드가 바뀌었으면(resubmit_jobs의 리셋→재제출 등)
+        # 흐른다 — 그 사이 레코드가 바뀌었으면(재제출(submit)의 리셋→재제출 등)
         # 스냅샷 기준 갱신이 새 job_id/상태를 옛 값으로 되돌린다. guard(CAS)로
         # "스냅샷과 동일할 때만" 전이시키고, 밀린 갱신은 다음 사이클에 맡긴다.
         def unchanged(rec: JobRecord):
@@ -135,7 +139,9 @@ class JobsetQuerier:
         collect_clusters = self.command.config.collect_clusters
         for rec in targets:
             st = resolved[id(rec)]
-            if st is None:               # 초기 None — 리프트오버 재조회분 반영
+            # 초기 None(리프트오버)이거나, 같은 job_id가 by-id로 재조회됐으면
+            # (형제 element가 유발) 최신 데이터를 반영하려 다시 lookup한다.
+            if st is None or rec.job_id in refreshed_ids:
                 st = lookup(rec)
             if st is None:
                 missing.append(rec)

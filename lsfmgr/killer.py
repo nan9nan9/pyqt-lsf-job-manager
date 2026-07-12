@@ -47,6 +47,12 @@ class Killer(QObject):
         self._active: Dict[str, List[List[int]]] = {}
         self._active_lock = threading.Lock()
         self._shutdown = False
+        # _shutdown 체크와 _pool.start를 원자화한다 — 없으면 kill 스레드가
+        # _shutdown=False를 읽은 직후 shutdown()이 _shutdown=True + waitForDone
+        # 으로 pool을 비워버린 뒤 task가 start돼 아무도 join 못 하는 worker가
+        # 뜬다(CS-8). shutdown()도 이 락 아래에서 플래그를 세운다.
+        # 락 순서: _shutdown_lock → _active_lock(_reg) (역순 금지).
+        self._shutdown_lock = threading.Lock()
 
     def is_active(self, jobset_id: str) -> bool:
         """이 jobset에 진행 중인 kill이 있는지 (pull)."""
@@ -100,16 +106,17 @@ class Killer(QObject):
         진행 스냅샷 등록(_reg)은 여기(호출 스레드)에서 한다 — 반환 시점에
         is_killing()/kill_snapshot()이 즉시 True/값을 주도록 (caller가 직후
         발행하는 kill_started와 pull API가 일치해야 한다)."""
-        if self._shutdown:
-            # shutdown 후 새 kill worker는 아무도 join하지 않는다 (CS-8).
-            # False 반환 — caller가 kill_started를 발화하지 않게(started/finished
-            # 짝 계약: task를 안 띄웠으니 kill_finished도 안 온다).
-            log.warning("shutdown 후 kill 요청 무시: %s", jobset_id)
-            return False
-        slot = self._reg(jobset_id)
-        self._pool.start(_KillTask(
-            self, jobset_id=jobset_id, only_state=only_state, verify=verify,
-            envpath=envpath, scope=scope, slot=slot))
+        with self._shutdown_lock:            # 체크+start 원자화 (shutdown 경합)
+            if self._shutdown:
+                # shutdown 후 새 kill worker는 아무도 join하지 않는다 (CS-8).
+                # False 반환 — caller가 kill_started를 발화하지 않게(started/
+                # finished 짝 계약: task를 안 띄웠으니 kill_finished도 안 온다).
+                log.warning("shutdown 후 kill 요청 무시: %s", jobset_id)
+                return False
+            slot = self._reg(jobset_id)
+            self._pool.start(_KillTask(
+                self, jobset_id=jobset_id, only_state=only_state,
+                verify=verify, envpath=envpath, scope=scope, slot=slot))
         return True
 
     def kill_jobs(self, job_ids: Sequence, *, verify: bool = False,
@@ -117,17 +124,21 @@ class Killer(QObject):
         """job_ids: int(job 전체) 또는 "id[idx]" 문자열(array element 1개).
         envpath 지정 시 그 LSF env를 source한 bkill (MC forward job — 클러스터별로
         나눠 각 envpath로 호출). 반환: task를 실제 띄웠으면 True(shutdown 무시=False)."""
-        if self._shutdown:
-            log.warning("shutdown 후 kill_jobs 요청 무시")
-            return False
-        slot = self._reg(jobset_id)
-        self._pool.start(_KillTask(
-            self, jobset_id=jobset_id, job_ids=list(job_ids), verify=verify,
-            envpath=envpath, slot=slot))
+        with self._shutdown_lock:            # 체크+start 원자화 (shutdown 경합)
+            if self._shutdown:
+                log.warning("shutdown 후 kill_jobs 요청 무시")
+                return False
+            slot = self._reg(jobset_id)
+            self._pool.start(_KillTask(
+                self, jobset_id=jobset_id, job_ids=list(job_ids),
+                verify=verify, envpath=envpath, slot=slot))
         return True
 
     def shutdown(self) -> None:
-        self._shutdown = True
+        # 플래그를 락 아래에서 세운다 — kill_jobset/kill_jobs의 체크+start와
+        # 직렬화돼, waitForDone 이후 task가 start되는 창을 닫는다.
+        with self._shutdown_lock:
+            self._shutdown = True
         self._pool.waitForDone(-1)
 
 

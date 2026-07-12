@@ -7,8 +7,11 @@
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, fields
 from typing import Any, Dict, Optional, Tuple
+
+log = logging.getLogger("lsfmgr.options")   # 모듈 로거 (코드베이스 관례)
 
 # ----------------------------------------------------------------------
 # 옵션 카탈로그 — 적용 계층별 키 집합 (§1.2 표와 1:1)
@@ -184,11 +187,10 @@ def _validate(key: str, value: Any) -> Any:
 def validate_options(kwargs: Dict[str, Any], *, allowed: frozenset,
                      where: str) -> Dict[str, Any]:
     """키 집합 검증(OPT-2) + 값 검증(OPT-3) 후 정규화된 dict 반환."""
-    import logging
     out: Dict[str, Any] = {}
     for key, value in kwargs.items():
         if key in DEPRECATED_KEYS:
-            logging.getLogger("lsfmgr.manager").warning(
+            log.warning(
                 "%s: 옵션 %r은 v9에서 제거됨 — 무시합니다", where, key)
             continue
         if key not in allowed:
