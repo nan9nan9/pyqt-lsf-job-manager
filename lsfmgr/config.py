@@ -104,16 +104,20 @@ class LsfConfig:
             raise ValueError("progress_min_step_ratio는 0~1")
         # poll_interval_s/submit_timeout_s도 여기서 검증한다 — 안 하면
         # LsfConfig(poll_interval_s=0) 같은 값이 통과해, auto_poll 시
-        # start_polling(0.0)이 큐드 Qt slot 안에서 ValueError를 던져 앱이
-        # 죽는다(options/manager-kwarg 경로에만 있던 검증을 config에도 정렬).
+        # start_polling(0.0)이 큐드 Qt slot 안에서 ValueError를 던져 앱이 죽는다.
+        # 단, LsfConfig는 저수준 dataclass이므로 **구조적 불변식(양수)만** 강제한다
+        # — runtime 가드(start_polling의 `if eff <= 0`)와 정합. 5~60 같은 UX 정책
+        # 범위는 상위 options/manager-kwarg 계층(options._validate_option)의 몫이다.
+        # 여기서 5~60을 강제하면 poll_interval_s=2(빠른 로컬 폴링) 같은 정당한
+        # 저수준 사용을 막고, 이전에 통과하던 config를 생성 시점에 죽인다(회귀).
+        if self.poll_interval_s is None or float(self.poll_interval_s) <= 0:
+            raise ValueError(
+                f"poll_interval_s는 양수 (got {self.poll_interval_s!r})")
         self.poll_interval_s = float(self.poll_interval_s)
-        if not 5.0 <= self.poll_interval_s <= 60.0:
+        if self.submit_timeout_s is None or float(self.submit_timeout_s) <= 0:
             raise ValueError(
-                f"poll_interval_s는 5~60 (got {self.poll_interval_s})")
+                f"submit_timeout_s는 양수 (got {self.submit_timeout_s!r})")
         self.submit_timeout_s = float(self.submit_timeout_s)
-        if self.submit_timeout_s <= 0:
-            raise ValueError(
-                f"submit_timeout_s는 양수 (got {self.submit_timeout_s})")
 
 
 def cmd_tokens(path: CmdPath) -> List[str]:

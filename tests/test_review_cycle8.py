@@ -85,13 +85,18 @@ def test_cluster_preserved_on_format_downgrade(qtbot, fake_lsf, tmp_path):
 # C8-3: LsfConfig가 poll_interval_s를 생성 시점에 검증한다 (Qt slot에서 죽지 않게)
 # ----------------------------------------------------------------------
 def test_config_validates_poll_interval():
+    # LsfConfig는 저수준 dataclass — 구조 불변식(양수)만 강제한다.
+    # 5~60 정책 범위는 상위 options 계층의 몫(여기서 강제하면 poll=2 같은
+    # 정당한 저수준 값을 죽여 하위호환이 깨진다 — 사이클 9에서 좁힘).
     with pytest.raises(ValueError):
-        LsfConfig(poll_interval_s=0)
+        LsfConfig(poll_interval_s=0)             # 0/음수 = runtime 가드 위반
     with pytest.raises(ValueError):
-        LsfConfig(poll_interval_s=100)           # 5~60 밖
+        LsfConfig(poll_interval_s=-1)
     with pytest.raises(ValueError):
         LsfConfig(submit_timeout_s=0)
-    # 정상 범위는 통과
+    # 양수면 통과 — 5~60 밖(2, 100)도 저수준에선 허용
+    LsfConfig(poll_interval_s=2)
+    LsfConfig(poll_interval_s=100)
     LsfConfig(poll_interval_s=10, submit_timeout_s=30)
 
 
@@ -123,16 +128,22 @@ def test_find_jobs_skips_deleted_jobset(store):
 
 
 # ----------------------------------------------------------------------
-# C8-5: bhist "Exited with exit code 0"은 성공(DONE)으로 분류 (실패 아님)
+# C8-5→C9: bhist "Exited"는 exit code와 무관하게 EXIT — LSF 분류가 권위다.
+#          "Exited with exit code 0"(kill/requeue-exit)을 DONE으로 바꾸면
+#          죽인/실패 job이 성공으로 감춰진다(사이클 9에서 EXIT로 되돌림·동결).
+#          정상 완료는 "Done successfully"로 온다.
 # ----------------------------------------------------------------------
-def test_bhist_exit_code_zero_is_done():
+def test_bhist_exited_stays_exit_regardless_of_code():
     from lsfmgr.command import LsfCommand
     out = (
+        "Job <100>, User <u>, ...\n"
+        "  ... Done successfully. The CPU time used is 1.0 seconds.\n"
         "Job <101>, User <u>, ...\n"
         "  ... Exited with exit code 0. The CPU time used is 1.0 seconds.\n"
         "Job <102>, User <u>, ...\n"
         "  ... Exited with exit code 7. The CPU time used is 1.0 seconds.\n"
     )
     res = LsfCommand._parse_bhist(out)
-    assert res[(101, None)] == (JobState.DONE, 0)   # code 0 → DONE
-    assert res[(102, None)] == (JobState.EXIT, 7)   # code!=0 → EXIT
+    assert res[(100, None)] == (JobState.DONE, 0)   # 정상 완료만 DONE
+    assert res[(101, None)] == (JobState.EXIT, 0)   # "Exited" → EXIT (code 0도)
+    assert res[(102, None)] == (JobState.EXIT, 7)

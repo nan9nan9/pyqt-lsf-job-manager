@@ -594,12 +594,15 @@ class LsfCommand:
                 result[cur] = (JobState.DONE, 0)
             elif "Exited with exit code" in line:
                 m2 = re.search(r"exit code (\d+)", line)
-                code = int(m2.group(1)) if m2 else None
-                # exit code 0은 성공이다 — 일부 LSF 빌드/requeue-exit 설정은
-                # 정상 종료를 "Exited with exit code 0"으로 낸다. 이를 EXIT
-                # (is_failed=True)로 두면 성공 job이 실패로 오분류된다.
-                result[cur] = ((JobState.DONE, 0) if code == 0
-                               else (JobState.EXIT, code))
+                # LSF의 "Exited" 분류가 권위다 — 정상 완료는 "Done successfully"
+                # 로 온다(위 분기). "Exited with exit code 0"은 kill(SIGTERM 후
+                # exit 0)·requeue-exit 등 비정상 종료라, exit code가 0이어도
+                # EXIT로 둔다(숫자 코드로 LSF의 분류를 뒤집지 않는다). 코드 0을
+                # DONE으로 바꾸면 죽였거나 실패한 job이 '정상 완료'로 감춰진다
+                # ─ 실패를 성공으로 오분류하는 쪽이 더 위험하다.
+                # (사이클 8에서 DONE으로 바꿨다가 사이클 9에서 되돌림 — 동결)
+                result[cur] = (JobState.EXIT,
+                               int(m2.group(1)) if m2 else None)
             elif "Exited" in line and cur not in result:
                 result[cur] = (JobState.EXIT, None)
         return result
