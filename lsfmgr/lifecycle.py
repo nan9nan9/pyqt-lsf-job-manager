@@ -17,6 +17,8 @@ register()는 거부된다.
 from __future__ import annotations
 
 import threading
+
+from .util import ledger_add, ledger_remove
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
@@ -50,7 +52,7 @@ class SubmitGate:
         with self._lock:
             if self._barriers.get(jobset_id):
                 return None
-            self._activities.setdefault(jobset_id, []).append(act)
+            ledger_add(self._activities, jobset_id, act)
         return act
 
     def unregister(self, jobset_id: str, act: _Activity) -> None:
@@ -58,15 +60,7 @@ class SubmitGate:
         equality 매칭(remove)은 겹친 활동의 필드가 우연히 같으면 남의
         등록을 지울 수 있다."""
         with self._lock:
-            acts = self._activities.get(jobset_id)
-            if not acts:
-                return
-            for i, a in enumerate(acts):
-                if a is act:
-                    del acts[i]
-                    break
-            if not acts:
-                del self._activities[jobset_id]
+            ledger_remove(self._activities, jobset_id, act)
 
     def kill_scope(self, jobset_id: str) -> "KillScope":
         return KillScope(self, jobset_id)

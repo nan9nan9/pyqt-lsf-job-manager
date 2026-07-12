@@ -870,8 +870,8 @@ class LsfJobManager(QObject):
         전원 terminal이 아니면 예외 — polling/핸들은 건드리지 않고 유지.
         LSF group 정리(bgdel)는 worker 스레드에서 비동기 수행 (QT-1)."""
         jobset_id = self._jsid(jobset_id)
-        if (self.submitter.is_active(jobset_id)
-                or self.killer.is_active(jobset_id)):
+        was_submitting = self.submitter.is_active(jobset_id)
+        if was_submitting or self.killer.is_active(jobset_id):
             # pre_submit 게이트 대기 중엔 레코드가 아직 전원 terminal이라
             # 아래 local_close_jobset 검사를 통과해 버린다 — 게이트가 통과하면
             # '닫힌 jobset'에 실제 LSF job이 제출되므로(merge와 동일 가드)
@@ -896,8 +896,26 @@ class LsfJobManager(QObject):
         self._invalidate_handle(jobset_id)
         if js.lsf_group_paths:
             paths = list(js.lsf_group_paths)
-            self._misc_pool.start(_CallTask(
-                lambda: [self.command.bgdel(p) for p in paths]))
+            if was_submitting:
+                # in-flight bsub가 있었다 — bgdel을 그 제출이 멎은 뒤로 미룬다.
+                # cancel_submit은 비블로킹이라 워커가 bsub를 완주해 job을
+                # 만들 수 있는데, 그 전에 bgdel하면 방금 지운 그룹에 job이
+                # 들어가 고아가 된다(kill의 cancel→quiesce→정리와 동일 규칙).
+                # kill barrier(scope)로 제출 정지까지 대기한 뒤 bgdel한다 —
+                # 전부 worker에서 수행해 main(QT-1)을 막지 않는다.
+                scope = self._gate.kill_scope(jobset_id)
+
+                def _quiesce_bgdel():
+                    scope.acquire()          # 진행 중 제출 취소 + 정지 대기
+                    try:
+                        for p in paths:
+                            self.command.bgdel(p)
+                    finally:
+                        scope.release()
+                self._misc_pool.start(_CallTask(_quiesce_bgdel))
+            else:
+                self._misc_pool.start(_CallTask(
+                    lambda: [self.command.bgdel(p) for p in paths]))
 
     def list_jobsets(self) -> List[JobSetRecord]:
         """[sync, snapshot] 현재 세션의 JobSet 목록."""
@@ -1021,6 +1039,11 @@ class LsfJobManager(QObject):
         except LsfmgrError:
             return                       # jobset이 이미 사라짐(merge/close 등)
         self.jobset_updated.emit(jsid, summary)
+        # 제출 시점에 이미 전원 terminal인 경우(예: bsub 전량 거부 → 전원
+        # SUBMIT_FAILED)는 폴링 tick의 _maybe_post_process가 ctx.finished
+        # 확정 전 창에 걸려 post_process를 놓칠 수 있다(is_active 방어에 막힘).
+        # ctx가 확정된 이 시점(submit_finished)에 한 번 더 확인해 유실을 막는다.
+        self._maybe_post_process(jsid)
 
     def _emit_updates_after_kill(self, jsid: str, report) -> None:
         """kill 완료 시 상태 반영을 update Signal로 발화. optimistic 정책이면

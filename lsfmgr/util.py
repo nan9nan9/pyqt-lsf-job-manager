@@ -69,3 +69,28 @@ class EmitThrottler:
                 self._last_done = done
                 return True
             return False
+
+
+# ----------------------------------------------------------------------
+# 활동 원장 헬퍼 — "jobset_id → 항목 리스트"의 identity 기준 추가/제거.
+# killer(kill별 진행 slot)와 lifecycle.SubmitGate(submit 활동)가 공유한다.
+# caller가 자신의 lock을 쥔 채 호출한다(각자 다른 lock/공유 상태라 lock은 주입
+# 안 함). list.remove(equality)는 겹친 항목의 값이 우연히 같으면([0,0] 등)
+# 남의 항목을 지우므로 반드시 identity(is)로 제거한다.
+# ----------------------------------------------------------------------
+def ledger_add(table: dict, key: str, item) -> None:
+    """dict-of-lists에 항목 추가 (caller가 lock 보유)."""
+    table.setdefault(key, []).append(item)
+
+
+def ledger_remove(table: dict, key: str, item) -> None:
+    """identity 기준 제거 + 빈 리스트가 되면 키 삭제 (caller가 lock 보유, 멱등)."""
+    lst = table.get(key)
+    if not lst:
+        return
+    for i, x in enumerate(lst):
+        if x is item:
+            del lst[i]
+            break
+    if not lst:
+        del table[key]

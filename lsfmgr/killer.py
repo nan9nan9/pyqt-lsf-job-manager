@@ -18,7 +18,7 @@ from .qt import QObject, QRunnable, QThreadPool, Signal
 from .reports import KillProgress, KillReport
 from .states import JobState
 from .store.base import JobSetStore
-from .util import EmitThrottler
+from .util import EmitThrottler, ledger_add, ledger_remove
 
 log = logging.getLogger("lsfmgr.kill")
 
@@ -69,7 +69,7 @@ class Killer(QObject):
             return None
         slot = [0, 0]
         with self._active_lock:
-            self._active.setdefault(jobset_id, []).append(slot)
+            ledger_add(self._active, jobset_id, slot)
         return slot
 
     def _set_progress(self, slot: Optional[List[int]],
@@ -85,15 +85,7 @@ class Killer(QObject):
         if slot is None:
             return
         with self._active_lock:
-            slots = self._active.get(jobset_id)
-            if not slots:
-                return
-            for i, s in enumerate(slots):
-                if s is slot:
-                    del slots[i]
-                    break
-            if not slots:
-                del self._active[jobset_id]
+            ledger_remove(self._active, jobset_id, slot)
 
     # ------------------------------------------------------------------
     def kill_jobset(self, jobset_id: str, *,

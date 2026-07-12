@@ -292,20 +292,31 @@ class BulkSubmitter(QObject):
                 if rec is not None:
                     reset_recs.append(rec)
                 launch.append((key, item))
-            # 리셋된 SUBMITTING 즉시 발행 — 완료를 안 기다리고 표에 반영
+            # 리셋된 SUBMITTING 즉시 발행 — 완료를 안 기다리고 표에 반영.
+            # user slot 예외를 격리한다(CS-5): 여기서 전파되면 do_launch가
+            # 죽어 ctx가 미완으로 고착되고 jobset이 영구 잠긴다.
             if reset_recs:
-                self.jobs_changed.emit(jobset_id, reset_recs)
-            # 리셋 완료 = 착수 확정 — manager가 이 시점에 rearm/무장/AUTO-1을
-            # 한다(그 전에 하면 옛 terminal 레코드로 오발화하는 창이 생긴다)
-            self.records_reset.emit(jobset_id, ctx.arm_token)
+                self._safe_emit(self.jobs_changed, jobset_id, reset_recs)
             for key, item in launch:
                 ctx.pool.start(self._make_resubmit_task(ctx, key, item))
+            # **착수 확정** = 레코드 리셋 + task 큐잉 완료. 이 시점에만 manager가
+            # rearm/post_process 무장/AUTO-1 폴링을 한다. 앞 단계에서 예외로
+            # 여기 못 오면 무장이 안 돼(실패 finalizer가 gate_rejected로 정리),
+            # 옛 terminal 레코드로 오발화하거나 SUBMITTING 고착 없이 마무리된다.
+            self._safe_emit(self.records_reset, jobset_id, ctx.arm_token)
             if not launch:
                 QTimer.singleShot(0,
                                   lambda: self._finish_if_done(ctx, force=True))
 
         if pre_submit is None:
-            do_launch()
+            # 게이트 경로와 대칭으로 래핑 — do_launch가(주로 store 장애/드문
+            # pool.start 예외로) 죽어도 ctx를 미완으로 두지 않고 실패 확정한다.
+            # (게이트 경로는 _GateTask.run이 같은 목적으로 래핑한다)
+            try:
+                do_launch()
+            except Exception as e:               # noqa: BLE001 — CS-5
+                log.exception("제출 착수 실패: %s", jobset_id)
+                self._gate_fail(ctx, [], repr(e))
             return True
         # 게이트 경로 — 리셋 **이전**에 검사하므로 False/예외면 레코드 원상
         # 유지 (make_failed=[]: 예외 시에도 새 레코드를 만들지 않는다 —
@@ -645,6 +656,15 @@ class BulkSubmitter(QObject):
             duration_s=time.monotonic() - ctx.started_at,
             fail_reasons=dict(ctx.fail_reasons))
 
+    @staticmethod
+    def _safe_emit(signal, *args) -> None:
+        """Signal 발화 중 user slot 예외를 격리한다 (CS-5) — do_launch 등
+        착수 경로에서 전파되면 ctx가 미완으로 고착돼 jobset이 잠긴다."""
+        try:
+            signal.emit(*args)
+        except Exception:                    # noqa: BLE001
+            log.exception("signal slot 예외(무시)")
+
     def _drop_ctx(self, ctx: _SubmitContext) -> None:
         if ctx.gate_token is not None:       # 게이트 활동 종료 (멱등)
             self._gate.unregister(ctx.jobset_id, ctx.gate_token)
@@ -655,7 +675,12 @@ class BulkSubmitter(QObject):
     def _gate_reject(self, ctx: _SubmitContext, finish: bool) -> None:
         """게이트 False/취소 — 제출하지 않음(레코드 미생성 → 요약은 N CREATED
         유지). finish=True일 때만 submit_finished(cancelled=N)를 발화한다
-        (False 반환은 config.submit_finished_on_gate_reject, 취소는 항상 True)."""
+        (False 반환은 config.submit_finished_on_gate_reject, 취소는 항상 True).
+        착수가 없었으므로 gate_rejected로 manager의 보류 무장분을 정리한다."""
+        # gate_rejected(무장 정리)를 finished보다 **먼저** 발화한다 — 같은
+        # 스레드에서 queued될 때 manager가 finished(submit 완료) 처리 전에
+        # _pending_arm을 비우도록 (착수가 없었으니 무장분은 폐기돼야 한다).
+        self._safe_emit(self.gate_rejected, ctx.jobset_id, ctx.arm_token)
         with ctx.lock:
             if ctx.finished:
                 return
@@ -670,22 +695,41 @@ class BulkSubmitter(QObject):
 
     def _gate_fail(self, ctx: _SubmitContext, failed_records: list,
                    msg: str) -> None:
-        """게이트 예외 — 전원 SUBMIT_FAILED 레코드 + error + finished(항상)."""
+        """게이트/착수 예외 — 실패 확정. 리셋됐지만 착수 못 한 SUBMITTING
+        레코드를 SUBMIT_FAILED로 되돌려 고착을 막고(비게이트 do_launch 예외
+        대비), error + finished + gate_rejected(무장 정리)로 마무리한다."""
         try:
             created = self.store.store_add_jobs(failed_records)
             if created:
                 self.jobs_changed.emit(ctx.jobset_id, list(created))
         except Exception:                    # noqa: BLE001 — CS-5
             log.exception("게이트 실패 레코드 생성 실패: %s", ctx.jobset_id)
+        # 리셋만 되고 착수 못 한 SUBMITTING 레코드 un-stick — 안 하면 재제출
+        # 가드(활성 job)에 걸려 jobset이 잠긴다. (실행 중 task가 있으면 그
+        # task의 전이가 우선 — 이미 PEND/EXIT면 SUBMITTING이 아니라 건너뜀)
+        stuck = []
+        try:
+            for r in self.store.get_jobs(ctx.jobset_id):
+                if r.state is JobState.SUBMITTING:
+                    nr = self.store.transition(
+                        ctx.jobset_id, r.job_key, JobState.SUBMIT_FAILED,
+                        fail_reason="LAUNCH_FAILED", fail_message=msg[:4000])
+                    if nr is not None:
+                        stuck.append(nr)
+        except Exception:                    # noqa: BLE001 — CS-5
+            log.exception("착수 실패 레코드 정리 실패: %s", ctx.jobset_id)
+        if stuck:
+            self._safe_emit(self.jobs_changed, ctx.jobset_id, stuck)
         self.error.emit(ctx.jobset_id, f"pre_submit: {msg}")
+        # gate_rejected를 finished보다 먼저 (무장 정리 우선 — _gate_reject 주석)
+        self._safe_emit(self.gate_rejected, ctx.jobset_id, ctx.arm_token)
         with ctx.lock:
-            if ctx.finished:
-                return
-            ctx.finished = True
-            ctx.failed = ctx.total
-            ctx.fail_reasons["PRE_SUBMIT_FAILED"] = ctx.total
-            report = self._make_report(ctx)
-            self.finished.emit(ctx.jobset_id, report)
+            if not ctx.finished:
+                ctx.finished = True
+                ctx.failed = ctx.total
+                ctx.fail_reasons["PRE_SUBMIT_FAILED"] = ctx.total
+                report = self._make_report(ctx)
+                self.finished.emit(ctx.jobset_id, report)
         self._drop_ctx(ctx)
 
 
@@ -707,10 +751,11 @@ class _GateTask(QRunnable):
 
     def run(self):
         sub, ctx = self.submitter, self.ctx
+        # 착수 없는 모든 종료 경로의 gate_rejected(무장 정리)는 _gate_reject/
+        # _gate_fail이 발행한다 — 여기서 중복 emit하지 않는다.
         sub.pre_submit_started.emit(ctx.jobset_id)
         if sub._shutdown or ctx.cancel_event.is_set():
             sub.pre_submit_finished.emit(ctx.jobset_id, False)
-            sub.gate_rejected.emit(ctx.jobset_id, ctx.arm_token)
             sub._gate_reject(ctx, finish=True)      # 취소 — 항상 finished
             return
         try:
@@ -718,7 +763,6 @@ class _GateTask(QRunnable):
         except Exception as e:                       # noqa: BLE001 — CS-5
             log.exception("pre_submit 게이트 예외: %s", ctx.jobset_id)
             sub.pre_submit_finished.emit(ctx.jobset_id, False)
-            sub.gate_rejected.emit(ctx.jobset_id, ctx.arm_token)
             sub._gate_fail(ctx, self.make_failed(repr(e)[:4000]), repr(e))
             return
         if ok and (ctx.cancel_event.is_set() or sub._shutdown):
@@ -726,12 +770,10 @@ class _GateTask(QRunnable):
             # rearm/AUTO-1 폴링 재개를 수행해, 재실행이 없는데 terminal
             # 레코드의 최종 핸들러가 중복 발화한다. False로 강등해 알린다.
             sub.pre_submit_finished.emit(ctx.jobset_id, False)
-            sub.gate_rejected.emit(ctx.jobset_id, ctx.arm_token)
             sub._gate_reject(ctx, finish=True)
             return
         sub.pre_submit_finished.emit(ctx.jobset_id, ok)
         if not ok:
-            sub.gate_rejected.emit(ctx.jobset_id, ctx.arm_token)
             sub._gate_reject(
                 ctx, finish=sub.config.submit_finished_on_gate_reject)
             return
