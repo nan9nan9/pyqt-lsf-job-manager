@@ -63,7 +63,24 @@ class LsfJobManager(QObject):
     """Facade — 컴포넌트 조립 + Facade Signal + JobSet 핸들 발급."""
 
     # --- Low-level Facade Signal (v6 유지, 모두 jobset_id 포함) ---
-    submit_started = Signal(str)               # jobset_id (게이트 통과 후)
+    #
+    # [submit 신호 계약] submit 시도 1건은 반드시 submit_finished로 끝난다
+    # (shutdown/closed 등 접수 자체가 거부된 경우는 제외 — 아무 신호도 없다).
+    # 하지만 submit_started는 **실제 착수(게이트 통과 후 do_launch)에서만** 발화
+    # 하므로, finished 앞에 submit_started가 항상 오지는 않는다:
+    #   - 정상 착수:        submit_started → … → submit_finished
+    #   - 게이트 거부/예외:  pre_submit_started → pre_submit_finished(False) →
+    #                        submit_finished   (submit_started 없음 — 거부는
+    #                        pre_submit_finished(False)가 알린다)
+    #   - born-cancelled:   submit_started → submit_finished(cancelled)
+    #                        (게이트를 건너뛰어 pre_submit_* 가 없으므로,
+    #                         finished가 신호 없이 홀로 나가지 않도록 최소 짝을 낸다)
+    # ⇒ '진행 중 submit'을 추적하는 구독자는 submit_started/submit_finished를
+    #    단순 카운터로 세면 안 된다(경로에 따라 카운터가 음수로 샌다). jobset_id를
+    #    **집합**에 넣고(submit_started 또는 pre_submit_started에서 add) finished
+    #    에서 discard하라 — 집합은 없는 키 discard/중복 add에 안전해 모든 경로에서
+    #    정확하다.
+    submit_started = Signal(str)               # jobset_id (착수 or born-cancelled)
     pre_submit_started = Signal(str)                # jobset_id — pre_submit 게이트 시작
     pre_submit_finished = Signal(str, bool)         # jobset_id, ok — 게이트 종료(True=통과)
     post_processing_started = Signal(str)               # jobset_id — 전원 terminal 후처리 시작
@@ -484,6 +501,13 @@ class LsfJobManager(QObject):
                 ids.append(f"{r.job_id}[{r.array_index}]"
                            if r.array_index is not None else r.job_id)
         else:
+            # 원시 id 경로 — caller가 문자열을 그대로 넘긴다. array element를
+            # "id[idx]"로 지정하는데 그 array를 monitor가 (id, None) 단일
+            # 레코드로 접은 상태면, verify는 element 단위 생사를 판정할 수 없어
+            # (집계 레코드=여러 element의 합) 그 target을 잔존 집계에서 제외한다.
+            # 즉 접힌 array의 특정 element만 겨냥한 raw kill은 verify가 과소집계
+            # 할 수 있다 — 접힌 array는 bare id(전체)로 kill·verify하거나,
+            # jobset+job_key 경로(위)를 쓰면 안전하다(None 레코드에 bare id 생성).
             ids = list(job_ids_or_jobset)
             jsid = (self._jsid(jobset_id)
                     if jobset_id is not None else "")
