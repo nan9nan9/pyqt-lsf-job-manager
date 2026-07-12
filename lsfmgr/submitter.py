@@ -258,6 +258,14 @@ class BulkSubmitter(QObject):
             # _gate_reject가 같은 일(cancelled=total 일괄 + finished 1회 +
             # _drop_ctx)을 O(1)로 한다 — 건당 _count 루프는 대형 재제출에서
             # main 스레드가 O(N)회 lock/신호 발화를 하게 되므로 금지.
+            #
+            # started/finished 짝: born-cancelled는 게이트를 통째로 건너뛰므로
+            # pre_submit_* 신호도, do_launch의 started도 나가지 않는다. 그대로면
+            # 아무 착수 신호 없이 finished(cancelled)만 나가 started↔finished를
+            # 쌍으로 세는 구독자(스피너/제출버튼 게이팅)의 카운터가 음수로
+            # 내려간다. 게이트가 실행되지 않아 순서 충돌이 없으니 finished 직전에
+            # started를 내 최소 짝(started→finished)을 맞춘다.
+            self._safe_emit(self.started, jobset_id)
             self._gate_reject(ctx, finish=True)
             return False
         def do_launch():

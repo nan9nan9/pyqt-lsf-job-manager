@@ -505,17 +505,16 @@ class _KillTask(QRunnable):
             log.warning("kill verify 조회 실패: %s", e)
             return -1
 
-        # element/범위 target의 parent id 집합 — array_index=None 레코드
-        # (비array job, 또는 monitor가 단일 레코드로 접은 경우)는 "그 job 전체"
-        # 이므로 parent id가 어느 target에든 걸리면 잔존으로 센다(과소집계 방지).
-        target_pids = ({pid for pid, _i in exact}
-                       | {pid for pid, _l, _h in ranges})
-
+        # element/범위 target은 (job_id, array_index)로 정확 매칭한다.
+        # array_index=None 레코드(비array job, 또는 monitor가 array를 접은
+        # 집계 레코드)는 그 자체가 "여러 element의 합"이라 특정 element target으로
+        # 잔존 여부를 판정할 수 없다 — 형제 element를 잔존으로 과대집계하지 않도록
+        # element/범위 target에는 걸지 않는다. 전체 kill(bare id, whole)만 집계.
         def _hit(r) -> bool:
             if r.job_id in whole:                # bare id — element 전부 포함
                 return True
-            if r.array_index is None:            # array_index 없는 레코드 = 그 job 전체
-                return r.job_id in target_pids
+            if r.array_index is None:            # 집계/비array 레코드 — element 판정 불가
+                return False
             if (r.job_id, r.array_index) in exact:
                 return True
             return any(r.job_id == pid and lo <= r.array_index <= hi

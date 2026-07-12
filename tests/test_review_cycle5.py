@@ -92,14 +92,17 @@ def test_kill_started_only_when_queued(qtbot, fake_lsf, config):
 
 
 # ----------------------------------------------------------------------
-# C5-4 (kill verify): array_index=None 레코드도 element target 잔존으로 집계
+# C5-4 (kill verify): array_index=None 레코드는 element target으로 판정하지
+#       않는다 — 집계/비array 레코드를 특정 element로 잔존 집계하면 형제를
+#       과대집계한다(사이클 6에서 되돌림). 전체 kill(bare id)만 집계.
+#       (사이클 6 C6-1이 실제 회귀 시나리오를 추가로 검증)
 # ----------------------------------------------------------------------
-def test_verify_none_array_index_counted(qtbot, manager, fake_lsf):
+def test_verify_none_array_index_not_element_matched(qtbot, manager, fake_lsf):
     from lsfmgr.killer import _KillTask
     from tests.fake_lsf import FakeJob
     js = manager.create_jobset(intended_count=1)
     jsid = js.id
-    # array_index=None인 RUN 레코드 (비array/collapsed) — target은 "500[3]"
+    # array_index=None인 RUN 레코드 (비array/collapsed)
     manager.store.store_add_jobs([JobRecord(
         job_id=500, array_index=None, jobset_id=jsid,
         lsf_job_name=f"{jsid}_0", state=JobState.RUN, command="r")])
@@ -107,7 +110,7 @@ def test_verify_none_array_index_counted(qtbot, manager, fake_lsf):
         job_id=500, array_index=None, name=f"{jsid}_0", group=None,
         queue="q", command="r", stat="RUN")   # verify 재조회에서 RUN 유지
     t = _KillTask(manager.killer, jobset_id=jsid)
-    assert t._verify({"500[3]"}) == 1              # None 레코드 = 그 job 전체
-    assert t._verify({"500[3-5]"}) == 1
-    assert t._verify({"500"}) == 1
+    assert t._verify({"500[3]"}) == 0              # element target — 집계 레코드 판정 불가
+    assert t._verify({"500[3-5]"}) == 0            # 범위 target — 동일
+    assert t._verify({"500"}) == 1                 # 전체 kill(bare id)만 집계
     assert t._verify({"999[1]"}) == 0              # 다른 job은 안 셈

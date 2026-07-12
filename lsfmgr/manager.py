@@ -800,8 +800,10 @@ class LsfJobManager(QObject):
                                         opts.poll_interval_s
                                         if opts.auto_poll else None)
         # submit_started는 submitter가 실제 착수 지점(do_launch)에서 발화한다
-        # (submitter.started → submit_started 릴레이) — shutdown/born-cancelled로
-        # 착수 못 하면 발화 안 돼 started/finished 짝이 깨지지 않는다.
+        # (submitter.started → submit_started 릴레이). shutdown은 started/finished
+        # 둘 다 안 나가 짝이 유지되고, born-cancelled는 finished를 내므로 짝을
+        # 맞추려 started도 함께 낸다(submitter가 담당) — 어느 경우든 started↔
+        # finished 쌍이 깨지지 않는다.
         ok = self.submitter.resubmit_existing(jobset_id, keyed, opts,
                                               pre_submit=pre_submit,
                                               arm_token=token)
