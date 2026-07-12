@@ -110,7 +110,7 @@ def test_verify_none_array_index_not_element_matched(qtbot, manager, fake_lsf):
         job_id=500, array_index=None, name=f"{jsid}_0", group=None,
         queue="q", command="r", stat="RUN")   # verify 재조회에서 RUN 유지
     t = _KillTask(manager.killer, jobset_id=jsid)
-    assert t._verify({"500[3]"}) == 0              # element target — 집계 레코드 판정 불가
-    assert t._verify({"500[3-5]"}) == 0            # 범위 target — 동일
-    assert t._verify({"500"}) == 1                 # 전체 kill(bare id)만 집계
-    assert t._verify({"999[1]"}) == 0              # 다른 job은 안 셈
+    assert t._verify({"500[3]"})[0] == 0              # element target — 집계 레코드 판정 불가
+    assert t._verify({"500[3-5]"})[0] == 0            # 범위 target — 동일
+    assert t._verify({"500"})[0] == 1                 # 전체 kill(bare id)만 집계
+    assert t._verify({"999[1]"})[0] == 0              # 다른 job은 안 셈

@@ -33,10 +33,10 @@ def test_verify_collapsed_array_not_element_overcounted(qtbot, manager, fake_lsf
     t = _KillTask(manager.killer, jobset_id=jsid)
     # element/범위 target으로는 집계 레코드를 잔존으로 세지 않는다(형제 과대집계 방지).
     # 집계 레코드는 '여러 element의 합'이라 특정 element의 생사를 판정할 수 없다.
-    assert t._verify({"8800[3]"}) == 0
-    assert t._verify({"8800[0-9]"}) == 0
+    assert t._verify({"8800[3]"})[0] == 0
+    assert t._verify({"8800[0-9]"})[0] == 0
     # 전체 kill(bare id)만 그 job을 잔존으로 집계한다.
-    assert t._verify({"8800"}) == 1
+    assert t._verify({"8800"})[0] == 1
 
 
 # ----------------------------------------------------------------------

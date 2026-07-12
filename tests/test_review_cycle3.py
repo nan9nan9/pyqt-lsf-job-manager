@@ -49,12 +49,12 @@ def test_verify_target_matching_unit(qtbot, manager, fake_lsf):
 
     t = _KillTask(manager.killer, jobset_id=js.id)
     # element 지정 — 그 element(1개)만
-    assert t._verify({f"{parent}[1]"}) == 1
-    assert t._verify({f"{parent}[1]", f"{parent}[3]"}) == 2
+    assert t._verify({f"{parent}[1]"})[0] == 1
+    assert t._verify({f"{parent}[1]", f"{parent}[3]"})[0] == 2
     # bare parent id — 같은 job_id 전 element(4개)
-    assert t._verify({str(parent)}) == 4
+    assert t._verify({str(parent)})[0] == 4
     # 대상 없음
-    assert t._verify(set()) == 0
+    assert t._verify(set())[0] == 0
 
 
 # ----------------------------------------------------------------------

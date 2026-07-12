@@ -11,7 +11,7 @@ from typing import (
     Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple,
 )
 
-from ..errors import JobNotFoundError
+from ..errors import JobNotFoundError, JobSetNotFoundError
 from ..states import JobRecord, JobSetRecord, JobState
 
 #: transition_many 입력 1건 — (job_key, new_state, guard, fields)
@@ -80,8 +80,15 @@ class JobSetStore(ABC):
             return []
         out: List[JobRecord] = []
         for js in self.list_jobsets():
-            out.extend(r for r in self.get_jobs(js.jobset_id)
-                       if r.job_id in job_ids)
+            # list_jobsets() 스냅샷과 get_jobs() 사이에 main 스레드가 그 jobset을
+            # close/merge로 지우면 get_jobs가 JobSetNotFoundError를 던진다 —
+            # 전역 kill worker에서 이게 전파되면 이미 성공한 bkill이 내부 오류로
+            # 오보된다. 사라진 jobset은 건너뛴다(그 job은 어차피 대상 밖).
+            try:
+                jobs = self.get_jobs(js.jobset_id)
+            except JobSetNotFoundError:
+                continue
+            out.extend(r for r in jobs if r.job_id in job_ids)
         return out
 
     @abstractmethod

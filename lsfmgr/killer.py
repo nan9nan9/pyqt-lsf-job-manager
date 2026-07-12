@@ -289,15 +289,23 @@ class _KillTask(QRunnable):
             if optimistic and not errors:
                 killed_recs = alive
 
+        # verify를 optimistic 마킹보다 **먼저** 한다. 먼저 EXIT로 찍으면 그
+        # 레코드가 재조회 대상(_ON_LSF)과 잔존 집계(is_on_lsf)에서 모두 빠져
+        # verify가 생존 job을 영영 못 보고 항상 0을 반환한다(verify 무력화).
+        # verify가 실측한 생존분(alive_keys)은 optimistic 마킹에서 제외해
+        # EXIT로 덮어 숨기지 않고 폴링/재kill에 남긴다.
+        still_alive: Optional[int] = None
+        alive_keys: set = set()
+        if self.verify and self.jobset_id:
+            still_alive, alive_keys = self._verify(verify_targets)
+
         # optimistic 정책: 확인된 job을 즉시 EXIT로 전이 (bjobs 대기 없이).
         # EXIT는 terminal이라 폴링 대상(is_on_lsf)에서 빠져 다시 조회되지 않는다.
         changed: List = []
         if optimistic and killed_recs:
-            changed = self._mark_exited(killed_recs)
-
-        still_alive: Optional[int] = None
-        if self.verify and self.jobset_id:
-            still_alive = self._verify(verify_targets)
+            to_mark = ([r for r in killed_recs if r.job_key not in alive_keys]
+                       if alive_keys else killed_recs)
+            changed = self._mark_exited(to_mark)
 
         return KillReport(
             jobset_id=self.jobset_id, requested=requested,
@@ -469,16 +477,17 @@ class _KillTask(QRunnable):
         strategies.append(name if matched else f"{name}(no-match)")
         return matched
 
-    def _verify(self, targets: set) -> int:
-        """재조회로 실제 종료 확인 (FR-3.3). kill 대상(targets: "id"/"id[idx]"/
-        "id[m-n]" 문자열) 중 아직 LSF에 잔존하는 job 수 반환 — 부분/개별
-        kill에서 대상 아닌 job은 세지 않는다. element 지정("id[idx]")은 그
-        element만, 범위("id[m-n]")는 그 범위 element만, bare id("id")는 그
-        job_id 전체를 센다. 파싱 불가한 target은 bare id로 관대 처리(강건성 —
-        예외로 kill_finished가 오보되지 않게). targets가 비면 0."""
+    def _verify(self, targets: set) -> Tuple[Optional[int], set]:
+        """재조회로 실제 종료 확인 (FR-3.3). 반환: (잔존 수, 잔존 job_key 집합).
+        kill 대상(targets: "id"/"id[idx]"/"id[m-n]" 문자열) 중 아직 LSF에
+        잔존하는 job을 센다 — 부분/개별 kill에서 대상 아닌 job은 세지 않는다.
+        element 지정("id[idx]")은 그 element만, 범위("id[m-n]")는 그 범위
+        element만, bare id("id")는 그 job_id 전체. 파싱 불가한 target은 bare
+        id로 관대 처리(강건성 — 예외로 kill_finished가 오보되지 않게).
+        targets가 비면 (0, set()), 조회 실패는 (None, set())=미검증."""
         k = self.killer
         if not targets:
-            return 0
+            return 0, set()
         exact: set = set()          # (job_id, array_index) — element 지정
         ranges: List[Tuple[int, int, int]] = []  # (job_id, lo, hi) — 범위 지정
         whole: set = set()          # job_id — bare id (비array/array 전체)
@@ -503,7 +512,9 @@ class _KillTask(QRunnable):
             k.querier.query(self.jobset_id)      # Store 갱신 목적 (반환값 미사용)
         except LsfmgrError as e:
             log.warning("kill verify 조회 실패: %s", e)
-            return -1
+            # 조회 실패는 '미확인'이다 — 수(-1 같은 센티넬)로 뭉개지 않는다.
+            # None을 caller가 KillReport.still_alive(None=미검증)로 그대로 전달.
+            return None, set()
 
         # element/범위 target은 (job_id, array_index)로 정확 매칭한다.
         # array_index=None 레코드(비array job, 또는 monitor가 array를 접은
@@ -523,4 +534,7 @@ class _KillTask(QRunnable):
         alive = [r for r in k.store.get_jobs(self.jobset_id)
                  if _hit(r) and r.state.is_on_lsf
                  and r.state not in (JobState.UNKWN, JobState.ZOMBI)]
-        return len(alive)
+        # 생존 수 + 생존 레코드의 job_key 집합을 함께 반환한다 — caller가
+        # optimistic EXIT 마킹에서 이 생존분을 제외해(EXIT로 덮어 숨기지
+        # 않도록) 폴링/재kill에 남긴다.
+        return len(alive), {r.job_key for r in alive}

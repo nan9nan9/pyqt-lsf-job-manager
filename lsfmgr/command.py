@@ -594,8 +594,12 @@ class LsfCommand:
                 result[cur] = (JobState.DONE, 0)
             elif "Exited with exit code" in line:
                 m2 = re.search(r"exit code (\d+)", line)
-                result[cur] = (JobState.EXIT,
-                               int(m2.group(1)) if m2 else None)
+                code = int(m2.group(1)) if m2 else None
+                # exit code 0은 성공이다 — 일부 LSF 빌드/requeue-exit 설정은
+                # 정상 종료를 "Exited with exit code 0"으로 낸다. 이를 EXIT
+                # (is_failed=True)로 두면 성공 job이 실패로 오분류된다.
+                result[cur] = ((JobState.DONE, 0) if code == 0
+                               else (JobState.EXIT, code))
             elif "Exited" in line and cur not in result:
                 result[cur] = (JobState.EXIT, None)
         return result

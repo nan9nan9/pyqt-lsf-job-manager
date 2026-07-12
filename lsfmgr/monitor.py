@@ -99,8 +99,15 @@ class JobsetQuerier:
                 return None
             return st
 
+        # lookup은 folded array의 _aggregate_elements(비쌈)를 포함하므로 target당
+        # 한 번만 계산해 캐시한다. 초기 None(리프트오버)만 아래 bjobs 재조회 뒤
+        # 채워질 수 있어 그때 다시 lookup한다 — 이미 해소된 대다수 레코드의
+        # 재집계(매 폴링 2배 CPU)를 없앤다.
+        resolved: Dict[int, Optional[JobStatus]] = {id(r): lookup(r)
+                                                     for r in targets}
         leftover_ids = sorted({r.job_id for r in targets
-                               if r.job_id is not None and lookup(r) is None})
+                               if r.job_id is not None
+                               and resolved[id(r)] is None})
         # chunk 단위 실패 격리 (bhist와 대칭) — 한 chunk의 실패가 전역
         # probe_failed로 뭉개지면 성공 chunk에서 부재 확인된 job의 LOST
         # 확정까지 jobset 전체가 보류된다. 실패 chunk의 job만 보류한다.
@@ -127,7 +134,9 @@ class JobsetQuerier:
         runtime_updates = self.command.config.poll_runtime_updates
         collect_clusters = self.command.config.collect_clusters
         for rec in targets:
-            st = lookup(rec)
+            st = resolved[id(rec)]
+            if st is None:               # 초기 None — 리프트오버 재조회분 반영
+                st = lookup(rec)
             if st is None:
                 missing.append(rec)
                 continue
@@ -139,13 +148,19 @@ class JobsetQuerier:
             # collect_clusters일 때만 비교·기록한다 — 안 그러면 이전 세션이
             # 채운 forward_cluster를 (수집 안 하는) 이번 세션 폴링이 st의 None으로
             # 덮어 데이터가 소실된다(store 주입/복원 시나리오).
+            # bjobs -o가 MC 필드를 거부해 FULL 포맷으로 저하되면 st의 cluster는
+            # None이 된다 — 이때 저장된 forward_cluster(non-None)를 None으로 덮으면
+            # MC forwarding 정보가 소실된다. cluster는 forward 시 한 번 set되고
+            # 되돌지 않으므로, st가 None이면 '판정 불가'로 보고 저장값을 보존한다.
+            src_changed = (collect_clusters and st.source_cluster is not None
+                           and st.source_cluster != rec.source_cluster)
+            fwd_changed = (collect_clusters and st.forward_cluster is not None
+                           and st.forward_cluster != rec.forward_cluster)
             if (st.state is not rec.state or st.exit_code != rec.exit_code
                     or st.start_time != rec.start_time
                     or st.finish_time != rec.finish_time
                     or st.working_dir != rec.working_dir
-                    or (collect_clusters
-                        and (st.source_cluster != rec.source_cluster
-                             or st.forward_cluster != rec.forward_cluster))
+                    or src_changed or fwd_changed
                     or (runtime_updates
                         and st.run_time_s != rec.run_time_s)):
                 fields = {
@@ -155,8 +170,11 @@ class JobsetQuerier:
                     "job_id": rec.job_id if rec.job_id is not None
                     else st.job_id}
                 if collect_clusters:     # 끄면 저장값 보존(덮지 않음)
-                    fields["source_cluster"] = st.source_cluster
-                    fields["forward_cluster"] = st.forward_cluster
+                    # st가 None(포맷 저하)이면 저장값 보존 — 소실 방지
+                    fields["source_cluster"] = (st.source_cluster
+                        if st.source_cluster is not None else rec.source_cluster)
+                    fields["forward_cluster"] = (st.forward_cluster
+                        if st.forward_cluster is not None else rec.forward_cluster)
                 update_specs.append(
                     (rec.job_key, st.state, unchanged(rec), fields))
 

@@ -89,10 +89,10 @@ def test_verify_range_target_parses(qtbot, manager, fake_lsf):
     js, parent = _array_jobset(manager, fake_lsf, n=6)
     from lsfmgr.killer import _KillTask
     t = _KillTask(manager.killer, jobset_id=js.id)
-    assert t._verify({f"{parent}[1-3]"}) == 3         # element 1,2,3
-    assert t._verify({f"{parent}[2-2]"}) == 1
-    assert t._verify({f"{parent}[9-9]"}) == 0         # 범위 밖
-    assert t._verify({"garbage[x]"}) == 0             # 파싱 불가 — 예외 없이 0
+    assert t._verify({f"{parent}[1-3]"})[0] == 3         # element 1,2,3
+    assert t._verify({f"{parent}[2-2]"})[0] == 1
+    assert t._verify({f"{parent}[9-9]"})[0] == 0         # 범위 밖
+    assert t._verify({"garbage[x]"})[0] == 0             # 파싱 불가 — 예외 없이 0
 
 
 # ----------------------------------------------------------------------
@@ -103,4 +103,4 @@ def test_whole_kill_verify_counts_resurrected_element(qtbot, manager, fake_lsf):
     from lsfmgr.killer import _KillTask
     t = _KillTask(manager.killer, jobset_id=js.id)
     # 전체 kill 경로의 verify_targets는 bare job_id
-    assert t._verify({str(parent)}) == 4              # 전 element 잔존 집계
+    assert t._verify({str(parent)})[0] == 4              # 전 element 잔존 집계

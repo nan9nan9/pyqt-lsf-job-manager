@@ -1059,10 +1059,7 @@ class LsfJobManager(QObject):
         resubmit kill 단계(EXIT 발행)가 공유한다. 파이프라인처럼 단계마다 표가
         갱신된다. (실패분은 _h_jobs_updated가 js.jobs_failed까지 중계)"""
         self.jobs_updated.emit(jsid, records)
-        try:
-            self.jobset_updated.emit(jsid, self.store.summary(jsid))
-        except LsfmgrError:
-            pass
+        self._emit_summary(jsid)
 
     def _emit_summary_after_submit(self, jsid: str, report) -> None:
         """submit 완료 시 최종 요약(jobset_updated)을 보장 발화 — 진행 중
@@ -1097,10 +1094,7 @@ class LsfJobManager(QObject):
         for j, recs in by_js.items():
             if recs:
                 self.jobs_updated.emit(j, recs)
-            try:
-                self.jobset_updated.emit(j, self.store.summary(j))
-            except LsfmgrError:
-                pass
+            self._emit_summary(j)
 
     def _handle_of(self, jobset_id: str) -> Optional[JobSet]:
         h = self._handles.get(jobset_id)

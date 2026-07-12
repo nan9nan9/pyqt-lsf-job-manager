@@ -646,12 +646,7 @@ class BulkSubmitter(QObject):
                 return
             ctx.finished = True
             batch, ctx.changed_buffer = ctx.changed_buffer, []
-            report = SubmitReport(
-                jobset_id=ctx.jobset_id, total=ctx.total,
-                succeeded=ctx.succeeded, failed=ctx.failed,
-                cancelled=ctx.cancelled, retried=len(ctx.retried_keys),
-                duration_s=time.monotonic() - ctx.started_at,
-                fail_reasons=dict(ctx.fail_reasons))
+            report = self._make_report(ctx)     # _gate_reject/_fail과 동일 구성
             # 마지막 전이분 flush → finished 를 같은 lock 안에서 순서대로 발화.
             # 모든 per-job jobs_changed도 ctx.lock 안에서 발화되므로, 락이
             # 직렬화해 finished가 반드시 마지막 per-job jobs_changed 뒤에
