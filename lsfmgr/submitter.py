@@ -262,6 +262,11 @@ class BulkSubmitter(QObject):
             return False
         def do_launch():
             log.info("submit 착수 %s: %d건", jobset_id, len(keyed))
+            # started(=submit_started)를 **실제 착수 지점**에서 발화한다 — 게이트
+            # 통과 후/비게이트 리셋 시작 직전. shutdown·born-cancelled로 do_launch에
+            # 도달 못 하면 started도 없어 'started만 나가고 finished가 영영 안 오는'
+            # 고아를 원천 차단한다 (started/finished 짝 계약).
+            self._safe_emit(self.started, jobset_id)
             # 기존 레코드 리셋 — 이전 실행의 흔적(job_id/exit_code/실행시간/
             # 위치)을 지우고 새 command 반영. 지우지 않으면 재제출 실패 시
             # 죽은 옛 job_id·이전 실행의 start/finish/working_dir가 잔존한다.
@@ -296,7 +301,7 @@ class BulkSubmitter(QObject):
             # 시작하기 전에 예외가 난다. 부분 착수(일부 task는 이미 실행 중인데
             # do_launch가 죽어 _gate_fail이 그 레코드를 SUBMIT_FAILED로 되돌리면
             # 실행 중 bsub가 고아가 된다)를 원천 차단한다.
-            tasks = [(key, self._make_resubmit_task(ctx, key, item))
+            tasks = [self._make_resubmit_task(ctx, key, item)
                      for key, item in launch]
             # 리셋된 SUBMITTING 즉시 발행 — 완료를 안 기다리고 표에 반영.
             # user slot 예외를 격리한다(CS-5): 전파되면 do_launch가 죽어 ctx가
@@ -310,7 +315,7 @@ class BulkSubmitter(QObject):
             # 판정(no-op)이 나는 유실을 막는다. (리셋은 위에서 끝나 레코드는
             # SUBMITTING — 옛 terminal 오발화 창도 없다. pool.start는 예외 없음)
             self._safe_emit(self.records_reset, jobset_id, ctx.arm_token)
-            for _key, task in tasks:
+            for task in tasks:
                 ctx.pool.start(task)
             if not launch:
                 QTimer.singleShot(0,
@@ -718,16 +723,26 @@ class BulkSubmitter(QObject):
         # SUBMIT_FAILED로 덮으면 그 LSF job이 고아가 된다).
         stuck = []
         try:
-            for r in self.store.get_jobs(ctx.jobset_id):
-                if r.state is JobState.SUBMITTING:
-                    nr = self.store.transition(
-                        ctx.jobset_id, r.job_key, JobState.SUBMIT_FAILED,
-                        guard=lambda cur: cur.state is JobState.SUBMITTING,
-                        fail_reason="LAUNCH_FAILED", fail_message=msg[:4000])
-                    if nr is not None:
-                        stuck.append(nr)
+            recs = self.store.get_jobs(ctx.jobset_id)
         except Exception:                    # noqa: BLE001 — CS-5
-            log.exception("착수 실패 레코드 정리 실패: %s", ctx.jobset_id)
+            log.exception("착수 실패 레코드 조회 실패: %s", ctx.jobset_id)
+            recs = []
+        for r in recs:
+            if r.state is not JobState.SUBMITTING:
+                continue
+            # 개별 transition을 각자 try로 — 한 key가 remove_job 경합으로
+            # JobNotFoundError를 던져도 루프가 통째로 죽어 나머지가 SUBMITTING에
+            # 갇히면(재제출 busy 가드에 걸려 영구 잠김) 안 된다. 그 key만 건너뛴다.
+            try:
+                nr = self.store.transition(
+                    ctx.jobset_id, r.job_key, JobState.SUBMIT_FAILED,
+                    guard=lambda cur: cur.state is JobState.SUBMITTING,
+                    fail_reason="LAUNCH_FAILED", fail_message=msg[:4000])
+                if nr is not None:
+                    stuck.append(nr)
+            except Exception:                # noqa: BLE001 — CS-5
+                log.exception("착수 실패 레코드 정리 실패 — 건너뜀: %s/%s",
+                              ctx.jobset_id, r.job_key)
         if stuck:
             self._safe_emit(self.jobs_changed, ctx.jobset_id, stuck)
         # user error 슬롯 예외 격리 — main 스레드 direct 연결에서 전파되면
@@ -789,7 +804,8 @@ class _GateTask(QRunnable):
             sub._gate_reject(
                 ctx, finish=sub.config.submit_finished_on_gate_reject)
             return
-        sub.started.emit(ctx.jobset_id)              # 게이트 통과 → 제출 착수
+        # started(submit_started)는 do_launch가 착수 지점에서 발화한다 — 여기서
+        # 중복 발화하지 않는다 (started/finished 짝 계약, 단일 발화점).
         try:
             self.do_launch()
         except Exception as e:                       # noqa: BLE001 — CS-5

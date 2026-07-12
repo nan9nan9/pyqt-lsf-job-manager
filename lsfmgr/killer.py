@@ -92,7 +92,7 @@ class Killer(QObject):
     def kill_jobset(self, jobset_id: str, *,
                     only_state: Optional[JobState] = None,
                     verify: bool = False, envpath: str = "",
-                    scope: Optional[object] = None) -> None:
+                    scope: Optional[object] = None) -> bool:
         """scope: KillScope (kill 우선권, manager가 SubmitGate로 배선).
         지정 시 worker에서 scope.acquire()로 barrier를 올려 진행 중 submit을
         취소·대기하고, kill 완료까지 새 submit 시작을 막는다.
@@ -101,26 +101,30 @@ class Killer(QObject):
         is_killing()/kill_snapshot()이 즉시 True/값을 주도록 (caller가 직후
         발행하는 kill_started와 pull API가 일치해야 한다)."""
         if self._shutdown:
-            # shutdown 후 새 kill worker는 아무도 join하지 않는다 (CS-8)
+            # shutdown 후 새 kill worker는 아무도 join하지 않는다 (CS-8).
+            # False 반환 — caller가 kill_started를 발화하지 않게(started/finished
+            # 짝 계약: task를 안 띄웠으니 kill_finished도 안 온다).
             log.warning("shutdown 후 kill 요청 무시: %s", jobset_id)
-            return
+            return False
         slot = self._reg(jobset_id)
         self._pool.start(_KillTask(
             self, jobset_id=jobset_id, only_state=only_state, verify=verify,
             envpath=envpath, scope=scope, slot=slot))
+        return True
 
     def kill_jobs(self, job_ids: Sequence, *, verify: bool = False,
-                  jobset_id: str = "", envpath: str = "") -> None:
+                  jobset_id: str = "", envpath: str = "") -> bool:
         """job_ids: int(job 전체) 또는 "id[idx]" 문자열(array element 1개).
         envpath 지정 시 그 LSF env를 source한 bkill (MC forward job — 클러스터별로
-        나눠 각 envpath로 호출)."""
+        나눠 각 envpath로 호출). 반환: task를 실제 띄웠으면 True(shutdown 무시=False)."""
         if self._shutdown:
             log.warning("shutdown 후 kill_jobs 요청 무시")
-            return
+            return False
         slot = self._reg(jobset_id)
         self._pool.start(_KillTask(
             self, jobset_id=jobset_id, job_ids=list(job_ids), verify=verify,
             envpath=envpath, slot=slot))
+        return True
 
     def shutdown(self) -> None:
         self._shutdown = True
@@ -501,13 +505,20 @@ class _KillTask(QRunnable):
             log.warning("kill verify 조회 실패: %s", e)
             return -1
 
+        # element/범위 target의 parent id 집합 — array_index=None 레코드
+        # (비array job, 또는 monitor가 단일 레코드로 접은 경우)는 "그 job 전체"
+        # 이므로 parent id가 어느 target에든 걸리면 잔존으로 센다(과소집계 방지).
+        target_pids = ({pid for pid, _i in exact}
+                       | {pid for pid, _l, _h in ranges})
+
         def _hit(r) -> bool:
             if r.job_id in whole:                # bare id — element 전부 포함
                 return True
+            if r.array_index is None:            # array_index 없는 레코드 = 그 job 전체
+                return r.job_id in target_pids
             if (r.job_id, r.array_index) in exact:
                 return True
-            return any(r.job_id == pid and r.array_index is not None
-                       and lo <= r.array_index <= hi
+            return any(r.job_id == pid and lo <= r.array_index <= hi
                        for pid, lo, hi in ranges)
 
         alive = [r for r in k.store.get_jobs(self.jobset_id)

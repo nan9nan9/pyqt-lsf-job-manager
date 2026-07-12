@@ -442,15 +442,18 @@ class LsfJobManager(QObject):
             self.submitter.cancel_submit(jobset_id)
             self.submitter.abort_retries(jobset_id)
             scope = self._gate.kill_scope(jobset_id)
-        self.killer.kill_jobset(jobset_id, only_state=only_state,
-                                verify=verify, envpath=envpath,
-                                scope=scope)
+        queued = self.killer.kill_jobset(jobset_id, only_state=only_state,
+                                         verify=verify, envpath=envpath,
+                                         scope=scope)
         # 접수 즉시(동기) 착수 통지 — quiesce(진행 중 bsub 완료 대기)로
         # kill_finished가 수십 초 늦어지는 케이스에서도 UI가 '접수됨'을
         # 바로 표시할 수 있다. killer.kill_jobset(동기 — 등록+task 큐잉만)
         # **이후**에 발행해야 kill_started slot에서 is_killing()/
         # kill_snapshot()을 pull해도 True/값이 나온다 (신호-pull 일치).
-        self.kill_started.emit(jobset_id)
+        # task를 실제 띄웠을 때만 — shutdown 경합으로 no-op이면 kill_finished도
+        # 안 오므로 kill_started를 발화하면 UI가 영구 'killing' 고착된다.
+        if queued:
+            self.kill_started.emit(jobset_id)
 
     def kill_jobs(self, job_ids_or_jobset, job_keys: Optional[Sequence[str]] = None, *,
                   jobset_id: Optional[str] = None,
@@ -484,9 +487,9 @@ class LsfJobManager(QObject):
             ids = list(job_ids_or_jobset)
             jsid = (self._jsid(jobset_id)
                     if jobset_id is not None else "")
-        self.killer.kill_jobs(ids, verify=verify,
-                              jobset_id=jsid or "", envpath=envpath)
-        if jsid:                         # jobset 컨텍스트가 있을 때만 착수 통지
+        queued = self.killer.kill_jobs(ids, verify=verify,
+                                       jobset_id=jsid or "", envpath=envpath)
+        if jsid and queued:              # jobset 컨텍스트 + 실제 큐잉일 때만
             self.kill_started.emit(jsid)   # killer 등록 후 (pull 일치)
 
     def create_jobset(self, commands: Sequence = (), *,
@@ -796,8 +799,9 @@ class LsfJobManager(QObject):
         self._pending_arm[jobset_id] = (token, keys, post_process,
                                         opts.poll_interval_s
                                         if opts.auto_poll else None)
-        if pre_submit is None:
-            self.submit_started.emit(jobset_id)
+        # submit_started는 submitter가 실제 착수 지점(do_launch)에서 발화한다
+        # (submitter.started → submit_started 릴레이) — shutdown/born-cancelled로
+        # 착수 못 하면 발화 안 돼 started/finished 짝이 깨지지 않는다.
         ok = self.submitter.resubmit_existing(jobset_id, keyed, opts,
                                               pre_submit=pre_submit,
                                               arm_token=token)
