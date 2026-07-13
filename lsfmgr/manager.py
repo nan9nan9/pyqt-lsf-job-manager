@@ -519,6 +519,7 @@ class LsfJobManager(QObject):
     def create_jobset(self, commands: Sequence = (), *,
                       merge_ids: Optional[Sequence[Optional[str]]] = None,
                       user_datas: Optional[Sequence[Optional[dict]]] = None,
+                      work_dir: Optional[str] = None,
                       work_dirs: Optional[Sequence[Optional[str]]] = None,
                       wrapper: bool = True,
                       label: str = "", tags: Sequence[str] = (),
@@ -545,10 +546,13 @@ class LsfJobManager(QObject):
         merge_ids: 각 job의 논리 키 — merge 시 같은 merge_id의 기존 job이
         이 내용으로 replace된다. jobset 내 유일해야 한다(None 제외).
         user_datas: job별 사용자 정의 dict (JSON 직렬화 가능) — 보존만.
+        work_dir: 이 jobset 전 job의 **기본** 제출 작업 디렉토리(단일 값).
+        work_dirs로 개별 지정되지 않은(None) job이 이 값을 쓴다.
         work_dirs: job별 제출 작업 디렉토리 — 제출 subprocess를 그 cwd에서
         실행한다(wrapper 경로도 적용; bsub -cwd를 못 주는 wrapper의 실행
-        디렉토리 지정 수단). None이면 부모(GUI) 프로세스의 cwd. 재제출에도 보존.
-        merge_ids/user_datas/work_dirs는 commands와 같은 길이(생략 시 전부 None).
+        디렉토리 지정 수단). 우선순위: work_dirs[i] > work_dir > None(부모 cwd).
+        재제출에도 보존. merge_ids/user_datas/work_dirs는 commands와 같은 길이
+        (생략 시 전부 None).
         commands가 비면 **빈 jobset** — 이후 merge로만 채운다.
         생성 즉시 jobs_updated/jobset_updated가 발행돼 표가 갱신된다."""
         if isinstance(tags, str):             # 편의: 단일 태그 문자열 허용
@@ -560,7 +564,8 @@ class LsfJobManager(QObject):
         if items:
             try:
                 records = self._build_job_records(
-                    jsid, items, merge_ids, user_datas, work_dirs, wrapper)
+                    jsid, items, merge_ids, user_datas,
+                    work_dir, work_dirs, wrapper)
                 out = self.jobsets.local_create_jobs(jsid, records)
             except BaseException:
                 # 검증 실패(길이 불일치·빈 커맨드·merge_id 중복 등) — 방금
@@ -574,9 +579,11 @@ class LsfJobManager(QObject):
     def _build_job_records(self, jsid: str, items: list,
                            merge_ids: Optional[Sequence[Optional[str]]],
                            user_datas: Optional[Sequence[Optional[dict]]],
+                           work_dir: Optional[str],
                            work_dirs: Optional[Sequence[Optional[str]]],
                            wrapper: bool) -> List[JobRecord]:
-        """commands → CREATED JobRecord 목록 (create_jobset 내부용)."""
+        """commands → CREATED JobRecord 목록 (create_jobset 내부용).
+        job별 submit_cwd 우선순위: work_dirs[i] > work_dir(기본) > None."""
         mids = list(merge_ids) if merge_ids is not None else [None] * len(items)
         uds = list(user_datas) if user_datas is not None else [None] * len(items)
         wds = list(work_dirs) if work_dirs is not None else [None] * len(items)
@@ -597,13 +604,14 @@ class LsfJobManager(QObject):
         for item, mid, ud, wd in zip(items, mids, uds, wds):
             key = f"{jsid}_{nxt}"
             nxt += 1
+            cwd = wd if wd is not None else work_dir   # per-job > jobset 기본
             if isinstance(item, JobSpec):
                 records.append(JobRecord(
                     job_id=None, array_index=None, jobset_id=jsid,
                     lsf_job_name=key, state=JobState.CREATED,
                     command=item.command, via_wrapper=False,
                     spec_json=spec_to_json(item), merge_id=mid, user_data=ud,
-                    submit_cwd=wd))
+                    submit_cwd=cwd))
                 continue
             if isinstance(item, str):
                 if not wrapper:
@@ -612,7 +620,7 @@ class LsfJobManager(QObject):
                         lsf_job_name=key, state=JobState.CREATED,
                         command=item, via_wrapper=False,
                         spec_json=spec_to_json(JobSpec(command=item)),
-                        merge_id=mid, user_data=ud, submit_cwd=wd))
+                        merge_id=mid, user_data=ud, submit_cwd=cwd))
                     continue
                 argv = shlex.split(item)
             else:
@@ -623,7 +631,7 @@ class LsfJobManager(QObject):
                 job_id=None, array_index=None, jobset_id=jsid,
                 lsf_job_name=key, state=JobState.CREATED,
                 command=shlex.join(argv), via_wrapper=True,
-                merge_id=mid, user_data=ud, submit_cwd=wd))
+                merge_id=mid, user_data=ud, submit_cwd=cwd))
         return records
 
     def set_user_data(self, jobset_id: str, ref, user_data: Optional[dict]

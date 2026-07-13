@@ -29,6 +29,31 @@ def test_work_dirs_set_submit_cwd(qtbot, manager):
 
 
 # ----------------------------------------------------------------------
+# jobset 단위 기본 work_dir — 전 job에 적용
+# ----------------------------------------------------------------------
+def test_jobset_default_work_dir_applies_to_all(qtbot, manager):
+    js = manager.create_jobset(
+        ["customwrapper_sub a.sp", "customwrapper_sub b.sp"],
+        work_dir="/scratch/common")
+    assert all(r.submit_cwd == "/scratch/common" for r in js.jobs())
+
+
+# ----------------------------------------------------------------------
+# per-job work_dirs가 jobset 기본 work_dir보다 우선 (지정 안 된 job만 기본값)
+# ----------------------------------------------------------------------
+def test_per_job_work_dirs_override_default(qtbot, manager):
+    js = manager.create_jobset(
+        ["customwrapper_sub a.sp", "customwrapper_sub b.sp",
+         "customwrapper_sub c.sp"],
+        work_dir="/scratch/common",
+        work_dirs=["/scratch/a", None, "/scratch/c"])
+    cwds = {r.command.split()[-1]: r.submit_cwd for r in js.jobs()}
+    assert cwds["a.sp"] == "/scratch/a"          # per-job 우선
+    assert cwds["b.sp"] == "/scratch/common"     # None → jobset 기본
+    assert cwds["c.sp"] == "/scratch/c"
+
+
+# ----------------------------------------------------------------------
 # 제출 subprocess가 그 work_dir을 cwd로 실행한다 (wrapper 경로)
 # ----------------------------------------------------------------------
 def test_submit_uses_work_dir_as_subprocess_cwd(qtbot, manager, fake_lsf):
