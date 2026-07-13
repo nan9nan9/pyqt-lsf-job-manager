@@ -15,7 +15,7 @@ from tests.conftest import submit_cmds
 
 def _gated_runner(fake: FakeLsf, gate: threading.Event):
     """bsub만 gate가 풀릴 때까지 붙잡는 runner — 제출을 in-flight로 유지."""
-    def runner(argv, timeout):
+    def runner(argv, timeout, cwd=None):
         prog = argv[0].rsplit("/", 1)[-1]
         if prog == "bsub":
             gate.wait(10)

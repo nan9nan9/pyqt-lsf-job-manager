@@ -162,7 +162,7 @@ def test_full_resubmit_clears_cluster(qtbot, mc_manager, fake_lsf):
 def test_double_field_error_degrades_to_core():
     from lsfmgr.command import LsfCommand, CommandResult
 
-    def runner(argv, timeout):
+    def runner(argv, timeout, cwd=None):
         fmt = argv[argv.index("-o") + 1]
         if "source_cluster" in fmt:
             return CommandResult(255, "", "bad field name: source_cluster\n")

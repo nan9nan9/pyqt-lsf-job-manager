@@ -14,7 +14,7 @@ from tests.conftest import submit_cmds
 
 def _gated_bkill_runner(fake: FakeLsf, gate: threading.Event):
     """bkill(및 tcsh 경유)만 gate가 풀릴 때까지 붙잡아 kill을 in-flight로 유지."""
-    def runner(argv, timeout):
+    def runner(argv, timeout, cwd=None):
         prog = argv[0].rsplit("/", 1)[-1]
         if prog in ("bkill", "tcsh"):
             gate.wait(10)

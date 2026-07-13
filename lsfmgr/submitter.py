@@ -84,13 +84,15 @@ class _BaseSubmitTask(QRunnable):
     """
 
     def __init__(self, submitter: "BulkSubmitter", ctx: _SubmitContext,
-                 job_key: str, attempt: int):
+                 job_key: str, attempt: int,
+                 submit_cwd: Optional[str] = None):
         super().__init__()
         self.setAutoDelete(True)
         self.submitter = submitter
         self.ctx = ctx
         self.job_key = job_key
         self.attempt = attempt          # 0 == 최초 시도
+        self.submit_cwd = submit_cwd    # 제출 subprocess의 작업 디렉토리(요청값)
 
     def run(self):
         try:
@@ -131,8 +133,9 @@ class _SubmitTask(_BaseSubmitTask):
     """bsub 1회 수행 worker (lsfmgr 가 -q/-J/-g 등 인자를 조립)."""
 
     def __init__(self, submitter: "BulkSubmitter", ctx: _SubmitContext,
-                 job_key: str, spec: JobSpec, attempt: int):
-        super().__init__(submitter, ctx, job_key, attempt)
+                 job_key: str, spec: JobSpec, attempt: int,
+                 submit_cwd: Optional[str] = None):
+        super().__init__(submitter, ctx, job_key, attempt, submit_cwd)
         self.spec = spec
 
     def _do_submit(self) -> int:
@@ -155,12 +158,14 @@ class _SubmitTask(_BaseSubmitTask):
             resources=self.spec.resources or opts.resource_req,
             outfile=outfile, errfile=errfile,
             extra_args=self.spec.extra_args, env=self.spec.env,
-            timeout_s=opts.submit_timeout_s)
+            timeout_s=opts.submit_timeout_s,
+            cwd=self.submit_cwd)             # 요청 작업 디렉토리(없으면 부모 cwd)
 
     def _retry_factory(self):
-        sub, ctx, job_key, spec = (self.submitter, self.ctx,
-                                   self.job_key, self.spec)
-        return lambda att: _SubmitTask(sub, ctx, job_key, spec, att)
+        sub, ctx, job_key, spec, cwd = (self.submitter, self.ctx,
+                                        self.job_key, self.spec,
+                                        self.submit_cwd)
+        return lambda att: _SubmitTask(sub, ctx, job_key, spec, att, cwd)
 
 
 class _WrapperSubmitTask(_BaseSubmitTask):
@@ -172,18 +177,21 @@ class _WrapperSubmitTask(_BaseSubmitTask):
     """
 
     def __init__(self, submitter: "BulkSubmitter", ctx: _SubmitContext,
-                 job_key: str, argv: Sequence[str], attempt: int):
-        super().__init__(submitter, ctx, job_key, attempt)
+                 job_key: str, argv: Sequence[str], attempt: int,
+                 submit_cwd: Optional[str] = None):
+        super().__init__(submitter, ctx, job_key, attempt, submit_cwd)
         self.argv = list(argv)
 
     def _do_submit(self) -> int:
         return self.submitter.command.run_submit(
-            self.argv, timeout_s=self.ctx.options.submit_timeout_s)
+            self.argv, timeout_s=self.ctx.options.submit_timeout_s,
+            cwd=self.submit_cwd)             # wrapper는 -cwd 대신 subprocess cwd
 
     def _retry_factory(self):
-        sub, ctx, job_key, argv = (self.submitter, self.ctx,
-                                   self.job_key, self.argv)
-        return lambda att: _WrapperSubmitTask(sub, ctx, job_key, argv, att)
+        sub, ctx, job_key, argv, cwd = (self.submitter, self.ctx,
+                                        self.job_key, self.argv,
+                                        self.submit_cwd)
+        return lambda att: _WrapperSubmitTask(sub, ctx, job_key, argv, att, cwd)
 
 
 class BulkSubmitter(QObject):
@@ -304,13 +312,16 @@ class BulkSubmitter(QObject):
                     continue
                 if rec is not None:
                     reset_recs.append(rec)
-                launch.append((key, item))
+                # submit_cwd는 리셋이 건드리지 않아 rec에 보존된다 — task로
+                # 실어 subprocess cwd로 쓴다(rec None인 드문 경우만 부모 cwd).
+                launch.append((key, item,
+                               rec.submit_cwd if rec is not None else None))
             # task 객체를 **먼저 전부** 만든다 — 생성이 실패하면 어느 task도
             # 시작하기 전에 예외가 난다. 부분 착수(일부 task는 이미 실행 중인데
             # do_launch가 죽어 _gate_fail이 그 레코드를 SUBMIT_FAILED로 되돌리면
             # 실행 중 bsub가 고아가 된다)를 원천 차단한다.
-            tasks = [self._make_resubmit_task(ctx, key, item)
-                     for key, item in launch]
+            tasks = [self._make_resubmit_task(ctx, key, item, cwd)
+                     for key, item, cwd in launch]
             # 리셋된 SUBMITTING 즉시 발행 — 완료를 안 기다리고 표에 반영.
             # user slot 예외를 격리한다(CS-5): 전파되면 do_launch가 죽어 ctx가
             # 미완으로 고착되고 jobset이 영구 잠긴다.
@@ -354,10 +365,10 @@ class BulkSubmitter(QObject):
         return item.command if isinstance(item, JobSpec) else shlex.join(item)
 
     def _make_resubmit_task(self, ctx: _SubmitContext, key: str,
-                            item) -> QRunnable:
+                            item, submit_cwd: Optional[str] = None) -> QRunnable:
         if isinstance(item, JobSpec):
-            return _SubmitTask(self, ctx, key, item, 0)
-        return _WrapperSubmitTask(self, ctx, key, item, 0)
+            return _SubmitTask(self, ctx, key, item, 0, submit_cwd)
+        return _WrapperSubmitTask(self, ctx, key, item, 0, submit_cwd)
 
     def is_active(self, jobset_id: str) -> bool:
         """해당 jobset에 아직 끝나지 않은 submit 사이클이 있는지 (resubmit_jobs 가드)."""

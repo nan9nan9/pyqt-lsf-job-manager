@@ -27,7 +27,7 @@ def config(tmp_path):
 # ----------------------------------------------------------------------
 def test_bkill_argv_with_envpath():
     calls = []
-    def runner(argv, timeout):
+    def runner(argv, timeout, cwd=None):
         calls.append(argv)
         return CommandResult(0, "Job <100> is being terminated\n", "")
     cmd = LsfCommand(LsfConfig(), runner)
@@ -39,7 +39,7 @@ def test_bkill_argv_with_envpath():
 def test_bkill_argv_array_element_noglob():
     """array element("id[idx]")는 대괄호가 tcsh globbing되지 않게 set noglob."""
     calls = []
-    def runner(argv, timeout):
+    def runner(argv, timeout, cwd=None):
         calls.append(argv)
         return CommandResult(0, "Job <1000[2]> is being terminated\n", "")
     cmd = LsfCommand(LsfConfig(), runner)
@@ -51,7 +51,7 @@ def test_bkill_argv_array_element_noglob():
 
 def test_bkill_argv_no_envpath_plain():
     calls = []
-    def runner(argv, timeout):
+    def runner(argv, timeout, cwd=None):
         calls.append(argv); return CommandResult(0, "", "")
     cmd = LsfCommand(LsfConfig(), runner)
     cmd.bkill_targets(["100"])                       # envpath 없음

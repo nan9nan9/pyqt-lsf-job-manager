@@ -26,7 +26,7 @@ class GatedBsub:
         self.gate = threading.Event()        # set 전까지 bsub 블록
         self.entered = threading.Event()     # 첫 bsub 진입 통지
 
-    def __call__(self, argv, timeout):
+    def __call__(self, argv, timeout, cwd=None):
         if argv[0].rsplit("/", 1)[-1] == "bsub":
             self.entered.set()
             self.gate.wait(10)

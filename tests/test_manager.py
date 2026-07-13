@@ -96,7 +96,7 @@ def test_event_loop_not_blocked_during_bulk_submit(qtbot, fake_lsf):
     # bsub마다 5ms 걸리는 느린 LSF 시뮬레이션
     original = fake_lsf.__call__
 
-    def slow_runner(argv, timeout):
+    def slow_runner(argv, timeout, cwd=None):
         time.sleep(0.005)
         return original(argv, timeout)
 

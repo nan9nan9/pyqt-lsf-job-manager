@@ -170,7 +170,7 @@ def test_fetch_job_detail_signal_on_broken_bhist(qtbot, fake_lsf, config):
     from dataclasses import replace as dc_replace
     cfg = dc_replace(config, bhist_path="/nonexistent/bhist")
 
-    def runner(argv, timeout):
+    def runner(argv, timeout, cwd=None):
         # bhist만 실제 subprocess처럼 FileNotFoundError — 나머지는 FakeLsf
         if argv[0] == "/nonexistent/bhist":
             raise FileNotFoundError(2, "No such file or directory", argv[0])

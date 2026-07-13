@@ -29,14 +29,19 @@ class CommandResult:
     stderr: str
 
 
-# runner 시그니처: (argv, timeout_s) -> CommandResult
-Runner = Callable[[Sequence[str], float], CommandResult]
+# runner 시그니처: (argv, timeout_s, cwd) -> CommandResult
+# cwd: 제출(bsub/wrapper) 시 subprocess를 실행할 작업 디렉토리(None=부모 cwd).
+# 커스텀 runner를 주입하는 경우 이 3번째 인자를 받아야 한다(하위호환 계약 변경).
+Runner = Callable[[Sequence[str], float, Optional[str]], CommandResult]
 
 
-def default_runner(argv: Sequence[str], timeout: float) -> CommandResult:
-    """기본 runner — subprocess.run (shell 미경유)."""
+def default_runner(argv: Sequence[str], timeout: float,
+                   cwd: Optional[str] = None) -> CommandResult:
+    """기본 runner — subprocess.run (shell 미경유).
+    cwd 지정 시 그 디렉토리에서 실행한다 — 자식 프로세스에만 적용돼
+    동시 제출 worker 간 경합이 없다(os.chdir 같은 프로세스 전역 변경 금지)."""
     proc = subprocess.run(
-        list(argv), capture_output=True, text=True, timeout=timeout)
+        list(argv), capture_output=True, text=True, timeout=timeout, cwd=cwd)
     return CommandResult(proc.returncode, proc.stdout, proc.stderr)
 
 
@@ -212,10 +217,12 @@ class LsfCommand:
         """chunk_args의 base_len 예약치 — wrapper(다중 토큰)의 총 길이."""
         return sum(len(t) + 1 for t in cmd_tokens(path))
 
-    def _run(self, argv: Sequence[str], timeout: float) -> CommandResult:
-        """runner 호출 + NFR-6 DEBUG 로깅 (명령 원문/stdout/stderr)."""
-        log.debug("실행: %s", " ".join(argv))
-        res = self.runner(argv, timeout)
+    def _run(self, argv: Sequence[str], timeout: float,
+             cwd: Optional[str] = None) -> CommandResult:
+        """runner 호출 + NFR-6 DEBUG 로깅 (명령 원문/stdout/stderr).
+        cwd는 제출 경로만 넘긴다(bjobs/bkill은 None → 부모 cwd)."""
+        log.debug("실행: %s (cwd=%s)", " ".join(argv), cwd)
+        res = self.runner(argv, timeout, cwd)
         log.debug("rc=%d stdout=%r stderr=%r", res.returncode,
                   res.stdout[:500], res.stderr[:500])
         return res
@@ -232,8 +239,10 @@ class LsfCommand:
              errfile: Optional[str] = None,
              extra_args: Sequence[str] = (),
              env: Optional[Sequence[Tuple[str, str]]] = None,
-             timeout_s: Optional[float] = None) -> int:
+             timeout_s: Optional[float] = None,
+             cwd: Optional[str] = None) -> int:
         """bsub 실행 후 'Job <id>' 파싱하여 job_id 반환.
+        cwd 지정 시 그 디렉토리에서 bsub를 실행한다(LSF 기본 실행 cwd가 됨).
 
         실패 시 SubmitError(fail_reason=...) — FR-2.1 실패 분류:
         BSUB_TIMEOUT / BSUB_EXIT_<rc> / NO_JOBID_PARSED
@@ -246,7 +255,7 @@ class LsfCommand:
                                extra_args=extra_args, env=env)
         try:
             res = self._run(argv, timeout_s if timeout_s is not None
-                            else self.config.submit_timeout_s)
+                            else self.config.submit_timeout_s, cwd=cwd)
         except subprocess.TimeoutExpired:
             raise SubmitError("bsub timeout", fail_reason="BSUB_TIMEOUT")
 
@@ -261,7 +270,7 @@ class LsfCommand:
                                  resources=resources,
                                  outfile=outfile, errfile=errfile,
                                  extra_args=extra_args, env=env,
-                                 timeout_s=timeout_s)
+                                 timeout_s=timeout_s, cwd=cwd)
             raise SubmitError(
                 f"bsub exit {res.returncode}: {res.stderr.strip()[:200]}",
                 fail_reason=f"BSUB_EXIT_{res.returncode}",
@@ -309,8 +318,10 @@ class LsfCommand:
     # wrapper 제출 — wrapper 커맨드를 '그대로' 실행하고 job_id 만 파싱
     # ------------------------------------------------------------------
     def run_submit(self, argv: Sequence[str],
-                   timeout_s: Optional[float] = None) -> int:
+                   timeout_s: Optional[float] = None,
+                   cwd: Optional[str] = None) -> int:
         """wrapper 커맨드(argv)를 조립 없이 그대로 실행하고 'Job <id>' 파싱.
+        cwd 지정 시 그 디렉토리에서 실행한다(wrapper→bsub가 그 cwd를 상속).
 
         lsfmgr 가 -q/-J/-g 등을 붙이지 않는다 — argv 전체가 사용자가 준 wrapper
         커맨드(예: ["customwrapper_sub", "-i", "a.sp"])다. 실패 분류(FR-2.1):
@@ -320,7 +331,7 @@ class LsfCommand:
         """
         to = timeout_s if timeout_s is not None else self.config.submit_timeout_s
         try:
-            res = self._run(list(argv), to)
+            res = self._run(list(argv), to, cwd=cwd)
         except subprocess.TimeoutExpired:
             raise SubmitError("wrapper timeout", fail_reason="BSUB_TIMEOUT",
                               retryable=False)

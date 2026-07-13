@@ -53,7 +53,7 @@ def test_bsub_group_rejected_retries_without_attachment(cmd, fake_lsf):
 def test_bsub_timeout():
     import subprocess
 
-    def timeout_runner(argv, timeout):
+    def timeout_runner(argv, timeout, cwd=None):
         raise subprocess.TimeoutExpired(argv, timeout)
 
     cmd = LsfCommand(LsfConfig(), timeout_runner)
@@ -134,7 +134,7 @@ def test_bjobs_exit_code_parsing(cmd, fake_lsf):
 def test_bjobs_downgrades_on_unsupported_field(fake_lsf):
     """확장 -o 필드를 거부하는 LSF에서 CORE 포맷으로 강등해 폴링을 살린다
     (강등 안 하면 bjobs가 매번 죽어 job이 PEND에 고착)."""
-    def runner(argv, timeout):
+    def runner(argv, timeout, cwd=None):
         fmt = argv[argv.index("-o") + 1]
         if "exec_cwd" in fmt:            # 확장 포맷 거부 (구형 LSF)
             return CommandResult(255, "", "bjobs: Unknown field: exec_cwd\n")
@@ -152,7 +152,7 @@ def test_bjobs_transient_error_no_downgrade():
     """일시 장애(필드 오류 아님)는 강등하지 않고 전파 — 확장필드 보존."""
     from lsfmgr.errors import LsfCommandError
 
-    def runner(argv, timeout):
+    def runner(argv, timeout, cwd=None):
         return CommandResult(255, "", "LSF error: cannot reach mbatchd\n")
 
     cmd = LsfCommand(LsfConfig(), runner)

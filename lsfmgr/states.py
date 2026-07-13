@@ -100,6 +100,11 @@ class JobRecord:
     # job 단위 속성이다: merge로 wrapper/bsub jobset이 섞여도 재제출 경로를
     # 레코드만 보고 정확히 고를 수 있어야 한다 (resubmit_jobs)
     via_wrapper: bool = False
+    # 제출 시 subprocess를 실행할 작업 디렉토리(요청값). None이면 부모(GUI)
+    # 프로세스의 cwd에서 실행. wrapper 경로는 bsub 인자로 -cwd를 못 주므로
+    # subprocess cwd로 지정한다(스레드 안전 — os.chdir 금지). job 단위 속성이라
+    # merge/재제출에도 보존된다. 관측값 working_dir(bjobs exec_cwd)과는 별개다.
+    submit_cwd: Optional[str] = None
     # bsub 경로의 제출 옵션 스냅샷(JobSpec 직렬화 JSON) — 재제출 시
     # queue/resources/outfile/env 를 원본 그대로 복원하는 근거.
     # command 만 다시 만들면 이 옵션들이 조용히 기본값으로 소실된다

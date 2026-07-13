@@ -46,6 +46,8 @@ class FakeLsf:
         self.jobs: Dict[str, FakeJob] = {}   # "id" 또는 "id[idx]" → FakeJob
         self.next_id = 1000
         self.calls: List[List[str]] = []     # 모든 호출 argv 기록
+        self.call_cwds: List = []            # 각 호출의 cwd(제출 검증용, calls와 정렬)
+        self.last_cwd = None
         # 실패 주입
         self.fail_next_bsub = 0              # 앞으로 N회 bsub rc=1
         self.no_jobid_next_bsub = 0          # 앞으로 N회 id 파싱 불가 출력
@@ -62,10 +64,12 @@ class FakeLsf:
         self.forward_needs_env = False       # forward job은 env source한 bkill만 죽음
 
     # ------------------------------------------------------------------
-    def __call__(self, argv, timeout) -> CommandResult:
+    def __call__(self, argv, timeout, cwd=None) -> CommandResult:
         argv = list(argv)
         with self.lock:
             self.calls.append(argv)
+            self.call_cwds.append(cwd)       # calls와 정렬 — 제출 cwd 검증용
+            self.last_cwd = cwd
             cmd = argv[0].rsplit("/", 1)[-1]
             handler = getattr(self, f"_do_{cmd}", None)
             if handler is None:

@@ -243,7 +243,7 @@ def test_bgdel_timeout_swallowed(fake_lsf):
     from lsfmgr.command import LsfCommand
     from lsfmgr.config import LsfConfig
 
-    def timeout_runner(argv, timeout):
+    def timeout_runner(argv, timeout, cwd=None):
         raise subprocess.TimeoutExpired(argv, timeout)
 
     cmd = LsfCommand(LsfConfig(), timeout_runner)
