@@ -51,13 +51,18 @@ class JobsetQuerier:
         # --- 1) 부착물 기반 조회 (FR-4.1 우선순위) ---
         statuses: Dict[Tuple[int, Optional[int]], JobStatus] = {}
         by_name: Dict[str, JobStatus] = {}
-        by_id: Dict[int, List[JobStatus]] = {}
+        # by_id는 array_index별 **최신값**만 유지한다(append 아님). 같은 element가
+        # 여러 probe(array probe + leftover 재조회)에서 수집되면 append는 stale+
+        # fresh 행을 함께 쌓아, _aggregate_elements가 옛 상태(예: stale EXIT)를
+        # 섞어 folded 레코드를 잘못된 terminal로 확정할 수 있다. array_index를
+        # 키로 덮어써 statuses(이미 dedup)와 동일하게 최신만 집계한다.
+        by_id: Dict[int, Dict[Optional[int], JobStatus]] = {}
 
         def collect(items: List[JobStatus]):
             for st in items:
                 statuses[(st.job_id, st.array_index)] = st
                 by_name[st.job_name] = st
-                by_id.setdefault(st.job_id, []).append(st)
+                by_id.setdefault(st.job_id, {})[st.array_index] = st
 
         # 조회 수단 실패("장애")와 "job이 LSF에 없음"은 반드시 구분한다 —
         # 장애를 없음으로 오판하면 LSF 순단 1회에 전원 LOST(terminal) 확정됨.
@@ -90,7 +95,7 @@ class JobsetQuerier:
                 if rec.array_index is None:
                     elems = by_id.get(rec.job_id)
                     if elems:
-                        return _aggregate_elements(rec, elems)
+                        return _aggregate_elements(rec, list(elems.values()))
             st = by_name.get(rec.lsf_job_name)       # name fallback 매칭
             # 동명이지만 다른 인스턴스(id 불일치)면 버린다 — 다른 job의
             # 상태/exit_code가 이 레코드에 혼입되는 것을 막는다
