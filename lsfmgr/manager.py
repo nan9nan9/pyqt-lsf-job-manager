@@ -546,13 +546,13 @@ class LsfJobManager(QObject):
         merge_ids: 각 job의 논리 키 — merge 시 같은 merge_id의 기존 job이
         이 내용으로 replace된다. jobset 내 유일해야 한다(None 제외).
         user_datas: job별 사용자 정의 dict (JSON 직렬화 가능) — 보존만.
-        work_dir: 이 jobset 전 job의 **기본** 제출 작업 디렉토리(단일 값).
-        work_dirs로 개별 지정되지 않은(None) job이 이 값을 쓴다.
+        work_dir: 이 jobset 전 job의 제출 작업 디렉토리(단일 값) — 전 job이
+        이 cwd에서 실행된다. work_dirs와 **동시 지정 불가**(둘 중 하나).
         work_dirs: job별 제출 작업 디렉토리 — 제출 subprocess를 그 cwd에서
         실행한다(wrapper 경로도 적용; bsub -cwd를 못 주는 wrapper의 실행
-        디렉토리 지정 수단). 우선순위: work_dirs[i] > work_dir > None(부모 cwd).
-        재제출에도 보존. merge_ids/user_datas/work_dirs는 commands와 같은 길이
-        (생략 시 전부 None).
+        디렉토리 지정 수단). None인 항목은 부모 cwd. 재제출에도 보존.
+        work_dir/work_dirs 미지정 시 부모(GUI) 프로세스의 cwd.
+        merge_ids/user_datas/work_dirs는 commands와 같은 길이(생략 시 전부 None).
         commands가 비면 **빈 jobset** — 이후 merge로만 채운다.
         생성 즉시 jobs_updated/jobset_updated가 발행돼 표가 갱신된다."""
         if isinstance(tags, str):             # 편의: 단일 태그 문자열 허용
@@ -583,10 +583,15 @@ class LsfJobManager(QObject):
                            work_dirs: Optional[Sequence[Optional[str]]],
                            wrapper: bool) -> List[JobRecord]:
         """commands → CREATED JobRecord 목록 (create_jobset 내부용).
-        job별 submit_cwd 우선순위: work_dirs[i] > work_dir(기본) > None."""
+        submit_cwd: work_dir(전체 단일) 또는 work_dirs(job별) — 동시 지정 불가."""
+        if work_dir is not None and work_dirs is not None:
+            raise ValueError(
+                "work_dir와 work_dirs는 동시에 지정할 수 없습니다(둘 중 하나)")
         mids = list(merge_ids) if merge_ids is not None else [None] * len(items)
         uds = list(user_datas) if user_datas is not None else [None] * len(items)
-        wds = list(work_dirs) if work_dirs is not None else [None] * len(items)
+        # work_dir 단일 지정이면 전 job에 적용, 아니면 work_dirs(job별) 사용
+        wds = (list(work_dirs) if work_dirs is not None
+               else [work_dir] * len(items))
         if (len(mids) != len(items) or len(uds) != len(items)
                 or len(wds) != len(items)):
             raise ValueError(
@@ -601,10 +606,9 @@ class LsfJobManager(QObject):
         nxt = (max(used) + 1) if used else 0
 
         records = []
-        for item, mid, ud, wd in zip(items, mids, uds, wds):
+        for item, mid, ud, cwd in zip(items, mids, uds, wds):
             key = f"{jsid}_{nxt}"
             nxt += 1
-            cwd = wd if wd is not None else work_dir   # per-job > jobset 기본
             if isinstance(item, JobSpec):
                 records.append(JobRecord(
                     job_id=None, array_index=None, jobset_id=jsid,

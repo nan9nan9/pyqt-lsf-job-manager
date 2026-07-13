@@ -39,18 +39,27 @@ def test_jobset_default_work_dir_applies_to_all(qtbot, manager):
 
 
 # ----------------------------------------------------------------------
-# per-job work_dirs가 jobset 기본 work_dir보다 우선 (지정 안 된 job만 기본값)
+# work_dir와 work_dirs는 동시 지정 불가 (혼합모드 제거) — ValueError
 # ----------------------------------------------------------------------
-def test_per_job_work_dirs_override_default(qtbot, manager):
-    js = manager.create_jobset(
-        ["customwrapper_sub a.sp", "customwrapper_sub b.sp",
-         "customwrapper_sub c.sp"],
-        work_dir="/scratch/common",
-        work_dirs=["/scratch/a", None, "/scratch/c"])
-    cwds = {r.command.split()[-1]: r.submit_cwd for r in js.jobs()}
-    assert cwds["a.sp"] == "/scratch/a"          # per-job 우선
-    assert cwds["b.sp"] == "/scratch/common"     # None → jobset 기본
-    assert cwds["c.sp"] == "/scratch/c"
+def test_work_dir_and_work_dirs_mutually_exclusive(qtbot, manager):
+    with pytest.raises(ValueError):
+        manager.create_jobset(
+            ["customwrapper_sub a.sp", "customwrapper_sub b.sp"],
+            work_dir="/scratch/common",
+            work_dirs=["/scratch/a", "/scratch/b"])
+
+
+# ----------------------------------------------------------------------
+# merge: merge_id 일치 job은 work_dir도 신규(source) 것으로 교체된다
+# ----------------------------------------------------------------------
+def test_merge_replaces_work_dir_by_merge_id(qtbot, manager):
+    tgt = manager.create_jobset(["customwrapper_sub a.sp"],
+                                merge_ids=["a"], work_dir="/old")
+    src = manager.create_jobset(["customwrapper_sub a.sp"],
+                                merge_ids=["a"], work_dir="/new")
+    manager.merge(tgt, src)
+    rec = next(r for r in tgt.jobs() if r.merge_id == "a")
+    assert rec.submit_cwd == "/new"      # 신규 source work_dir로 교체(교체 규칙)
 
 
 # ----------------------------------------------------------------------
