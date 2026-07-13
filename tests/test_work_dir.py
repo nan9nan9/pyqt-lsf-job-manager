@@ -91,3 +91,67 @@ def test_bsub_path_uses_work_dir(qtbot, manager, fake_lsf):
             if argv and argv[0].rsplit("/", 1)[-1] == "bsub"]
     assert subs, "bsub 호출 없음"
     assert all(cwd == "/scratch/bsub_a" for _a, cwd in subs)
+
+
+# ----------------------------------------------------------------------
+# 하위호환: 구 2-arg runner((argv, timeout))도 어댑터로 감싸져 동작한다
+# (Runner 계약이 cwd 추가로 확장됐지만 기존 주입 runner를 깨지 않는다)
+# ----------------------------------------------------------------------
+def test_legacy_two_arg_runner_still_works(qtbot, fake_lsf, config):
+    from lsfmgr import InMemoryStore, LsfJobManager
+
+    def legacy_runner(argv, timeout):        # 구 2-arg — cwd 미지원
+        return fake_lsf(argv, timeout)
+    mgr = LsfJobManager(store=InMemoryStore(), config=config,
+                        runner=legacy_runner)
+    try:
+        js = mgr.create_jobset(["customwrapper_sub a.sp"])
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000) as blk:
+            mgr.submit(js, auto_poll=False)
+        assert blk.args[1].succeeded == 1    # TypeError 없이 제출 성공
+    finally:
+        mgr.shutdown()
+
+
+# ----------------------------------------------------------------------
+# 존재하지 않는 work_dir → 분류된 SUBMIT_FAILED(BSUB_OSERROR), 불투명 crash 아님
+# ----------------------------------------------------------------------
+def test_invalid_work_dir_classified_submit_error():
+    import pytest
+    from lsfmgr import LsfConfig, SubmitError
+    from lsfmgr.command import LsfCommand
+
+    def raising_runner(argv, timeout, cwd=None):
+        raise FileNotFoundError(2, "No such file or directory", cwd)
+    cmd = LsfCommand(config=LsfConfig(), runner=raising_runner)
+    for call in (lambda: cmd.run_submit(["customwrapper_sub", "a.sp"],
+                                        cwd="/nope"),
+                 lambda: cmd.bsub("run.sh", cwd="/nope")):
+        with pytest.raises(SubmitError) as ei:
+            call()
+        assert ei.value.fail_reason == "BSUB_OSERROR"
+        assert ei.value.retryable is False
+
+
+def test_submit_invalid_work_dir_lands_submit_failed(qtbot, fake_lsf, config):
+    import os
+
+    from lsfmgr import InMemoryStore, JobState, LsfJobManager
+
+    def cwd_checking_runner(argv, timeout, cwd=None):
+        if cwd is not None and not os.path.isdir(cwd):
+            raise FileNotFoundError(2, "No such file or directory", cwd)
+        return fake_lsf(argv, timeout, cwd)
+    mgr = LsfJobManager(store=InMemoryStore(), config=config,
+                        runner=cwd_checking_runner)
+    try:
+        js = mgr.create_jobset(["customwrapper_sub a.sp"],
+                               work_dirs=["/definitely/does/not/exist"])
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000) as blk:
+            mgr.submit(js, auto_poll=False, max_retry=0)
+        assert blk.args[1].failed == 1
+        rec = js.jobs()[0]
+        assert rec.state is JobState.SUBMIT_FAILED
+        assert rec.fail_reason == "BSUB_OSERROR"    # INTERNAL_ERROR 아님
+    finally:
+        mgr.shutdown()

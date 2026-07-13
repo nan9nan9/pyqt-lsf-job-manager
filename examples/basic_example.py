@@ -58,8 +58,8 @@ def make_logging_runner(bus: _LogBus):
     subprocess 실행한다. 여기서 그 argv 원문과 stdout 의 'Job <id>' 를 남긴다.
     조회/종료(bjobs/bkill 등)는 제외하고 제출 명령만 로깅한다.
     """
-    def runner(argv, timeout):
-        res = default_runner(argv, timeout)
+    def runner(argv, timeout, cwd=None):        # cwd: work_dirs 제출 디렉토리
+        res = default_runner(argv, timeout, cwd)
         prog = os.path.basename(str(argv[0]))
         if prog.endswith("_sub") or prog == "bsub":       # 제출 명령만
             shown = " ".join([prog] + [str(a) for a in argv[1:]])

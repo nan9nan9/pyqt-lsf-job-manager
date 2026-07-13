@@ -5,6 +5,7 @@ Qt 비의존 순수 Python (§8 원칙). shell 미경유, runner 주입으로 mo
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import re
 import subprocess
@@ -43,6 +44,27 @@ def default_runner(argv: Sequence[str], timeout: float,
     proc = subprocess.run(
         list(argv), capture_output=True, text=True, timeout=timeout, cwd=cwd)
     return CommandResult(proc.returncode, proc.stdout, proc.stderr)
+
+
+def _adapt_runner(runner: Runner) -> Runner:
+    """cwd 인자가 추가되기 전(구 2-arg (argv, timeout)) runner를 하위호환으로
+    감싼다 — cwd를 못 받는 runner면 cwd를 무시하는 어댑터로 래핑해, 계약 확장이
+    기존 주입 runner를 깨지 않게 한다(cwd 미지원 runner는 work_dir을 못 지키지만
+    TypeError로 죽는 대신 조용히 부모 cwd에서 실행된다)."""
+    try:
+        params = inspect.signature(runner).parameters
+    except (ValueError, TypeError):
+        return runner            # 시그니처 조사 불가(빌트인 등) — 그대로 3-arg 시도
+    kinds = [p.kind for p in params.values()]
+    positional = sum(1 for k in kinds
+                     if k in (inspect.Parameter.POSITIONAL_ONLY,
+                              inspect.Parameter.POSITIONAL_OR_KEYWORD))
+    flexible = (inspect.Parameter.VAR_POSITIONAL in kinds
+                or inspect.Parameter.VAR_KEYWORD in kinds
+                or "cwd" in params)
+    if positional >= 3 or flexible:
+        return runner            # cwd 수용 가능
+    return lambda argv, timeout, cwd=None: runner(argv, timeout)
 
 
 @dataclass(frozen=True)
@@ -194,7 +216,9 @@ class LsfCommand:
     def __init__(self, config: Optional[LsfConfig] = None,
                  runner: Optional[Runner] = None):
         self.config = config or LsfConfig()
-        self.runner = runner or default_runner
+        # 구 2-arg runner도 받아들인다(계약 확장 하위호환) — 아래 _run은 항상
+        # cwd를 3번째 인자로 넘기므로, cwd 미지원 runner는 어댑터로 감싼다.
+        self.runner = _adapt_runner(runner or default_runner)
         # 확장 필드로 시작 — 필드 오류 감지 시 한 단계씩 강등 (인스턴스 수명 유지).
         # collect_clusters면 FULL+MC를 맨 앞에 둬, 미지원 시 FULL로만 내려가
         # run_time 등은 유지된다(MC 필드만 포기).
@@ -258,6 +282,11 @@ class LsfCommand:
                             else self.config.submit_timeout_s, cwd=cwd)
         except subprocess.TimeoutExpired:
             raise SubmitError("bsub timeout", fail_reason="BSUB_TIMEOUT")
+        except OSError as e:
+            # cwd 부재/비디렉토리 등 exec 이전 subprocess 실패 — 재시도해도
+            # 안 낫는다. 잡지 않으면 INTERNAL_ERROR로 뭉개져 원인이 안 보인다.
+            raise SubmitError(f"bsub 실행 실패(작업 디렉토리 확인): {e}",
+                              fail_reason="BSUB_OSERROR", retryable=False)
 
         if res.returncode != 0:
             # group 지정이 원인으로 보이면 group만 빼고 재시도 (FR-1.4).
@@ -335,6 +364,10 @@ class LsfCommand:
         except subprocess.TimeoutExpired:
             raise SubmitError("wrapper timeout", fail_reason="BSUB_TIMEOUT",
                               retryable=False)
+        except OSError as e:
+            # cwd 부재/비디렉토리 등 exec 이전 실패 — 분류된 실패로 마무리
+            raise SubmitError(f"wrapper 실행 실패(작업 디렉토리 확인): {e}",
+                              fail_reason="BSUB_OSERROR", retryable=False)
         if res.returncode != 0:
             raise SubmitError(
                 f"wrapper exit {res.returncode}: {res.stderr.strip()[:200]}",
