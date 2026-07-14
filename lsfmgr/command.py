@@ -10,6 +10,7 @@ import logging
 import re
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import (
@@ -243,11 +244,33 @@ class LsfCommand:
 
     def _run(self, argv: Sequence[str], timeout: float,
              cwd: Optional[str] = None) -> CommandResult:
-        """runner 호출 + NFR-6 DEBUG 로깅 (명령 원문/stdout/stderr).
+        """**모든** LSF subprocess(bsub/wrapper/bjobs/bkill/bhist/bmod/bgdel)가
+        지나는 단일 실행 funnel. 여기서 NFR-6 DEBUG 로깅을 한다 — 실제로 어떤
+        명령이 어느 스레드에서 어떤 cwd로 실행되고 얼마나 걸려 무슨 결과가
+        나왔는지 추적할 수 있다.
+
+        **thread safety**: 표준 logging 모듈은 핸들러 내부 락으로 스레드 안전
+        하므로 여러 submit/kill worker가 동시에 debug를 찍어도 출력이 섞여
+        깨지지 않는다. 여기서는 지역 변수(스레드명·monotonic 시각)만 쓰고 공유
+        가변 상태를 두지 않아 추가 경합원이 없다. 스레드명을 메시지에 직접 넣어
+        (포매터 %(threadName)s 설정과 무관하게) 동시 실행을 구분한다.
+
+        활성화: `logging.getLogger("lsfmgr.command").setLevel(logging.DEBUG)`
+        (또는 상위 "lsfmgr")로 레벨을 낮추고 핸들러를 붙이면 이 로그가 나온다.
         cwd는 제출 경로만 넘긴다(bjobs/bkill은 None → 부모 cwd)."""
-        log.debug("실행: %s (cwd=%s)", " ".join(argv), cwd)
-        res = self.runner(argv, timeout, cwd)
-        log.debug("rc=%d stdout=%r stderr=%r", res.returncode,
+        tname = threading.current_thread().name
+        prog = argv[0].rsplit("/", 1)[-1] if argv else "?"   # bsub/bjobs/bkill..
+        log.debug("[%s] exec %s: %s (cwd=%s, timeout=%.1fs)",
+                  tname, prog, " ".join(map(str, argv)), cwd, timeout)
+        t0 = time.monotonic()
+        try:
+            res = self.runner(argv, timeout, cwd)
+        except Exception as e:               # noqa: BLE001 — 로깅 후 그대로 전파
+            log.debug("[%s] exec %s 실패 (%.3fs): %r",
+                      tname, prog, time.monotonic() - t0, e)
+            raise
+        log.debug("[%s] exec %s → rc=%d (%.3fs) stdout=%r stderr=%r",
+                  tname, prog, res.returncode, time.monotonic() - t0,
                   res.stdout[:500], res.stderr[:500])
         return res
 
