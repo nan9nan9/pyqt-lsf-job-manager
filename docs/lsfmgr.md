@@ -49,6 +49,37 @@ mgr.submit(js)
 - job 마다 프로그램(wrapper)이 달라도 되고, job 이 3000개여도 각기 다른 wrapper 를
   섞어 쓸 수 있다.
 
+### 1.1 작업 디렉토리 지정 (`work_dir` / `work_dirs`)
+
+제출 프로세스를 **특정 디렉토리에서 실행**하고 싶을 때 쓴다. wrapper 경로는 lsfmgr
+가 bsub 인자를 조립하지 않아 `-cwd` 를 못 넘기므로, 제출 **subprocess 의 cwd** 로
+실행 디렉토리를 지정한다(자식 프로세스에만 적용 → 동시 제출 worker 간 경합 없음,
+`os.chdir` 같은 프로세스 전역 변경은 쓰지 않는다). LSF 는 job 자체 `-cwd` 가
+없으면 bsub 를 실행한 cwd 를 job 실행 디렉토리로 쓰므로 wrapper·bsub 양쪽에 유효.
+
+```python
+# (A) jobset 전체 동일 디렉토리
+js = mgr.create_jobset(
+    ["customwrapper_sub a.sp", "customwrapper_sub b.sp"],
+    work_dir="/scratch/run")                       # 전 job 이 이 cwd 에서 실행
+
+# (B) job 별 디렉토리 (commands 와 같은 길이)
+js = mgr.create_jobset(
+    ["customwrapper_sub a.sp", "customwrapper_sub b.sp"],
+    work_dirs=["/scratch/a", "/scratch/b"])        # None 항목은 부모 cwd
+```
+
+- **`work_dir`(단일)** 과 **`work_dirs`(job 별 리스트)** 는 **동시 지정 불가** —
+  둘 중 하나만 쓴다(같이 주면 `ValueError`). 둘 다 없으면 부모(GUI) 프로세스의 cwd.
+- 각 job 의 `submit_cwd` 레코드 필드로 저장돼 **재제출·merge 에도 보존**된다.
+  merge 시 `merge_id` 가 일치하는 job 은 replace 규칙에 따라 내용 전체가 신규
+  레코드로 교체되므로 `work_dir` 도 신규 값으로 바뀐다.
+- 존재하지 않는 디렉토리를 주면 그 job 은 `SUBMIT_FAILED`(fail_reason
+  `BSUB_OSERROR`) 로 분류돼 마무리된다(불투명 크래시 아님).
+
+> 참고: 레코드의 읽기 전용 `working_dir` 은 bjobs 가 알려주는 **실제 실행
+> 디렉토리(exec_cwd)** 로, 제출 시 지정하는 `submit_cwd`(work_dir 요청값)와는 별개다.
+
 ---
 
 ## 2. Signal ↔ 함수 대응
@@ -332,6 +363,9 @@ mgr.submit(js, workers=8, rate_limit_per_s=20, max_retry=3)
 
 - 대량 제출 시 wrapper 가 수십 개 병렬로 실행된다. wrapper 는 병렬·재진입에
   안전해야 한다(임시파일·로그 경로에 job 별 유일성 부여).
+- 각 subprocess 의 실행 디렉토리는 `work_dir`/`work_dirs` 로 지정한다
+  ([1.1 작업 디렉토리 지정](#11-작업-디렉토리-지정-work_dir--work_dirs)).
+  미지정 시 부모(앱) 프로세스의 cwd 를 상속한다.
 
 ---
 
