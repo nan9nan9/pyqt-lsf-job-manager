@@ -37,6 +37,7 @@ MANAGER_ONLY_KEYS = frozenset({
     "progress_min_interval_s", "progress_min_step_ratio",
     "poll_runtime_updates", "submit_finished_on_gate_reject",
     "collect_clusters", "min_state_dwell_s",
+    "submit_wrapper_pattern_cmd",
 })
 
 #: ① 라이브러리 내장 기본값

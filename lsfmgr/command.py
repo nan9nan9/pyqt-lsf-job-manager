@@ -5,6 +5,7 @@ Qt 비의존 순수 Python (§8 원칙). shell 미경유, runner 주입으로 mo
 """
 from __future__ import annotations
 
+import fnmatch
 import inspect
 import logging
 import re
@@ -220,6 +221,12 @@ class LsfCommand:
         # 구 2-arg runner도 받아들인다(계약 확장 하위호환) — 아래 _run은 항상
         # cwd를 3번째 인자로 넘기므로, cwd 미지원 runner는 어댑터로 감싼다.
         self.runner = _adapt_runner(runner or default_runner)
+        # 치환은 '무엇이 실제로 실행되는지'를 바꾼다 — 실수로 켠 채 운영에
+        # 제출하는 일이 없도록 INFO로 1회 남긴다 (per-job 원문은 _run의 DEBUG).
+        if self.config.submit_wrapper_pattern_cmd is not None:
+            pattern, cmd = self.config.submit_wrapper_pattern_cmd
+            log.info("wrapper 제출 치환 활성 — 패턴 %r에 맞는 프로그램은 %s 로 "
+                     "실행됩니다", pattern, " ".join(cmd_tokens(cmd)))
         # 확장 필드로 시작 — 필드 오류 감지 시 한 단계씩 강등 (인스턴스 수명 유지).
         # collect_clusters면 FULL+MC를 맨 앞에 둬, 미지원 시 FULL로만 내려가
         # run_time 등은 유지된다(MC 필드만 포기).
@@ -369,11 +376,35 @@ class LsfCommand:
     # ------------------------------------------------------------------
     # wrapper 제출 — wrapper 커맨드를 '그대로' 실행하고 job_id 만 파싱
     # ------------------------------------------------------------------
+    def _apply_wrapper_pattern(self, argv: Sequence[str]) -> List[str]:
+        """submit_wrapper_pattern_cmd 적용 — argv[0]의 basename이 패턴에 맞으면
+        **프로그램 토큰만** 대체하고 나머지 인자는 그대로 둔다. 규칙이 없으면
+        (기본) 첫 줄에서 argv 그대로 빠져나간다.
+
+        basename으로 맞춘다 — 커맨드가 경로째로 와도(/prod/bin/mytool_sub)
+        같은 규칙("*_sub")이 걸리게. 대소문자는 항상 구분한다(fnmatchcase) —
+        fnmatch는 OS별로 대소문자 정책이 달라 같은 설정이 환경 따라 다르게
+        동작한다."""
+        rule = self.config.submit_wrapper_pattern_cmd
+        if rule is None or not argv:
+            return list(argv)
+        pattern, cmd = rule
+        prog = argv[0].rsplit("/", 1)[-1]
+        if not fnmatch.fnmatchcase(prog, pattern):
+            return list(argv)
+        new_argv = cmd_tokens(cmd) + list(argv[1:])
+        log.debug("wrapper 치환(패턴 %s): %s → %s",
+                  pattern, argv[0], new_argv[0])
+        return new_argv
+
     def run_submit(self, argv: Sequence[str],
                    timeout_s: Optional[float] = None,
                    cwd: Optional[str] = None) -> int:
         """wrapper 커맨드(argv)를 조립 없이 그대로 실행하고 'Job <id>' 파싱.
         cwd 지정 시 그 디렉토리에서 실행한다(wrapper→bsub가 그 cwd를 상속).
+
+        submit_wrapper_pattern_cmd가 설정돼 있으면 실행 직전에 프로그램(argv[0])만
+        치환한다 — 레코드의 command는 원본 그대로다(표시·재제출 기준 유지).
 
         lsfmgr 가 -q/-J/-g 등을 붙이지 않는다 — argv 전체가 사용자가 준 wrapper
         커맨드(예: ["customwrapper_sub", "-i", "a.sp"])다. 실패 분류(FR-2.1):
@@ -383,7 +414,7 @@ class LsfCommand:
         """
         to = timeout_s if timeout_s is not None else self.config.submit_timeout_s
         try:
-            res = self._run(list(argv), to, cwd=cwd)
+            res = self._run(self._apply_wrapper_pattern(argv), to, cwd=cwd)
         except subprocess.TimeoutExpired:
             raise SubmitError("wrapper timeout", fail_reason="BSUB_TIMEOUT",
                               retryable=False)
