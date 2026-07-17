@@ -84,6 +84,13 @@ poll_interval_s         = 10    # ② 폴링 주기(5~60)
   env source), `verify`(재조회 루프)** 일 때.
 - 폴링 주기는 생성 시 `poll_interval_s=` 또는 `mgr.start_polling(js, …)`로,
   throttle은 `progress_min_interval_s`/`progress_min_step_ratio`로 조절(§8).
+- **`min_state_dwell_s`**(기본 0=끔)는 위 cadence 위에 얹히는 **표시 간격**이다.
+  켜면 `jobs_updated`만 job별로 "한 상태가 그 시간 머문 뒤 다음 전이" 순서로
+  늦춰 발화된다 — 순식간에 지나가는 `SUBMITTING`→`PEND`, `EXIT`→`SUBMITTING`을
+  눈에 보이게 하는 용도(전이는 버리지 않고 순서대로 밀림). 그 신호에 한해
+  store-first(slot에서 pull하면 앞선 상태)·finished-last가 느슨해진다.
+  다른 신호(`jobset_updated`·`*_finished`)와 `store`는 늦추지 않는다.
+  자세한 내용과 GUI 주의점은 README §5.4.
 
 ### pull 스냅샷 — 시그널을 놓친 뒤 "지금 상태"를 직접 조회
 

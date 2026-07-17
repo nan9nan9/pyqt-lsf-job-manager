@@ -69,6 +69,7 @@ mgr.submit(js, workers=8, max_retry=0, queue="short", auto_poll=False)
 | `collect_clusters` | False | 생성자 | LSF MultiCluster forwarding 정보 수집. 켜면 `JobRecord.source_cluster`/`forward_cluster`를 폴링으로 채움(MC 환경 opt-in) |
 | `progress_min_interval_s` | 0.5 | 생성자 | progress/jobs_updated 최소 발화 간격(초). 키우면 부하↓·반응성↓ |
 | `progress_min_step_ratio` | 0.01 | 생성자 | progress 최소 진행 비율(0~1). 키우면 발화↓ |
+| `min_state_dwell_s` | 0 (끔) | 생성자 | 상태 전이 **표시** 최소 간격(초). 켜면 job별로 한 상태가 이만큼 표에 머문 뒤 다음 전이가 `jobs_updated`로 나간다 — 순식간에 지나가는 `SUBMITTING`→`PEND`, `EXIT`→`SUBMITTING`을 눈에 보이게 함 (§5.4) |
 | `auto_poll` | True | 생성자, submit | submit 후 polling 자동 시작 |
 | `queue` | LSF 기본 | 생성자(`default_queue`), submit | 대상 queue |
 | `resource_req` | 없음 | 생성자, submit | `-R` 문자열 |
@@ -477,6 +478,10 @@ polling(자동):
   → job_lost                                 # LOST 확정 시에만
 ```
 
+> `min_state_dwell_s`(§5.4)를 켜면 **`jobs_updated`만** 이 타임라인에서 최대
+> dwell만큼 뒤로 밀립니다 — 그 신호에 한해 store-first/finished-last가
+> 느슨해집니다. 기본값(0)이면 위 순서 그대로입니다.
+
 > 명령별 내부 동작(스레드·상태 전이·kill 우선권 barrier)의 상세 도식은
 > [docs/flows.md](docs/flows.md), 실행 가능한 최소 데모는
 > [examples/gui_demo.py](examples/gui_demo.py) 참고.
@@ -513,6 +518,36 @@ js.kill_finished.connect(lambda rep: spinner.stop())
 - `kill_status_policy`는 기본(`"optimistic"`)을 유지하세요 — kill 확인 즉시
   EXIT가 반영됩니다. `"actual"`로 바꾸면 다음 폴링(기본 10초)까지
   PEND/RUN으로 보입니다.
+
+### 5.4 상태 전환을 눈에 보이게 — `min_state_dwell_s`
+
+`SUBMITTING`→`PEND`는 bsub 왕복(수백 ms)만큼만, 재제출의 `EXIT`→`SUBMITTING`은
+거의 0초 만에 지나갑니다. 표에서는 중간 상태가 깜빡이고 최종 상태만 남죠.
+`min_state_dwell_s`를 켜면 job별로 한 상태가 그 시간만큼 머문 뒤에야 다음
+전이가 `jobs_updated`로 나갑니다. **전이는 버리지 않고 순서대로** 밀립니다:
+
+```python
+mgr = LsfJobManager(min_state_dwell_s=1.0)   # 0(기본)이면 끔 — 종전과 동일
+```
+
+```
+mgr.kill(js) → mgr.submit(js)     # dwell=1.0
+  표: EXIT ──1s──> SUBMITTING ──1s──> PEND       # 각 상태가 1초씩 보인다
+```
+
+**표시만** 늦추는 기능이라, 켜는 순간 `jobs_updated`에 한해 §5.1의 두 계약이
+느슨해집니다 (다른 신호·`store`·라이브러리 내부 판정은 영향 없음):
+
+- **store-first 아님** — 지연된 `jobs_updated` slot에서 `js.jobs()`를 pull하면
+  신호보다 **앞선** 상태가 보입니다. slot에서 pull로 표를 다시 그리면 이 기능이
+  무효가 되니, 신호로 받은 `records`만 반영하세요 (§5.2 권장 패턴 그대로).
+- **finished-last 아님** — `submit_finished`/`kill_finished`가 마지막 전이 배치보다
+  먼저 도착할 수 있습니다. 스피너는 예정대로 꺼지고 표만 1초쯤 뒤따릅니다.
+- 요약(`jobset_updated`)은 늦추지 않습니다 — dwell 동안 배지 카운트가 표보다
+  앞섭니다. 배지도 함께 늦추려면 배지를 `jobs_updated`로 직접 집계하세요.
+- 표시가 store보다 최대 (밀린 전이 수 × dwell)만큼 늦으므로, 값은 1초 안팎을
+  권장합니다. 대량 제출이어도 같은 tick의 보류분은 jobset당 한 배치로 합쳐
+  발화되어 신호 수는 늘지 않습니다.
 
 ---
 
