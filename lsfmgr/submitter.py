@@ -664,10 +664,14 @@ class BulkSubmitter(QObject):
             # post된다 — UI가 완료 통지 시점에 전 job 갱신을 이미 받도록 보장.
             if batch:                    # throttle 잔여 마지막 전이분
                 self.jobs_changed.emit(ctx.jobset_id, batch)
+            # 완료 로그는 finished **발화 전에** — 발화는 worker→main queued라,
+            # 뒤에 두면 신호를 받은 main이 로그가 찍히기 전에 먼저 깨어난다
+            # (완료 통지를 보고 로그를 읽는 쪽에서 완료 라인이 비어 보인다).
+            # kill 경로(killer.py 'kill 완료')와 같은 순서.
+            log.info("submit 완료 %s: 성공 %d / 실패 %d / 취소 %d (총 %d)",
+                     ctx.jobset_id, report.succeeded, report.failed,
+                     report.cancelled, report.total)
             self.finished.emit(ctx.jobset_id, report)
-        log.info("submit 완료 %s: 성공 %d / 실패 %d / 취소 %d (총 %d)",
-                 ctx.jobset_id, report.succeeded, report.failed,
-                 report.cancelled, report.total)
         # 완료된 ctx 정리 — 장수 세션에서 jobset 수만큼 누적되는 것 방지.
         # (다른 사이클이 이미 새 ctx로 교체했으면 그대로 둔다)
         self._drop_ctx(ctx)
