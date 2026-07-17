@@ -124,6 +124,7 @@ def test_batches_stay_batched(qtbot, paced_manager):
 # 기본값(0) — 발화 경로 무변경
 # ----------------------------------------------------------------------
 def test_off_by_default(qtbot, manager):
+    """기본값(0)이면 pacer를 아예 만들지 않는다 — 발화 경로가 종전과 동일."""
     assert manager._pacer is None
     seen = _connect(manager)
     js = submit_cmds(manager, ["mytool a.sp"], auto_poll=False)
@@ -131,8 +132,13 @@ def test_off_by_default(qtbot, manager):
         lambda: manager.get_jobs(js._jobset_id)[0].state is JobState.PEND,
         timeout=5000)
     key = manager.get_jobs(js._jobset_id)[0].job_key
-    # 지연이 없으므로 store가 PEND면 신호도 이미 PEND까지 나가 있다
-    assert _states_of(seen, key)[-1] is JobState.PEND
+    # 전이는 전부 오되 dwell 큐를 거치지 않는다. store가 PEND인 시점에 신호가
+    # 이미 도착했다고 단정하면 안 된다 — store-first(전이 후 발화)에 발화는
+    # worker→main queued라, 배달은 항상 store보다 뒤다.
+    qtbot.waitUntil(
+        lambda: _states_of(seen, key) == [JobState.CREATED,
+                                          JobState.SUBMITTING,
+                                          JobState.PEND], timeout=5000)
 
 
 def test_shutdown_flushes_pending(qtbot, fake_lsf):
