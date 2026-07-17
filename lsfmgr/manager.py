@@ -41,6 +41,7 @@ from .options import (
     resolve_options,
     validate_options,
 )
+from .pacer import StatePacer
 from .qt import QCoreApplication, QObject, QRunnable, QThreadPool, QTimer, Signal
 from .reports import KillProgress, SubmitProgress
 from .states import JobRecord, JobSetRecord, JobState
@@ -56,7 +57,7 @@ _CONFIG_KEYS = ("bsub_path", "bjobs_path", "bkill_path", "bhist_path",
                 "kill_status_policy", "kill_max_retry", "kill_retry_delay_s",
                 "progress_min_interval_s", "progress_min_step_ratio",
                 "poll_runtime_updates", "submit_finished_on_gate_reject",
-                "collect_clusters")
+                "collect_clusters", "min_state_dwell_s")
 
 
 class LsfJobManager(QObject):
@@ -207,6 +208,14 @@ class LsfJobManager(QObject):
         # =착수 확정)에서 무장하고, gate_rejected(착수 없음 확정)에서 폐기한다.
         # token(사이클 정체성)으로 낡은 신호가 새 사이클을 건드리지 못한다.
         self._pending_arm: Dict[str, tuple] = {}
+
+        # 상태 전이 표시 pacer — min_state_dwell_s>0일 때만. jobs_updated를
+        # job별로 dwell만큼 띄워 발화해 순식간에 지나가는 전이(SUBMITTING→PEND,
+        # EXIT→SUBMITTING)를 눈에 보이게 한다. 0(기본)이면 아예 만들지 않아
+        # 발화 경로가 종전과 동일하다 (pacer.py의 계약 완화 주석 참고).
+        self._pacer = (StatePacer(self.config.min_state_dwell_s,
+                                  self.jobs_updated.emit, parent=self)
+                       if self.config.min_state_dwell_s > 0 else None)
 
         # --- JobSet 핸들 계층 (v7) — Facade Signal 위에 이중 발행 ---
         self._handles: Dict[str, JobSet] = {}
@@ -714,6 +723,7 @@ class LsfJobManager(QObject):
         src_iv = self._poll_intervals.pop(sid, None)
         self._post_process.pop(sid, None)        # source 소멸 — 무장/보류 해제
         self._pending_arm.pop(sid, None)
+        self._forget_paced(sid)                  # 사라진 jobset의 표시 보류분
         self.polling.stop_polling(sid)
         self.handlers.remove_all(sid)
         self._invalidate_handle(sid)
@@ -759,6 +769,7 @@ class LsfJobManager(QObject):
         removed = self.jobsets.local_remove_jobs(
             jobset_id, job_id=job_id, merge_id=merge_id, job_key=job_key,
             force=force)
+        self._forget_paced(jobset_id, [r.job_key for r in removed])
         self._emit_summary(jobset_id)
         return removed
 
@@ -767,8 +778,16 @@ class LsfJobManager(QObject):
         """[sync] 전 job 삭제 — remove_jobs와 동일 가드."""
         jobset_id = self._jsid(jobset_id)
         removed = self.jobsets.local_clear_jobs(jobset_id, force=force)
+        self._forget_paced(jobset_id)
         self._emit_summary(jobset_id)
         return removed
+
+    def _forget_paced(self, jobset_id: str,
+                      job_keys: Optional[List[str]] = None) -> None:
+        """사라진 job/jobset의 보류 중인 표시 전이를 버린다 (pacer 사용 시).
+        dwell 창 안에 삭제되면 늦게 도착한 전이가 지워진 행을 되살린다."""
+        if self._pacer is not None:
+            self._pacer.forget(jobset_id, job_keys)
 
     def _emit_summary(self, jobset_id: str) -> None:
         try:
@@ -1018,13 +1037,19 @@ class LsfJobManager(QObject):
         # 반드시 join해야 좀비/core dump가 안 남는다.
         # misc_pool은 polling보다 먼저 drain — 단발 태스크가 폴링에 새
         # 작업을 거는 것을 막고 종료한다.
-        for name, fn in (("handlers", self.handlers.shutdown),
-                         ("submitter", self.submitter.shutdown),
-                         ("misc_pool", lambda: self._misc_pool.waitForDone(-1)),
-                         ("post_pool", lambda: self._post_pool.waitForDone(-1)),
-                         ("polling", self.polling.shutdown),
-                         ("killer", self.killer.shutdown),
-                         ("store", self.store.store_dispose)):
+        # pacer는 맨 먼저 — 이후엔 이벤트루프가 안 돌아 타이머가 안 뛰므로 밀린
+        # 전이가 GUI에 영영 안 나간다. stop()은 보류분을 즉시 내보내고, 이후
+        # 발화(submitter.shutdown의 취소 배치 등)를 지연 없이 통과시킨다.
+        steps = [("handlers", self.handlers.shutdown),
+                 ("submitter", self.submitter.shutdown),
+                 ("misc_pool", lambda: self._misc_pool.waitForDone(-1)),
+                 ("post_pool", lambda: self._post_pool.waitForDone(-1)),
+                 ("polling", self.polling.shutdown),
+                 ("killer", self.killer.shutdown),
+                 ("store", self.store.store_dispose)]
+        if self._pacer is not None:
+            steps.insert(0, ("pacer", self._pacer.stop))
+        for name, fn in steps:
             try:
                 fn()
             except Exception:                    # noqa: BLE001 — CS-5/‏CS-8
@@ -1046,7 +1071,7 @@ class LsfJobManager(QObject):
             return
         self.jobset_updated.emit(jobset_id, summary)
         if changed:
-            self.jobs_updated.emit(jobset_id, changed)
+            self._emit_jobs(jobset_id, changed)
         self.handlers.tick(jobset_id)
         self._maybe_post_process(jobset_id)
 
@@ -1074,12 +1099,22 @@ class LsfJobManager(QObject):
         self.post_processing_started.emit(jobset_id)
         self._post_pool.start(_PostProcessTask(self, jobset_id, fn, recs))
 
+    def _emit_jobs(self, jsid: str, records: list) -> None:
+        """jobs_updated 발화 **단일 지점** — min_state_dwell_s가 켜져 있으면
+        pacer가 job별 dwell을 채운 뒤 대신 발화한다. 켜져 있어도 요약
+        (jobset_updated)과 pull(get_jobs)은 늦추지 않는다 — 요약은 store에서
+        바로 계산되므로, dwell 동안 배지 카운트가 표보다 앞선다(의도된 시차)."""
+        if self._pacer is None:
+            self.jobs_updated.emit(jsid, records)
+        else:
+            self._pacer.push(jsid, records)
+
     def _relay_jobs_changed(self, jsid: str, records: list) -> None:
         """상태 전이분(배치)을 즉시 jobs_updated + jobset_updated로 발행 —
         완료를 기다리지 않는다. submitter(초기 CREATED 선발행 → PEND/실패 점진)와
         resubmit kill 단계(EXIT 발행)가 공유한다. 파이프라인처럼 단계마다 표가
         갱신된다. (실패분은 _h_jobs_updated가 js.jobs_failed까지 중계)"""
-        self.jobs_updated.emit(jsid, records)
+        self._emit_jobs(jsid, records)
         self._emit_summary(jsid)
 
     def _emit_summary_after_submit(self, jsid: str, report) -> None:
@@ -1114,7 +1149,7 @@ class LsfJobManager(QObject):
             by_js.setdefault(jsid, [])
         for j, recs in by_js.items():
             if recs:
-                self.jobs_updated.emit(j, recs)
+                self._emit_jobs(j, recs)
             self._emit_summary(j)
 
     def _handle_of(self, jobset_id: str) -> Optional[JobSet]:

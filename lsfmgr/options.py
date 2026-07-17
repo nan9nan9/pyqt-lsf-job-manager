@@ -36,7 +36,7 @@ MANAGER_ONLY_KEYS = frozenset({
     "kill_status_policy", "kill_max_retry", "kill_retry_delay_s",
     "progress_min_interval_s", "progress_min_step_ratio",
     "poll_runtime_updates", "submit_finished_on_gate_reject",
-    "collect_clusters",
+    "collect_clusters", "min_state_dwell_s",
 })
 
 #: ① 라이브러리 내장 기본값
@@ -166,6 +166,11 @@ def _validate(key: str, value: Any) -> Any:
         v = float(value)
         if v < 0:
             raise ValueError(f"progress_min_interval_s는 0 이상 (got {value})")
+        return v
+    if key == "min_state_dwell_s":
+        v = float(value)
+        if v < 0:
+            raise ValueError(f"min_state_dwell_s는 0 이상 (got {value})")
         return v
     if key == "progress_min_step_ratio":
         v = float(value)

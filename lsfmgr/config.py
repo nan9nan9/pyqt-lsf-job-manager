@@ -77,6 +77,15 @@ class LsfConfig:
     progress_min_interval_s: float = 0.5   # 최소 발화 간격(초), 0이면 시간 제한 없음
     progress_min_step_ratio: float = 0.01  # 최소 진행 비율(0~1), 0이면 매번
 
+    #: 상태 전이 **표시** 최소 간격(초) — 0(기본)이면 끔. 켜면 job별로 한 상태가
+    #: 이 시간만큼 화면에 머문 뒤에야 다음 전이가 jobs_updated로 나간다
+    #: (SUBMITTING→PEND, EXIT→SUBMITTING처럼 순식간에 지나가는 전이를 눈에
+    #: 보이게 한다). 전이는 버리지 않고 순서대로 밀린다 — 표시가 최대
+    #: (밀린 전이 수 × 이 값)만큼 store보다 늦는다. store는 늘 즉시 갱신되므로
+    #: 켜는 순간 jobs_updated에 한해 store-first/finished-last가 느슨해진다
+    #: (lsfmgr/pacer.py 참고).
+    min_state_dwell_s: float = 0.0
+
     def __post_init__(self):
         self.workers = max(1, min(64, int(self.workers)))
         if self.chunk_size < 1:
@@ -102,6 +111,8 @@ class LsfConfig:
             raise ValueError("progress_min_interval_s는 0 이상")
         if not (0.0 <= self.progress_min_step_ratio <= 1.0):
             raise ValueError("progress_min_step_ratio는 0~1")
+        if self.min_state_dwell_s < 0:
+            raise ValueError("min_state_dwell_s는 0 이상")
         # poll_interval_s/submit_timeout_s도 여기서 검증한다 — 안 하면
         # LsfConfig(poll_interval_s=0) 같은 값이 통과해, auto_poll 시
         # start_polling(0.0)이 큐드 Qt slot 안에서 ValueError를 던져 앱이 죽는다.
