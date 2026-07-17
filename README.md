@@ -69,6 +69,7 @@ mgr.submit(js, workers=8, max_retry=0, queue="short", auto_poll=False)
 | `collect_clusters` | False | 생성자 | LSF MultiCluster forwarding 정보 수집. 켜면 `JobRecord.source_cluster`/`forward_cluster`를 폴링으로 채움(MC 환경 opt-in) |
 | `progress_min_interval_s` | 0.5 | 생성자 | progress/jobs_updated 최소 발화 간격(초). 키우면 부하↓·반응성↓ |
 | `progress_min_step_ratio` | 0.01 | 생성자 | progress 최소 진행 비율(0~1). 키우면 발화↓ |
+| `submit_wrapper_pattern_cmd` | 없음 | 생성자 | wrapper 제출의 실행 프로그램 치환 — `("*_sub", "/path/to/mock_sub")`. `argv[0]`의 basename이 glob에 맞으면 그 프로그램만 대체(mock 전환용, §2.1) |
 | `min_state_dwell_s` | 0 (끔) | 생성자 | 상태 전이 **표시** 최소 간격(초). 켜면 job별로 한 상태가 이만큼 표에 머문 뒤 다음 전이가 `jobs_updated`로 나간다 — 순식간에 지나가는 `SUBMITTING`→`PEND`, `EXIT`→`SUBMITTING`을 눈에 보이게 함 (§5.4) |
 | `auto_poll` | True | 생성자, submit | submit 후 polling 자동 시작 |
 | `queue` | LSF 기본 | 생성자(`default_queue`), submit | 대상 queue |
@@ -108,6 +109,37 @@ mgr.submit(js, workers=8, max_retry=3)
 - wrapper는 결국 `bsub`를 호출하고 그 `Job <id>` 출력·exit code를 그대로 통과시키면
   됩니다. 재시도는 **비정상 종료(non-zero)만** 대상입니다.
 - 모니터링·kill용 `bjobs`/`bkill`은 실제 LSF면 PATH, mocklsf면 경로를 지정합니다.
+
+#### wrapper 실행 파일 갈아끼우기 (`submit_wrapper_pattern_cmd`)
+
+`bjobs`/`bkill`은 `bjobs_path`로 mock을 가리킬 수 있지만, wrapper는 프로그램명이
+**커맨드 문자열에 박혀 있어** 그런 노브가 없습니다. 커맨드를 하나도 고치지 않고
+전 wrapper 제출을 다른 실행 파일로 돌리려면 패턴 치환을 씁니다 — `argv[0]`의
+basename이 glob에 맞으면 **그 프로그램만** 바뀌고 나머지 인자는 그대로입니다.
+
+```python
+mgr = LsfJobManager(
+    submit_wrapper_pattern_cmd=("*_sub", "/path/to/mock/customwrapper_sub"))
+
+#  "mytool_sub -q normal a.sp"
+#    → 실행: /path/to/mock/customwrapper_sub -q normal a.sp
+```
+
+**끄고 켜기는 앱이 정합니다** — 라이브러리는 환경을 읽지 않습니다. 테스트 환경에서만
+돌리려면 앱이 자기 기준(예: 환경 변수)으로 옵션을 줄지 말지 고르면 됩니다:
+
+```python
+kw = ({"submit_wrapper_pattern_cmd": ("*_sub", MOCK_SUB)}
+      if os.environ.get("MY_TEST_MODE") else {})       # 변수 이름·규칙은 앱 마음
+mgr = LsfJobManager(**kw)                              # 안 주면 원본 wrapper 실행
+```
+
+- 옵션이 적용되면 시작 시 `lsfmgr.command` INFO 한 줄로 남습니다 — 실수로 켠 채
+  운영에 제출하는 일을 로그에서 잡을 수 있습니다.
+- **실행만** 바뀝니다 — `JobRecord.command`는 원본이라 표·재제출 기준이 그대로입니다.
+- 대체값은 `bsub_path`와 같은 규약이라 토큰 목록이면 고정 인자가 앞에 붙습니다:
+  `("*_sub", ["/path/mock_sub", "--dry-run"])`
+- bsub 경로(lsfmgr가 인자를 조립하는 제출)는 이 옵션이 아니라 `bsub_path`로 바꿉니다.
 
 #### 제출 전 전처리 게이트 (`pre_submit`)
 
