@@ -47,7 +47,7 @@ def _as_states(x: StateSpec, default: FrozenSet[JobState]) -> FrozenSet[JobState
 class HandlerContext:
     """handler 호출 시 넘어오는 인자 — job 참조 포인트."""
     jobset_id: str
-    record: JobRecord          # job_id / lsf_job_name / command / state 등
+    record: JobRecord          # job_id / job_key / command / state 등
     final: bool                # 종료 state에서의 마지막 실행이면 True
 
     @property

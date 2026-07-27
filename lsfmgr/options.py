@@ -19,25 +19,32 @@ log = logging.getLogger("lsfmgr.options")   # 모듈 로거 (코드베이스 관
 #: ②(manager)·③(call) 공통 튜닝 옵션
 SHARED_KEYS = frozenset({
     "workers", "max_retry", "retry_backoff", "rate_limit_per_s",
-    "poll_interval_s", "auto_poll", "queue", "resource_req", "output_dir",
+    "poll_interval_s", "auto_poll",
     "submit_timeout_s", "verify_kill",
 })
 #: ③(call) 전용
 CALL_ONLY_KEYS = frozenset({"label", "tags", "description"})
 #: 제거된 옵션 — 받으면 TypeError 대신 경고 후 무시 (기존 앱 하위 호환).
 #: script_dir: array dispatch 제거(v9)로 무용.
-DEPRECATED_KEYS = frozenset({"script_dir"})
+#: queue/resource_req/output_dir/default_queue/lsf_group_root/bsub_path/
+#: bgdel_path: bsub 인자 조립 제출·group 부착물 제거(v10)로 무용 —
+#: 제출 옵션은 wrapper 커맨드 문자열에 직접 쓴다.
+DEPRECATED_KEYS = frozenset({
+    "script_dir",
+    "queue", "resource_req", "output_dir",
+    "default_queue", "lsf_group_root", "bsub_path", "bgdel_path",
+})
 
 #: ②(manager) 전용 — Options에 포함되지 않고 config/store 구성에 쓰이는 키
 MANAGER_ONLY_KEYS = frozenset({
-    "chunk_size", "default_queue", "lsf_group_root",
+    "chunk_size",
     "arg_max",
-    "bsub_path", "bjobs_path", "bkill_path", "bhist_path", "bgdel_path",
+    "bjobs_path", "bkill_path", "bhist_path",
     "kill_status_policy", "kill_max_retry", "kill_retry_delay_s",
     "progress_min_interval_s", "progress_min_step_ratio",
     "poll_runtime_updates", "submit_finished_on_gate_reject",
     "collect_clusters", "min_state_dwell_s",
-    "submit_wrapper_pattern_cmd",
+    "test_submit_wrapper_pattern_cmd",
 })
 
 #: ① 라이브러리 내장 기본값
@@ -48,9 +55,6 @@ BUILTIN_DEFAULTS: Dict[str, Any] = {
     "rate_limit_per_s": None,
     "poll_interval_s": 10.0,
     "auto_poll": True,
-    "queue": "",                 # 빈 문자열 == LSF 기본 queue
-    "resource_req": None,
-    "output_dir": None,
     "submit_timeout_s": 30.0,
     "chunk_size": 200,
     "verify_kill": False,
@@ -73,9 +77,6 @@ class Options:
     rate_limit_per_s: Optional[float] = None
     poll_interval_s: float = 10.0
     auto_poll: bool = True
-    queue: str = ""
-    resource_req: Optional[str] = None
-    output_dir: Optional[str] = None
     submit_timeout_s: float = 30.0
     chunk_size: int = 200
     verify_kill: bool = False
@@ -105,7 +106,9 @@ def parse_retry_backoff(value: str) -> Tuple[str, float]:
     except (ValueError, AttributeError):
         raise ValueError(
             f"retry_backoff 형식 오류: {value!r} — 'fixed:N' 또는 'expo:N'")
-    if kind not in ("fixed", "expo") or base < 0:
+    if kind not in ("fixed", "expo") or not (base >= 0):
+        # not(base>=0): 음수뿐 아니라 NaN도 거른다 — NaN이 통과하면
+        # retry_delay_s가 NaN이 되어 QTimer ms 인자로 흘러든다
         raise ValueError(
             f"retry_backoff 형식 오류: {value!r} — 'fixed:N' 또는 'expo:N'")
     return kind, base
@@ -185,9 +188,23 @@ def _validate(key: str, value: Any) -> Any:
         if isinstance(value, str):
             return (value,)               # tuple("ab") == ('a','b') 방지
         return tuple(value)
-    if key in ("label", "description", "queue"):
+    if key in ("label", "description"):
         return str(value)
-    return value                                 # resource_req/output_dir 등
+    if key == "arg_max":
+        v = int(value)
+        if v < 4096:
+            raise ValueError(f"arg_max는 4096 이상 (got {value})")
+        return v
+    if key in ("bjobs_path", "bkill_path", "bhist_path"):
+        ok = (isinstance(value, str) and value) or (
+            isinstance(value, (list, tuple)) and value
+            and all(isinstance(t, str) and t for t in value))
+        if not ok:
+            raise ValueError(
+                f"{key}는 비어있지 않은 str 또는 str 토큰 목록 (got {value!r})")
+        return value
+    # test_submit_wrapper_pattern_cmd는 LsfConfig.__post_init__가 구조 검증한다
+    return value
 
 
 def validate_options(kwargs: Dict[str, Any], *, allowed: frozenset,
@@ -196,8 +213,11 @@ def validate_options(kwargs: Dict[str, Any], *, allowed: frozenset,
     out: Dict[str, Any] = {}
     for key, value in kwargs.items():
         if key in DEPRECATED_KEYS:
+            # allowed 검사보다 먼저 — 원래 그 컨텍스트에서 불허였던 키도
+            # 경고-무시로 통과한다(OPT-2보다 하위 호환 우선). 제거 키를
+            # TypeError로 죽이면 기존 앱이 업그레이드만으로 깨진다.
             log.warning(
-                "%s: 옵션 %r은 v9에서 제거됨 — 무시합니다", where, key)
+                "%s: 옵션 %r은 제거됨(v9/v10) — 무시합니다", where, key)
             continue
         if key not in allowed:
             raise TypeError(

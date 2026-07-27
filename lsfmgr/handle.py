@@ -7,7 +7,7 @@ close/삭제된 핸들 접근 시 JobSetClosedError.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Set
+from typing import TYPE_CHECKING, List, Optional, Set
 
 from .errors import JobSetClosedError
 from .qt import QObject, Signal

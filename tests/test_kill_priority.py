@@ -17,17 +17,22 @@ from tests.conftest import submit_cmds
 from lsfmgr.states import JobState
 
 
+_LSF_QUERY_CMDS = {"bjobs", "bkill", "bhist", "bmod", "tcsh", "lsid"}
+
+
 class GatedBsub:
-    """bsub 호출만 gate에서 블록하는 runner 래퍼 — 'submit 진행 중'을 결정적으로
-    재현한다. FakeLsf lock 밖에서 대기하므로 bjobs/bkill은 병행 진행된다."""
+    """제출(wrapper) 호출만 gate에서 블록하는 runner 래퍼 — 'submit 진행 중'을
+    결정적으로 재현한다. FakeLsf lock 밖에서 대기하므로 bjobs/bkill은 병행
+    진행된다. (v10: 제출은 임의 wrapper 프로그램 — LSF 조회/kill 명령이 아닌
+    호출을 전부 제출로 본다)"""
 
     def __init__(self, fake):
         self.fake = fake
-        self.gate = threading.Event()        # set 전까지 bsub 블록
-        self.entered = threading.Event()     # 첫 bsub 진입 통지
+        self.gate = threading.Event()        # set 전까지 제출 블록
+        self.entered = threading.Event()     # 첫 제출 진입 통지
 
     def __call__(self, argv, timeout, cwd=None):
-        if argv[0].rsplit("/", 1)[-1] == "bsub":
+        if argv[0].rsplit("/", 1)[-1] not in _LSF_QUERY_CMDS:
             self.entered.set()
             self.gate.wait(10)
         return self.fake(argv, timeout)
@@ -192,9 +197,11 @@ def test_quiesce_timeout_recorded_in_kill_report(qtbot, manager, fake_lsf):
     _jsid, report = blocker.args
 
     assert any("quiesce" in e for e in report.errors), report.errors
-    assert report.changed == []              # optimistic EXIT 억제
-    # store 상태는 폴링(actual)로 수렴하도록 남는다 — 여기선 PEND 유지
-    assert js.jobs()[0].state is JobState.PEND
+    # v10.1: per-id 확인(confirm 경로)이 생겨 quiesce 오류가 있어도 **확인된**
+    # job은 정확히 EXIT 마킹된다 — 오류는 "그 사이 제출된 job이 kill에서
+    # 빠졌을 수 있음"의 경고로 남고, 빠진 job은 애초에 changed에 없다.
+    assert all(r.state is JobState.EXIT for r in report.changed)
+    assert js.jobs()[0].state is JobState.EXIT   # 확인된 kill은 반영
     assert stub.released.is_set()            # finally에서 barrier 해제 보장
 
 
@@ -211,7 +218,7 @@ def test_revert_to_created_clears_failure_residue(qtbot, manager, fake_lsf):
     jsid = manager.create_jobset(intended_count=1).id
     key = f"{jsid}_0"
     manager.store.store_add_jobs([JobRecord(
-        job_id=None, array_index=None, jobset_id=jsid, lsf_job_name=key,
+        job_id=None, array_index=None, jobset_id=jsid, job_key=key,
         state=JobState.RETRY_WAIT, fail_reason="BSUB_TIMEOUT",
         fail_message="bsub: timeout after 30s", retry_count=2,
         command="echo x")])
@@ -275,7 +282,6 @@ def test_submit_during_kill_barrier_is_born_cancelled(qtbot, manager,
     """kill barrier가 올라간 동안 시작된 재제출은 born-cancelled — 레코드를
     건드리지도, LSF에 제출하지도 않고 전원 취소로 끝난다. 초기 cancel이
     못 잡는 '늦은 사이클'이 구조적으로 막히는지의 핵심 계약 (SubmitGate)."""
-    from lsfmgr.config import JobSpec
     from lsfmgr.options import Options
 
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
@@ -291,7 +297,7 @@ def test_submit_during_kill_barrier_is_born_cancelled(qtbot, manager,
         with qtbot.waitSignal(manager.submit_finished,
                               timeout=10000) as blocker:
             launched = manager.submitter.resubmit_existing(
-                js.id, [(rec.job_key, JobSpec(command="echo again"))],
+                js.id, [(rec.job_key, ["echo", "again"])],
                 Options())
         _jsid, report = blocker.args
         assert launched is False             # caller가 rearm 등을 생략하는 근거

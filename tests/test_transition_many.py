@@ -18,7 +18,7 @@ def _seed(store, n=5):
                                      created_at=datetime.now()))
     store.store_add_jobs([
         JobRecord(job_id=1000 + i, array_index=None, jobset_id="js",
-                  lsf_job_name=f"js_{i}", state=JobState.PEND, command="e")
+                  job_key=f"js_{i}", state=JobState.PEND, command="e")
         for i in range(n)])
 
 

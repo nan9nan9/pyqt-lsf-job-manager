@@ -1,8 +1,7 @@
-"""설정 (LsfConfig) 및 job 명세 (JobSpec) — Qt 비의존."""
+"""설정 (LsfConfig) — Qt 비의존."""
 from __future__ import annotations
 
-import json
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple, Union
 
 #: LSF 명령 경로. 단일 프로그램은 str, bsub를 호출하는 wrapper처럼 고정 인자가
@@ -15,20 +14,19 @@ CmdPath = Union[str, Sequence[str]]
 @dataclass
 class LsfConfig:
     """LSF 명령 경로/타임아웃/chunk 등 환경 설정 (NFR-7)."""
-    bsub_path: CmdPath = "bsub"       # wrapper 지원: 토큰 목록도 허용
+    # (v10: bsub_path/bgdel_path 삭제 — bsub 조립 제출·bgdel group 정리가
+    #  제거됨. 제출은 wrapper 커맨드를 그대로 실행한다.)
     bjobs_path: CmdPath = "bjobs"
     bkill_path: CmdPath = "bkill"
     bhist_path: CmdPath = "bhist"
-    bgdel_path: CmdPath = "bgdel"
 
     #: wrapper 제출의 **실행 프로그램 치환** — (glob 패턴, 대체 CmdPath).
-    #: wrapper 경로는 커맨드 문자열에 프로그램명이 박혀 있어(bsub처럼 lsfmgr가
-    #: 조립하지 않는다) bsub_path 같은 경로 노브가 없다. 이 옵션은 argv[0]의
-    #: basename이 패턴에 맞을 때 **그 프로그램만** 대체하고 나머지 인자는 그대로
-    #: 둔다 — 커맨드를 하나도 안 고치고 전 wrapper 제출을 다른 실행 파일로
-    #: 돌린다(mock/테스트 환경 전환).
+    #: 제출 커맨드는 문자열에 프로그램명이 박혀 있어(lsfmgr가 조립하지 않는다)
+    #: 별도 경로 노브가 없다. 이 옵션은 argv[0]의 basename이 패턴에 맞을 때
+    #: **그 프로그램만** 대체하고 나머지 인자는 그대로 둔다 — 커맨드를 하나도
+    #: 안 고치고 전 제출을 다른 실행 파일로 돌린다(mock/테스트 환경 전환).
     #:
-    #:     submit_wrapper_pattern_cmd=("*_sub", "/path/to/customwrapper_sub")
+    #:     test_submit_wrapper_pattern_cmd=("*_sub", "/path/to/customwrapper_sub")
     #:     ["mytool_sub", "-q", "normal", "a.sp"]
     #:       → ["/path/to/customwrapper_sub", "-q", "normal", "a.sp"]
     #:
@@ -36,26 +34,25 @@ class LsfConfig:
     #: 테스트 환경에서만 돌리려면 앱이 자기 기준(예: 환경 변수)으로 판단해 이
     #: 옵션을 줄지 말지 고르면 된다:
     #:
-    #:     kw = ({"submit_wrapper_pattern_cmd": ("*_sub", MOCK)}
+    #:     kw = ({"test_submit_wrapper_pattern_cmd": ("*_sub", MOCK)}
     #:           if os.environ.get("MY_TEST_MODE") else {})
     #:     mgr = LsfJobManager(**kw)
     #:
-    #: 대체값은 bsub_path와 같은 CmdPath 규약 — 토큰 목록이면 고정 인자가 앞에
-    #: 붙는다. **실행만** 바꾼다: JobRecord.command는 원본이 그대로 남아 표시·
+    #: 대체값은 CmdPath 규약 — 토큰 목록이면 고정 인자가 앞에 붙는다.
+    #: **실행만** 바꾼다: JobRecord.command는 원본이 그대로 남아 표시·
     #: 재제출 기준이 흔들리지 않는다(재제출 때 이 규칙이 다시 적용된다).
-    #: bsub 경로(lsfmgr가 인자를 조립하는 제출)는 이 옵션이 아니라 bsub_path로
-    #: 바꾼다. None(기본)이면 치환 없음.
-    submit_wrapper_pattern_cmd: Optional[Tuple[str, CmdPath]] = None
+    #: None(기본)이면 치환 없음.
+    test_submit_wrapper_pattern_cmd: Optional[Tuple[str, CmdPath]] = None
 
-    default_queue: str = ""              # 빈 문자열이면 -q 미지정
     submit_timeout_s: float = 30.0       # FR-2.1
     query_timeout_s: float = 120.0
     kill_timeout_s: float = 120.0
 
-    chunk_size: int = 200                # chunking fallback 시 chunk당 job 수 (100~500)
+    #: chunking 시 chunk당 job 수 (100~500). v10.1: 200→500 — 조회가 id chunk
+    #: 단일 경로가 되어 사이클당 bjobs 횟수가 job수/chunk_size로 직결된다
+    #: (10k job 기준 50→20회, 직렬 왕복이라 사이클 시간에 비례).
+    chunk_size: int = 500
     arg_max: int = 131072                # 명령줄 인자 총 길이 상한 (NFR-5, 보수적)
-
-    lsf_group_root: str = "/lsfmgr"      # → /lsfmgr/<user>/<jobset_id> (CS-10)
 
     workers: int = 32                    # 병렬 submit worker 수 (1~64)
                                          # 상한↑ 시 submit 호스트 CPU/RAM·master
@@ -141,16 +138,16 @@ class LsfConfig:
             raise ValueError("min_state_dwell_s는 0 이상")
         # 형식 검증은 여기 한 곳 — 잘못된 값이 제출 worker 안에서야 터지면
         # 그 job만 SUBMIT_FAILED로 조용히 실패해 원인을 찾기 어렵다.
-        if self.submit_wrapper_pattern_cmd is not None:
-            rule = self.submit_wrapper_pattern_cmd
+        if self.test_submit_wrapper_pattern_cmd is not None:
+            rule = self.test_submit_wrapper_pattern_cmd
             if not isinstance(rule, (tuple, list)) or len(rule) != 2:
                 raise ValueError(
-                    "submit_wrapper_pattern_cmd는 (패턴, 명령) 2-튜플 — 예: "
+                    "test_submit_wrapper_pattern_cmd는 (패턴, 명령) 2-튜플 — 예: "
                     f'("*_sub", "/path/to/customwrapper_sub") (got {rule!r})')
             pattern, cmd = rule
             if not isinstance(pattern, str) or not pattern:
                 raise ValueError(
-                    f"submit_wrapper_pattern_cmd의 패턴은 빈 문자열이 아닌 "
+                    f"test_submit_wrapper_pattern_cmd의 패턴은 빈 문자열이 아닌 "
                     f"glob (got {pattern!r})")
             if isinstance(cmd, (str, bytes)):
                 tokens = [cmd] if cmd else []
@@ -160,9 +157,9 @@ class LsfConfig:
                 tokens = None
             if not tokens or not all(isinstance(t, str) and t for t in tokens):
                 raise ValueError(
-                    f"submit_wrapper_pattern_cmd의 명령은 빈 문자열이 아닌 "
+                    f"test_submit_wrapper_pattern_cmd의 명령은 빈 문자열이 아닌 "
                     f"str 또는 토큰 목록 (got {cmd!r})")
-            self.submit_wrapper_pattern_cmd = (pattern, cmd)
+            self.test_submit_wrapper_pattern_cmd = (pattern, cmd)
         # poll_interval_s/submit_timeout_s도 여기서 검증한다 — 안 하면
         # LsfConfig(poll_interval_s=0) 같은 값이 통과해, auto_poll 시
         # start_polling(0.0)이 큐드 Qt slot 안에서 ValueError를 던져 앱이 죽는다.
@@ -185,30 +182,8 @@ def cmd_tokens(path: CmdPath) -> List[str]:
     """CmdPath를 argv 앞부분 토큰 목록으로 정규화. str이면 프로그램 1개."""
     return [path] if isinstance(path, str) else list(path)
 
-
-@dataclass(frozen=True)
-class JobSpec:
-    """개별 job submit 명세 (FR-1.5 옵션 템플릿)."""
-    command: str
-    queue: Optional[str] = None
-    resources: Optional[str] = None          # bsub -R
-    outfile: Optional[str] = None            # bsub -o
-    errfile: Optional[str] = None            # bsub -e
-    env: Optional[Tuple[Tuple[str, str], ...]] = None   # 추가 환경변수 (불변 tuple)
-    extra_args: Tuple[str, ...] = ()         # 기타 bsub 인자
-
-
-def spec_to_json(spec: JobSpec) -> str:
-    """JobSpec → JSON — JobRecord.spec_json 저장용 (resubmit 옵션 보존)."""
-    return json.dumps(asdict(spec), ensure_ascii=False)
-
-
-def spec_from_json(s: str) -> JobSpec:
-    """JobRecord.spec_json → JobSpec 복원 (JSON list → 불변 tuple 정규화)."""
-    d = json.loads(s)
-    if d.get("env") is not None:
-        d["env"] = tuple((str(k), str(v)) for k, v in d["env"])
-    d["extra_args"] = tuple(d.get("extra_args") or ())
-    return JobSpec(**d)
+# (v10: JobSpec/spec_to_json/spec_from_json 삭제 — bsub 인자 조립 제출이
+#  제거되어 옵션 템플릿·재제출 옵션 보존이 필요 없다. 제출은 wrapper
+#  커맨드 문자열/argv가 전부다.)
 
 

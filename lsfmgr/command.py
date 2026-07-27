@@ -1,4 +1,4 @@
-"""LsfCommand — bsub/bjobs/bkill/bhist/bgdel subprocess 래퍼.
+"""LsfCommand — 제출(wrapper)/bjobs/bkill/bhist subprocess 래퍼.
 
 Qt 비의존 순수 Python (§8 원칙). shell 미경유, runner 주입으로 mock 테스트 가능
 (NFR-8). chunking + ARG_MAX 검사 내장 (NFR-5).
@@ -8,6 +8,7 @@ from __future__ import annotations
 import fnmatch
 import inspect
 import json
+from functools import lru_cache
 import logging
 import re
 import subprocess
@@ -87,6 +88,8 @@ class JobStatus:
 
 
 _JOB_ID_RE = re.compile(r"Job <(\d+)>")
+# lsid 출력의 클러스터명 행: "My cluster name is <name>"
+_LSID_CLUSTER_RE = re.compile(r"My cluster name is (\S+)")
 _ARRAY_ID_RE = re.compile(r"^(\d+)(?:\[(\d+)\])?$")
 # bjobs가 매칭 결과 없음을 알릴 때의 메시지들
 _NO_JOB_PATTERNS = ("no unfinished job", "no matching job", "is not found",
@@ -114,6 +117,13 @@ def _clean_field(s: str) -> Optional[str]:
     """bjobs -o 문자열 필드 정규화 — 빈값/'-'는 None (미해당)."""
     s = (s or "").strip()
     return s if s and s != "-" else None
+
+
+def _jfield(rec: dict, key: str) -> str:
+    """bjobs -json 레코드 값 → 문자열. None/부재만 "" — `v or ""` 패턴은
+    JSON 숫자 0(RUN_TIME=0, EXIT_CODE=0)을 ""로 삼켜 값이 소실된다."""
+    v = rec.get(key)
+    return "" if v is None else str(v)
 
 
 def _looks_like_field_error(err_text: str) -> bool:
@@ -162,8 +172,18 @@ def _parse_run_time(s: str) -> Optional[int]:
 
 def _parse_lsf_time(s: str) -> Optional[datetime]:
     """LSF 시각 문자열 → datetime. 파싱 불가/미해당('-')은 None (graceful).
-    'E' 접미(estimated — RUN 중 예상 종료시각)는 실측이 아니므로 버린다."""
-    s = s.strip()
+    'E' 접미(estimated — RUN 중 예상 종료시각)는 실측이 아니므로 버린다.
+
+    LRU 캐시(리뷰 P2): start/finish 문자열은 job마다 고정이라 매 폴링 같은
+    문자열을 재파싱한다 — strptime 다중 포맷 시도가 10k job 기준 사이클당
+    ~0.5s(실측)를 차지했다. 캐시 크기 65536 ≈ job 3만 개(start+finish).
+    연도 없는 포맷의 연도 판정이 캐시로 고정되지만, 그 판정 자체가 '과거
+    시각' 가정이라 해가 바뀌어도 동일 문자열의 정답은 같다(무해)."""
+    return _parse_lsf_time_cached(s.strip())
+
+
+@lru_cache(maxsize=65536)
+def _parse_lsf_time_cached(s: str) -> Optional[datetime]:
     if s.endswith(" E"):
         return None                        # 예상값 — 실제 시각으로 저장 금지
     s = re.sub(r"\s+[A-Z]$", "", s).strip()   # 상태 접미(L/X 등) 제거
@@ -224,8 +244,8 @@ class LsfCommand:
         self.runner = _adapt_runner(runner or default_runner)
         # 치환은 '무엇이 실제로 실행되는지'를 바꾼다 — 실수로 켠 채 운영에
         # 제출하는 일이 없도록 INFO로 1회 남긴다 (per-job 원문은 _run의 DEBUG).
-        if self.config.submit_wrapper_pattern_cmd is not None:
-            pattern, cmd = self.config.submit_wrapper_pattern_cmd
+        if self.config.test_submit_wrapper_pattern_cmd is not None:
+            pattern, cmd = self.config.test_submit_wrapper_pattern_cmd
             log.info("wrapper 제출 치환 활성 — 패턴 %r에 맞는 프로그램은 %s 로 "
                      "실행됩니다", pattern, " ".join(cmd_tokens(cmd)))
         # 확장 필드로 시작 — 필드 오류 감지 시 한 단계씩 강등 (인스턴스 수명 유지).
@@ -236,10 +256,49 @@ class LsfCommand:
             if self.config.collect_clusters
             else [self._BJOBS_FULL_FMT, self._BJOBS_CORE_FMT])
         self._bjobs_fmt_idx = 0
+        # 현재 프로세스 env의 LSF 클러스터명 — manager 초기화가
+        # fetch_cluster_name()을 1회 호출해 채운다 (실패 시 None 유지)
+        self.cluster_name: Optional[str] = None
         # 강등은 폴링 스레드·killer verify 워커·detect_lost 호출 스레드가
         # 동시에 시도할 수 있다 — 무락 증가면 같은 필드 오류에 이중 강등돼
         # FULL을 건너뛰고 CORE로 떨어진다. 사용한 인덱스 기준 CAS로 1단만.
         self._bjobs_fmt_lock = threading.Lock()
+        # DEBUG 진단 — 이 프로세스가 실제로 보는 LSF 클러스터를 기록한다.
+        # 셸에서 친 lsid와 다르면 "GUI 기동 env ≠ 지금 셸 env"라는 뜻이다
+        # (subprocess는 부모 프로세스 env를 상속하며 셸 rc를 타지 않는다).
+        if log.isEnabledFor(logging.DEBUG):
+            self._log_cluster_info()
+
+    def _log_cluster_info(self) -> None:
+        """DEBUG 전용 클러스터 진단 — **의도적으로 경로 설정 없이** bare
+        "lsid"를 실행한다. 경로를 고정하면 그 경로의 클러스터가 나올 뿐,
+        '지금 이 프로세스 env(PATH)가 잡는 클러스터'라는 진단 의미가 사라진다.
+        순수 진단이라 어떤 실패도 삼킨다(본 기능과 무관)."""
+        try:
+            res = self.runner(["lsid"], 10.0, None)
+        except Exception as e:               # noqa: BLE001 — 진단 실패는 무해
+            log.debug("lsid 진단 실패 (무시): %r", e)
+            return
+        log.debug("현재 LSF 클러스터 진단 (lsid, rc=%d):\n%s",
+                  res.returncode, (res.stdout + res.stderr).strip())
+
+    def fetch_cluster_name(self) -> Optional[str]:
+        """현재 프로세스 env가 가리키는 LSF 클러스터명(lsid) 조회 — 캐시에
+        저장. 진단(_log_cluster_info)과 같은 이유로 bare "lsid"를 쓴다.
+        LsfJobManager 초기화가 1회 호출한다 — 실패는 None으로 삼킨다
+        (클러스터명은 부가 정보, 기동을 막으면 안 된다)."""
+        try:
+            res = self.runner(["lsid"], 10.0, None)
+            m = _LSID_CLUSTER_RE.search(res.stdout)
+            if m:
+                self.cluster_name = m.group(1)
+                log.info("현재 LSF 클러스터: %s", self.cluster_name)
+            else:
+                log.warning("lsid 출력에서 클러스터명 파싱 실패 (rc=%d): %r",
+                            res.returncode, res.stdout[:200])
+        except Exception as e:               # noqa: BLE001 — 부가 정보
+            log.warning("lsid 클러스터 조회 실패 (무시): %r", e)
+        return self.cluster_name
 
     @property
     def _bjobs_fmt(self) -> str:
@@ -252,7 +311,7 @@ class LsfCommand:
 
     def _run(self, argv: Sequence[str], timeout: float,
              cwd: Optional[str] = None) -> CommandResult:
-        """**모든** LSF subprocess(bsub/wrapper/bjobs/bkill/bhist/bmod/bgdel)가
+        """**모든** LSF subprocess(wrapper 제출/bjobs/bkill/bhist)가
         지나는 단일 실행 funnel. 여기서 NFR-6 DEBUG 로깅을 한다 — 실제로 어떤
         명령이 어느 스레드에서 어떤 cwd로 실행되고 얼마나 걸려 무슨 결과가
         나왔는지 추적할 수 있다.
@@ -283,102 +342,12 @@ class LsfCommand:
         return res
 
     # ------------------------------------------------------------------
-    # bsub
-    # ------------------------------------------------------------------
-    def bsub(self, command: str, *,
-             queue: Optional[str] = None,
-             job_name: Optional[str] = None,
-             group_path: Optional[str] = None,
-             resources: Optional[str] = None,
-             outfile: Optional[str] = None,
-             errfile: Optional[str] = None,
-             extra_args: Sequence[str] = (),
-             env: Optional[Sequence[Tuple[str, str]]] = None,
-             timeout_s: Optional[float] = None,
-             cwd: Optional[str] = None) -> int:
-        """bsub 실행 후 'Job <id>' 파싱하여 job_id 반환.
-        cwd 지정 시 그 디렉토리에서 bsub를 실행한다(LSF 기본 실행 cwd가 됨).
-
-        실패 시 SubmitError(fail_reason=...) — FR-2.1 실패 분류:
-        BSUB_TIMEOUT / BSUB_EXIT_<rc> / NO_JOBID_PARSED
-        부착물(-g/-J) 관련 거부 시 부착물 없이 1회 재시도 (FR-1.4).
-        timeout_s 미지정 시 config.submit_timeout_s.
-        """
-        argv = self._bsub_argv(command, queue=queue, job_name=job_name,
-                               group_path=group_path, resources=resources,
-                               outfile=outfile, errfile=errfile,
-                               extra_args=extra_args, env=env)
-        try:
-            res = self._run(argv, timeout_s if timeout_s is not None
-                            else self.config.submit_timeout_s, cwd=cwd)
-        except subprocess.TimeoutExpired:
-            raise SubmitError("bsub timeout", fail_reason="BSUB_TIMEOUT")
-        except OSError as e:
-            # cwd 부재/비디렉토리 등 exec 이전 subprocess 실패 — 재시도해도
-            # 안 낫는다. 잡지 않으면 INTERNAL_ERROR로 뭉개져 원인이 안 보인다.
-            raise SubmitError(f"bsub 실행 실패(작업 디렉토리 확인): {e}",
-                              fail_reason="BSUB_OSERROR", retryable=False)
-
-        if res.returncode != 0:
-            # group 지정이 원인으로 보이면 group만 빼고 재시도 (FR-1.4).
-            # job_name은 유지 — name 패턴 조회/손실 복구의 fallback 식별자.
-            # group_path 없는 재시도에서는 이 분기에 다시 들어오지 않는다.
-            if group_path and "group" in res.stderr.lower():
-                log.warning("bsub group 거부 — LSF group 없이 재시도: %s",
-                            res.stderr.strip())
-                return self.bsub(command, queue=queue, job_name=job_name,
-                                 resources=resources,
-                                 outfile=outfile, errfile=errfile,
-                                 extra_args=extra_args, env=env,
-                                 timeout_s=timeout_s, cwd=cwd)
-            raise SubmitError(
-                f"bsub exit {res.returncode}: {res.stderr.strip()[:200]}",
-                fail_reason=f"BSUB_EXIT_{res.returncode}",
-                returncode=res.returncode, stderr=res.stderr,
-                stdout=res.stdout)
-
-        m = _JOB_ID_RE.search(res.stdout)
-        if not m:
-            raise SubmitError(
-                f"job id 파싱 실패: {res.stdout.strip()[:200]}",
-                fail_reason="NO_JOBID_PARSED", stderr=res.stderr,
-                stdout=res.stdout)
-        return int(m.group(1))
-
-    def _bsub_argv(self, command: str, *, queue, job_name, group_path,
-                   resources, outfile, errfile, extra_args,
-                   env=None) -> List[str]:
-        argv = cmd_tokens(self.config.bsub_path)   # wrapper면 여러 토큰
-        q = queue if queue is not None else self.config.default_queue
-        if q:
-            argv += ["-q", q]
-        if job_name:
-            argv += ["-J", job_name]
-        if group_path:
-            argv += ["-g", group_path]
-        if resources:
-            argv += ["-R", resources]
-        if outfile:
-            argv += ["-o", outfile]
-        if errfile:
-            argv += ["-e", errfile]
-        if env:
-            # bsub -env "all, K=V, ..." — 기존 환경 유지 + 추가 변수
-            pairs = ", ".join(f"{k}={v}" for k, v in env)
-            argv += ["-env", f"all, {pairs}"]
-        argv += list(extra_args)
-        argv.append(command)
-        total = sum(len(a) + 1 for a in argv)
-        if total > self.config.arg_max:
-            raise ArgMaxExceededError(
-                f"bsub 인자 총 길이 {total} > ARG_MAX {self.config.arg_max}")
-        return argv
-
-    # ------------------------------------------------------------------
-    # wrapper 제출 — wrapper 커맨드를 '그대로' 실행하고 job_id 만 파싱
+    # 제출 — wrapper 커맨드를 '그대로' 실행하고 'Job <id>' 만 파싱
+    # (v10: bsub 인자 조립 경로(bsub()/-q/-J/-g)는 삭제 — 제출은 전부
+    #  wrapper 경유. lsfmgr는 어떤 제출 인자도 조립하지 않는다.)
     # ------------------------------------------------------------------
     def _apply_wrapper_pattern(self, argv: Sequence[str]) -> List[str]:
-        """submit_wrapper_pattern_cmd 적용 — argv[0]의 basename이 패턴에 맞으면
+        """test_submit_wrapper_pattern_cmd 적용 — argv[0]의 basename이 패턴에 맞으면
         **프로그램 토큰만** 대체하고 나머지 인자는 그대로 둔다. 규칙이 없으면
         (기본) 첫 줄에서 argv 그대로 빠져나간다.
 
@@ -386,7 +355,7 @@ class LsfCommand:
         같은 규칙("*_sub")이 걸리게. 대소문자는 항상 구분한다(fnmatchcase) —
         fnmatch는 OS별로 대소문자 정책이 달라 같은 설정이 환경 따라 다르게
         동작한다."""
-        rule = self.config.submit_wrapper_pattern_cmd
+        rule = self.config.test_submit_wrapper_pattern_cmd
         if rule is None or not argv:
             return list(argv)
         pattern, cmd = rule
@@ -404,7 +373,7 @@ class LsfCommand:
         """wrapper 커맨드(argv)를 조립 없이 그대로 실행하고 'Job <id>' 파싱.
         cwd 지정 시 그 디렉토리에서 실행한다(wrapper→bsub가 그 cwd를 상속).
 
-        submit_wrapper_pattern_cmd가 설정돼 있으면 실행 직전에 프로그램(argv[0])만
+        test_submit_wrapper_pattern_cmd가 설정돼 있으면 실행 직전에 프로그램(argv[0])만
         치환한다 — 레코드의 command는 원본 그대로다(표시·재제출 기준 유지).
 
         lsfmgr 가 -q/-J/-g 등을 붙이지 않는다 — argv 전체가 사용자가 준 wrapper
@@ -479,7 +448,11 @@ class LsfCommand:
                 break
             except LsfCommandError as e:
                 if (used_idx < len(self._bjobs_formats) - 1
-                        and _looks_like_field_error(e.stderr or str(e))):
+                        and _looks_like_field_error(e.stderr or "")):
+                    # e.stderr만 본다 — JSON 파싱 실패 등 stderr 없는 예외의
+                    # str(e)에 stdout 발췌가 실려 필드 오류로 오판되면
+                    # 불필요한 영구 강등이 된다 (리뷰 B2). 필드 오류는 항상
+                    # LSF stderr로 온다(_run_or_nomatch가 실어줌).
                     with self._bjobs_fmt_lock:      # CAS — 동시 강등 1단만
                         if self._bjobs_fmt_idx == used_idx:
                             self._bjobs_fmt_idx = used_idx + 1
@@ -595,7 +568,7 @@ class LsfCommand:
             if state is None:
                 log.debug("알 수 없는 LSF 상태 %r → UNKWN", stat_s)
                 state = JobState.UNKWN
-            exit_s = str(rec.get("EXIT_CODE") or "").strip()
+            exit_s = _jfield(rec, "EXIT_CODE").strip()
             exit_code = None
             if exit_s not in ("", "-"):
                 try:
@@ -606,20 +579,20 @@ class LsfCommand:
             # 실측만 저장하도록 종료 상태에서만 채운다
             finish_time = None
             if state in (JobState.DONE, JobState.EXIT):
-                finish_time = _parse_lsf_time(str(rec.get("FINISH_TIME") or ""))
+                finish_time = _parse_lsf_time(_jfield(rec, "FINISH_TIME"))
             out.append(JobStatus(
                 job_id=int(m.group(1)),
                 array_index=int(m.group(2)) if m.group(2) else None,
                 state=state, exit_code=exit_code,
-                job_name=str(rec.get("JOB_NAME") or ""),
-                run_time_s=_parse_run_time(str(rec.get("RUN_TIME") or "")),
-                start_time=_parse_lsf_time(str(rec.get("START_TIME") or "")),
+                job_name=_jfield(rec, "JOB_NAME"),
+                run_time_s=_parse_run_time(_jfield(rec, "RUN_TIME")),
+                start_time=_parse_lsf_time(_jfield(rec, "START_TIME")),
                 finish_time=finish_time,
-                working_dir=_clean_field(str(rec.get("EXEC_CWD") or "")),
+                working_dir=_clean_field(_jfield(rec, "EXEC_CWD")),
                 source_cluster=_clean_field(
-                    str(rec.get("SOURCE_CLUSTER") or "")),
+                    _jfield(rec, "SOURCE_CLUSTER")),
                 forward_cluster=_clean_field(
-                    str(rec.get("FORWARD_CLUSTER") or ""))))
+                    _jfield(rec, "FORWARD_CLUSTER"))))
         return out
 
     # ------------------------------------------------------------------
@@ -701,28 +674,9 @@ class LsfCommand:
         return result
 
     # ------------------------------------------------------------------
-    # bkill — FR-3.1 전략별 변형. 반환값: 실제 LSF 호출 횟수
+    # bkill — id chunk 단독 (v10: group/name/array tier 삭제 — 부착물이
+    # 더 이상 생성되지 않으므로 전략 자체가 성립하지 않는다)
     # ------------------------------------------------------------------
-    def bkill_by_group(self, group_path: str,
-                       state_filter: Optional[str] = None) -> bool:
-        """반환: 실제 kill 대상이 매칭되었는지. False(no-match)면 호출자는
-        이 부착물이 job을 커버하지 못한 것으로 보고 fallback해야 한다."""
-        argv = cmd_tokens(self.config.bkill_path) + ["-g", group_path]
-        if state_filter:
-            argv += ["-stat", state_filter.lower()]
-        argv.append("0")                          # 0 == group 내 전체
-        return self._run_kill(argv)
-
-    def bkill_by_name(self, pattern: str) -> bool:
-        return self._run_kill(
-            cmd_tokens(self.config.bkill_path) + ["-J", pattern, "0"])
-
-    def bkill_array(self, array_job_id: int,
-                    index_range: Optional[Tuple[int, int]] = None) -> bool:
-        target = (f"{array_job_id}[{index_range[0]}-{index_range[1]}]"
-                  if index_range else str(array_job_id))
-        return self._run_kill(cmd_tokens(self.config.bkill_path) + [target])
-
     def _bkill_argv(self, chunk: Sequence[str], envpath: str) -> List[str]:
         """bkill 실행 argv. envpath가 있으면 그 LSF env를 source한 뒤 bkill —
         MC forward job은 로컬 bkill로 안 죽고 그 클러스터 env를 source해야
@@ -797,25 +751,5 @@ class LsfCommand:
         return resolved, calls
 
     def _run_kill(self, argv: List[str]) -> bool:
-        """반환: 매칭된 job이 있었는지 (no-match는 예외가 아니라 False —
-        커버 실패 신호로, 호출자가 fallback을 결정한다)."""
+        """반환: 매칭된 job이 있었는지 (no-match는 예외가 아니라 False)."""
         return self._run_or_nomatch(argv, self.config.kill_timeout_s) is not None
-
-    # ------------------------------------------------------------------
-    # bgdel (close 시 group 정리)
-    # ------------------------------------------------------------------
-    def _run_lenient(self, argv: List[str], what: str) -> None:
-        """부가 작업용 실행 — timeout 포함 어떤 실패도 경고 로그만 남기고
-        호출자에게 전파하지 않는다 (bgdel은 실패해도 본 작업과 무관)."""
-        try:
-            res = self._run(argv, self.config.kill_timeout_s)
-        except subprocess.TimeoutExpired:
-            log.warning("%s timeout (무시)", what)
-            return
-        if res.returncode != 0:
-            log.warning("%s 실패 (무시): %s", what, res.stderr.strip())
-
-    def bgdel(self, group_path: str) -> None:
-        """LSF group 삭제 (FR-5.7 close)."""
-        self._run_lenient(
-            cmd_tokens(self.config.bgdel_path) + [group_path], "bgdel")

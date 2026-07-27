@@ -7,7 +7,6 @@ from lsfmgr import (
     InMemoryStore,
     JobSet,
     JobSetClosedError,
-    JobSpec,
     JobState,
     LsfJobManager,
 )
@@ -151,21 +150,16 @@ def test_merge_from_invalidates_source(qtbot, manager, fake_lsf):
         b.jobs()                                 # source 핸들 파괴
 
 
-def test_manager_kwargs_default_queue(qtbot, fake_lsf, config):
+def test_manager_kwargs_removed_option_ignored(qtbot, fake_lsf, config):
+    """v10: default_queue/queue 등 bsub 조립 옵션은 제거 — 경고 후 무시되고
+    생성/제출은 정상 동작한다 (기존 앱 하위 호환)."""
     mgr = LsfJobManager(config=config, runner=fake_lsf,
                         default_queue="priority", max_retry=0)
     try:
-        js = submit_cmds(mgr, ["x"], auto_poll=False)
+        js = submit_cmds(mgr, ["x"], queue="short", auto_poll=False)
         with qtbot.waitSignal(js.submit_finished, timeout=10000):
             pass
-        argv = fake_lsf.calls_of("bsub")[0]
-        assert argv[argv.index("-q") + 1] == "priority"
-        # call 계층이 manager 계층을 덮어씀
-        js2 = submit_cmds(mgr, ["y"], queue="short", auto_poll=False)
-        with qtbot.waitSignal(js2.submit_finished, timeout=10000):
-            pass
-        argv2 = fake_lsf.calls_of("bsub")[-1]
-        assert argv2[argv2.index("-q") + 1] == "short"
+        assert js.jobs()[0].job_id is not None   # 제출은 정상
     finally:
         mgr.shutdown()
 

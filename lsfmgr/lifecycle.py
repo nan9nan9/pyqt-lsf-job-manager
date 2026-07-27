@@ -1,6 +1,6 @@
 """SubmitGate — jobset별 submit 활동 게이트 (kill 우선권의 구조적 보장, FR-3).
 
-모든 submit 사이클(제출/재제출/array)은 시작 전에 register()를 통과해야
+모든 submit 사이클(제출/재제출)은 시작 전에 register()를 통과해야
 하고, kill은 KillScope.acquire()로 barrier를 올리는 순간 그 시점의 활동
 목록을 원자적으로 넘겨받아 취소·대기한다. barrier가 올라간 동안의
 register()는 거부된다.

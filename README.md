@@ -48,11 +48,10 @@ js.jobset_updated.connect(lambda s: print(f"RUN={s['RUN']} DONE={s['DONE']}/{s['
 mgr = LsfJobManager()
 
 # 앱 전역 기본값 변경
-mgr = LsfJobManager(workers=32, max_retry=5, poll_interval_s=5,
-                    default_queue="priority")
+mgr = LsfJobManager(workers=32, max_retry=5, poll_interval_s=5)
 
 # 이번 submit만 다르게
-mgr.submit(js, workers=8, max_retry=0, queue="short", auto_poll=False)
+mgr.submit(js, workers=8, max_retry=0, auto_poll=False)
 ```
 
 ### 옵션 카탈로그
@@ -62,26 +61,34 @@ mgr.submit(js, workers=8, max_retry=0, queue="short", auto_poll=False)
 | `workers` | 32 | 생성자, submit | 병렬 submit worker 수 (1~64) |
 | `max_retry` | 3 | 생성자, submit | submit 실패 재시도 (0=끔) |
 | `retry_backoff` | `"fixed:2"` | 생성자, submit | `"fixed:N"`(N초 고정) / `"expo:N"`(지수) |
-| `rate_limit_per_s` | 없음 | 생성자, submit | 초당 bsub 상한 (LSF 부하 보호) |
+| `rate_limit_per_s` | 없음 | 생성자, submit | 초당 제출 상한 (LSF 부하 보호) |
 | `poll_interval_s` | 10 | 생성자, submit | polling 주기 (5~60) |
 | `poll_runtime_updates` | True | 생성자 | RUN 중 `run_time_s`(경과시간) 변화도 `jobs_updated`로 live 발행. 수만 개 규모 부하 시 False로 끔 |
 | `submit_finished_on_gate_reject` | True | 생성자 | `pre_submit` 게이트가 False면 `submit_finished`(cancelled=N)도 발화. False면 종료는 `pre_submit_finished(False)`만 |
 | `collect_clusters` | False | 생성자 | LSF MultiCluster forwarding 정보 수집. 켜면 `JobRecord.source_cluster`/`forward_cluster`를 폴링으로 채움(MC 환경 opt-in) |
+
+> **현재 클러스터명 (v10.1)**: 매니저 초기화 시 `lsid`를 1회 실행해 현재
+> 프로세스 env의 클러스터명을 캐시합니다 — `mgr.cluster_name`으로 조회
+> (실패 시 None). 제출 성공 시점에 `JobRecord.source_cluster`로도 즉시
+> 스탬프되어 폴링 전 공백이 없고, `collect_clusters` 폴링 관측값이 오면
+> 그 값이 덮습니다.
 | `progress_min_interval_s` | 0.5 | 생성자 | progress/jobs_updated 최소 발화 간격(초). 키우면 부하↓·반응성↓ |
 | `progress_min_step_ratio` | 0.01 | 생성자 | progress 최소 진행 비율(0~1). 키우면 발화↓ |
-| `submit_wrapper_pattern_cmd` | 없음 | 생성자 | wrapper 제출의 실행 프로그램 치환 — `("*_sub", "/path/to/mock_sub")`. `argv[0]`의 basename이 glob에 맞으면 그 프로그램만 대체(mock 전환용, §2.1) |
+| `test_submit_wrapper_pattern_cmd` | 없음 | 생성자 | wrapper 제출의 실행 프로그램 치환 — `("*_sub", "/path/to/mock_sub")`. `argv[0]`의 basename이 glob에 맞으면 그 프로그램만 대체(mock 전환용, §2.1) |
 | `min_state_dwell_s` | 0 (끔) | 생성자 | 상태 전이 **표시** 최소 간격(초). 켜면 job별로 한 상태가 이만큼 표에 머문 뒤 다음 전이가 `jobs_updated`로 나간다 — 순식간에 지나가는 `SUBMITTING`→`PEND`, `EXIT`→`SUBMITTING`을 눈에 보이게 함 (§5.4) |
 | `auto_poll` | True | 생성자, submit | submit 후 polling 자동 시작 |
-| `queue` | LSF 기본 | 생성자(`default_queue`), submit | 대상 queue |
-| `resource_req` | 없음 | 생성자, submit | `-R` 문자열 |
-| `output_dir` | 없음 | 생성자, submit | `-o`/`-e` 경로 규칙 |
-| `submit_timeout_s` | 30 | 생성자, submit | bsub 1건 timeout |
+| `submit_timeout_s` | 30 | 생성자, submit | 제출 1건 timeout |
 | `verify_kill` | False | 생성자, kill | kill 후 실제 종료 확인 |
 | `kill_status_policy` | `"optimistic"` | 생성자 | `"optimistic"`=terminated 확인 시 즉시 EXIT / `"actual"`=실제 LSF 상태(폴링)로만 |
 | `kill_max_retry` | 2 | 생성자 | kill 확인 실패 시 재시도 횟수 |
 | `label` / `tags` / `description` | 빈 값 | submit | JobSet 메타데이터 |
-| `chunk_size` | 200 | 생성자 | chunking fallback 크기 |
-| `bsub_path` 등 | PATH 탐색 | 생성자 | LSF 명령 경로 (문자열 또는 wrapper 토큰 목록) |
+| `chunk_size` | 500 | 생성자 | bjobs/bkill chunking 크기 (v10.1: 200→500 — 사이클당 호출 수 절감) |
+| `bjobs_path` 등 | PATH 탐색 | 생성자 | LSF 조회/kill 명령 경로 (bjobs/bkill/bhist) |
+
+> **v10**: 제출은 wrapper 커맨드 실행 단일 경로입니다 — bsub 인자 조립
+> 경로와 그 옵션(`queue`/`resource_req`/`output_dir`/`default_queue`/
+> `bsub_path`/`lsf_group_root`)은 제거됐습니다(지정 시 경고 후 무시).
+> queue 등 제출 옵션은 wrapper 커맨드 문자열에 직접 씁니다.
 
 - 오타 키워드는 즉시 `TypeError`, 범위 벗어나면 `ValueError` — 조용히
   무시되지 않습니다.
@@ -91,12 +98,12 @@ mgr.submit(js, workers=8, max_retry=0, queue="short", auto_poll=False)
 ### 2.1 wrapper 커맨드로 제출 (예: `customwrapper_sub`)
 
 실제 환경처럼 job 마다 `customwrapper_sub` 같은 제출 wrapper(job마다 다른 wrapper/커맨드 혼합 가능)를
-쓰는 경우, `create_jobset`에 wrapper 커맨드 리스트를 그대로 넘깁니다(기본
-`wrapper=True`). lsfmgr는 각 커맨드를 **그대로 실행**하고 출력의 `Job <id>`를
+쓰는 경우, `create_jobset`에 wrapper 커맨드 리스트를 그대로 넘깁니다.
+lsfmgr는 각 커맨드를 **그대로 실행**하고 출력의 `Job <id>`를
 파싱해 **job_id 기반**으로 모니터링·kill 합니다(‑q/‑J/‑g 등 인자 조립·주입 없음).
 
 ```python
-mgr = LsfJobManager()          # bsub_path 지정 불필요
+mgr = LsfJobManager()
 
 js = mgr.create_jobset([
     "customwrapper_sub -q normal run_0.sp",         # job 마다 다른 wrapper 가능
@@ -110,7 +117,7 @@ mgr.submit(js, workers=8, max_retry=3)
   됩니다. 재시도는 **비정상 종료(non-zero)만** 대상입니다.
 - 모니터링·kill용 `bjobs`/`bkill`은 실제 LSF면 PATH, mocklsf면 경로를 지정합니다.
 
-#### wrapper 실행 파일 갈아끼우기 (`submit_wrapper_pattern_cmd`)
+#### wrapper 실행 파일 갈아끼우기 (`test_submit_wrapper_pattern_cmd`)
 
 `bjobs`/`bkill`은 `bjobs_path`로 mock을 가리킬 수 있지만, wrapper는 프로그램명이
 **커맨드 문자열에 박혀 있어** 그런 노브가 없습니다. 커맨드를 하나도 고치지 않고
@@ -119,7 +126,7 @@ basename이 glob에 맞으면 **그 프로그램만** 바뀌고 나머지 인자
 
 ```python
 mgr = LsfJobManager(
-    submit_wrapper_pattern_cmd=("*_sub", "/path/to/mock/customwrapper_sub"))
+    test_submit_wrapper_pattern_cmd=("*_sub", "/path/to/mock/customwrapper_sub"))
 
 #  "mytool_sub -q normal a.sp"
 #    → 실행: /path/to/mock/customwrapper_sub -q normal a.sp
@@ -129,7 +136,7 @@ mgr = LsfJobManager(
 돌리려면 앱이 자기 기준(예: 환경 변수)으로 옵션을 줄지 말지 고르면 됩니다:
 
 ```python
-kw = ({"submit_wrapper_pattern_cmd": ("*_sub", MOCK_SUB)}
+kw = ({"test_submit_wrapper_pattern_cmd": ("*_sub", MOCK_SUB)}
       if os.environ.get("MY_TEST_MODE") else {})       # 변수 이름·규칙은 앱 마음
 mgr = LsfJobManager(**kw)                              # 안 주면 원본 wrapper 실행
 ```
@@ -137,9 +144,8 @@ mgr = LsfJobManager(**kw)                              # 안 주면 원본 wrapp
 - 옵션이 적용되면 시작 시 `lsfmgr.command` INFO 한 줄로 남습니다 — 실수로 켠 채
   운영에 제출하는 일을 로그에서 잡을 수 있습니다.
 - **실행만** 바뀝니다 — `JobRecord.command`는 원본이라 표·재제출 기준이 그대로입니다.
-- 대체값은 `bsub_path`와 같은 규약이라 토큰 목록이면 고정 인자가 앞에 붙습니다:
+- 대체값은 CmdPath 규약이라 토큰 목록이면 고정 인자가 앞에 붙습니다:
   `("*_sub", ["/path/mock_sub", "--dry-run"])`
-- bsub 경로(lsfmgr가 인자를 조립하는 제출)는 이 옵션이 아니라 `bsub_path`로 바꿉니다.
 
 #### 제출 전 전처리 게이트 (`pre_submit`)
 
@@ -190,10 +196,8 @@ mgr.submit(js, post_process=collect)           # pre_submit과 함께 써도 됨
 > ⚠️ 이 콜백도 **worker 스레드** 실행 — GUI 객체 접근 금지. 한 제출당 1회만
 > 발화하며, 완료 전 재제출(`post_process` 없이)하면 이전 무장은 해제됩니다.
 
-> 작성 규칙·실행 방식(멀티 프로세스)·검증·트러블슈팅, 그리고 lsfmgr가 직접 bsub를
-> 조립하는 저수준 경로(`create_jobset(..., wrapper=False)`+`bsub_path`)는
-> **[`docs/lsfmgr.md`](docs/lsfmgr.md)**
-> 에 정리되어 있습니다.
+> 작성 규칙·실행 방식(멀티 프로세스)·검증·트러블슈팅은
+> **[`docs/lsfmgr.md`](docs/lsfmgr.md)** 에 정리되어 있습니다.
 
 ---
 
@@ -439,7 +443,7 @@ mgr.remove_handler(js, "collect")          # 해제
 - **폴링이 돌고 있어야 동작**합니다(auto_poll 기본이면 자동). 첫 실행은 다음 폴링
   사이클이며, `mgr.query_once(js)`로 즉시 1회 유도 가능합니다.
 - `mgr.submit(js)`로 전체 재실행하면 진행 상태가 자동 재무장되어 새 실행에서 다시 돕니다.
-- 실행 예제: `examples/handler_example.py`, 상세 규칙:
+- 실행 예제: `examples/gui_demo.py`(handler 체크박스), 상세 규칙:
   [`docs/lsfmgr.md`](docs/lsfmgr.md) §2.5.
 
 ---

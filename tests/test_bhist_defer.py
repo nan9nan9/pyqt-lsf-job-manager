@@ -184,7 +184,7 @@ def test_jobid_none_deferred_when_bhist_failing(qtbot, manager, fake_lsf):
     # id 없는 on-LSF 레코드 (persistent 복구 행 등을 흉내)
     manager.store.store_add_job(JobRecord(
         job_id=None, array_index=None, jobset_id=js.id,
-        lsf_job_name="manual_1", state=JobState.PEND, command=""))
+        job_key="manual_1", state=JobState.PEND, command=""))
     fake_lsf.fail_bhist = True               # bhist 장애 사이클
 
     result = manager.querier.query(js.id)

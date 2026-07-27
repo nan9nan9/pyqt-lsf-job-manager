@@ -1,8 +1,7 @@
 """JobSetManager — JobSet CRUD / 요약 / 손실 감지 / merge / close (FR-5).
 
-Store와 LsfCommand만 사용 (Qt 비의존). LSF 호출이 필요한 메서드
-(detect_lost, close_jobset의 bgdel)는 호출 스레드에서 blocking 실행되므로,
-GUI 앱에서는 manager(Facade)가 worker 스레드에서 호출한다.
+Store만 사용 (Qt 비의존). v10: LSF 호출(부착물 name 역조회·bgdel)이
+전부 제거되어 이 계층은 순수 Store 연산이다.
 
 이름 규약(계층이 이름에 드러나게): 공개 API=mgr.create_jobset/remove_job/close,
 도메인=local_* (local_create_jobset/local_create_jobs, local_remove_jobs/
@@ -11,7 +10,6 @@ local_clear_jobs, local_close_jobset, merge_from), 저장소=store_*
 """
 from __future__ import annotations
 
-import getpass
 import logging
 import threading
 import uuid
@@ -54,25 +52,14 @@ class JobSetManager:
     # ------------------------------------------------------------------
     # 생성
     # ------------------------------------------------------------------
-    def group_path_for(self, jobset_id: str) -> str:
-        """사용자 격리 LSF group 경로 (CS-10)."""
-        return f"{self.config.lsf_group_root}/{getpass.getuser()}/{jobset_id}"
-
     def local_create_jobset(self, intended_count: int, *, label: str = "",
                             tags: Sequence[str] = (), description: str = "",
-                            parent: Optional[str] = None,
-                            jobset_id: Optional[str] = None,
-                            with_attachments: bool = True) -> JobSetRecord:
+                            jobset_id: Optional[str] = None) -> JobSetRecord:
         jsid = jobset_id or generate_jobset_id()
         record = JobSetRecord(
             jobset_id=jsid, intended_count=intended_count,
-            lsf_group_paths=[self.group_path_for(jsid)] if with_attachments else [],
-            name_patterns=[f"{jsid}_*"] if with_attachments else [],
-            array_job_ids=[],
             label=label, tags=list(tags), description=description,
-            parent_jobset_id=parent, created_by=getpass.getuser(),
-            created_at=datetime.now(), merged_from=[], session_id="",
-            closed=False)
+            created_at=datetime.now(), merged_from=[], closed=False)
         return self.store.store_insert_jobset(record)
 
     # ------------------------------------------------------------------
@@ -93,6 +80,12 @@ class JobSetManager:
             keys = {r.job_key for r in existing}
             mids = {r.merge_id for r in existing if r.merge_id is not None}
             for rec in records:
+                if rec.jobset_id != jobset_id:
+                    # 남의 jobset에 끼워 넣으면 그 jobset의 summary 불변식이
+                    # 깨지고 이 jobset엔 유령 intended_count가 남는다
+                    raise ValueError(
+                        f"레코드 jobset_id 불일치: {rec.jobset_id!r} != "
+                        f"{jobset_id!r} ({rec.job_key})")
                 if rec.job_key in keys:
                     raise ValueError(
                         f"job 이름 중복: {jobset_id}/{rec.job_key}")
@@ -127,7 +120,7 @@ class JobSetManager:
             raise ValueError("같은 jobset끼리는 merge할 수 없습니다")
         with self._meta_lock:
             tgt = self.store.get_jobset(target_id)
-            src = self.store.get_jobset(source_id)
+            self.store.get_jobset(source_id)     # 존재 검증 (없으면 예외)
             tgt_jobs = self.store.get_jobs(target_id)
             src_jobs = self.store.get_jobs(source_id)
 
@@ -143,32 +136,33 @@ class JobSetManager:
             by_mid = {r.merge_id: r for r in tgt_jobs
                       if r.merge_id is not None}
             tgt_keys = {r.job_key for r in tgt_jobs}
+            # 키 충돌은 **변경 시작 전에** 전부 검증한다 (원자성) — 루프
+            # 도중 예외면 앞선 job이 이미 target에 들어간 부분-반영 상태로
+            # 중단되어, 같은 job이 양쪽에 중복 존재하고 intended_count가
+            # 실제 레코드 수보다 작아져 summary 불변식이 영구 파손된다.
+            dup = [r.job_key for r in src_jobs
+                   if not (r.merge_id and r.merge_id in by_mid)
+                   and r.job_key in tgt_keys]
+            if dup:
+                raise ValueError(
+                    f"merge 불가 — job 이름 충돌: {dup[:5]!r}")
             changed: List[JobRecord] = []
             for rec in src_jobs:
                 old = by_mid.get(rec.merge_id) if rec.merge_id else None
                 if old is not None:
                     # replace — 물리 키(job_key)는 target 것 유지
                     new = replace(rec, jobset_id=target_id,
-                                  lsf_job_name=old.job_key)
+                                  job_key=old.job_key)
                     self.store.store_delete_job(target_id, old.job_key)
                     self.store.store_add_job(new)
                     changed.append(new)
                 else:
-                    if rec.job_key in tgt_keys:
-                        raise ValueError(
-                            f"merge 불가 — job 이름 충돌: {rec.job_key!r}")
                     new = replace(rec, jobset_id=target_id)
                     self.store.store_add_job(new)
-                    tgt_keys.add(new.job_key)
                     changed.append(new)
-            # 부착물 누적 (조회/kill 시 전부 순회, §1.1)
             self.store.update_jobset(replace(
                 self.store.get_jobset(target_id),
                 intended_count=len(self.store.get_jobs(target_id)),
-                lsf_group_paths=_dedup(tgt.lsf_group_paths
-                                       + src.lsf_group_paths),
-                name_patterns=_dedup(tgt.name_patterns + src.name_patterns),
-                array_job_ids=_dedup(tgt.array_job_ids + src.array_job_ids),
                 merged_from=_dedup(tgt.merged_from + [source_id])))
             self.store.store_delete_jobset(source_id)
         return changed
@@ -262,12 +256,10 @@ class JobSetManager:
     # ------------------------------------------------------------------
     # 종결 (FR-5.7)
     # ------------------------------------------------------------------
-    def local_close_jobset(self, jobset_id: str, *, force: bool = False,
-                     run_bgdel: bool = True) -> JobSetRecord:
-        """전원 terminal이면 close. LSF group은 bgdel로 정리.
-
-        run_bgdel=False면 bgdel을 생략 — 호출자(manager)가 worker 스레드에서
-        비동기 수행할 때 사용 (main 스레드 LSF 호출 방지, QT-1)."""
+    def local_close_jobset(self, jobset_id: str, *,
+                           force: bool = False) -> JobSetRecord:
+        """전원 terminal이면 close. (v10: bgdel group 정리 제거 — 부착물이
+        생성되지 않으므로 정리할 group도 없다.)"""
         js = self.store.get_jobset(jobset_id)
         records = self.store.get_jobs(jobset_id)
         not_terminal = [r for r in records if not r.state.is_terminal]
@@ -277,9 +269,6 @@ class JobSetManager:
                 f"(force=True로 강제 가능)",
                 jobset_id=jobset_id,
                 job_keys=[r.job_key for r in not_terminal])
-        if run_bgdel:
-            for path in js.lsf_group_paths:
-                self.command.bgdel(path)
         return self.store.update_jobset(replace(js, closed=True))
 
 

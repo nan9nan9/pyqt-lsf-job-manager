@@ -74,8 +74,28 @@ class FakeLsf:
             cmd = argv[0].rsplit("/", 1)[-1]
             handler = getattr(self, f"_do_{cmd}", None)
             if handler is None:
-                return CommandResult(127, "", f"{cmd}: command not found")
+                # v10: wrapper 단일 제출 — LSF 명령이 아닌 프로그램 호출은
+                # 전부 'Job <id>'를 출력하는 제출 wrapper로 취급한다
+                # (실제 환경의 임의 wrapper와 동일한 계약).
+                return self._submit_generic(argv)
             return handler(argv[1:])
+
+    def _submit_generic(self, argv: List[str]) -> CommandResult:
+        """임의 wrapper 제출 흉내 — 커맨드 전체를 command로 기록하고
+        Job <id>를 출력한다. bsub용 실패 주입(fail_next_bsub 등)을 공유한다."""
+        if self.fail_next_bsub > 0:
+            self.fail_next_bsub -= 1
+            return CommandResult(1, "", "LSF error: queue unavailable")
+        if self.no_jobid_next_bsub > 0:
+            self.no_jobid_next_bsub -= 1
+            return CommandResult(0, "garbled output without id\n", "")
+        jid = self.next_id
+        self.next_id += 1
+        self.jobs[str(jid)] = FakeJob(
+            job_id=jid, array_index=None, name=f"job{jid}", group=None,
+            queue="default", command=" ".join(argv))
+        return CommandResult(
+            0, f"Job <{jid}> is submitted to queue <default>.\n", "")
 
     def calls_of(self, name: str) -> List[List[str]]:
         with self.lock:
@@ -369,6 +389,14 @@ class FakeLsf:
 
     def _do_bgdel(self, args: List[str]) -> CommandResult:
         return CommandResult(0, "Job group was deleted\n", "")
+
+    def _do_lsid(self, args: List[str]) -> CommandResult:
+        if self.fail_all_queries:
+            return CommandResult(255, "", "LSF is down. Please wait ...\n")
+        return CommandResult(
+            0, "IBM Spectrum LSF 10.1.0.0\n"
+               "My cluster name is fake_cluster\n"
+               "My master name is fakehost\n", "")
 
     # ------------------------------------------------------------------
     # customwrapper_sub — bsub를 호출하는 wrapper 흉내 (전처리 후 bsub로 위임).

@@ -1,4 +1,4 @@
-"""submit_wrapper_pattern_cmd — wrapper 제출 프로그램 치환.
+"""test_submit_wrapper_pattern_cmd — wrapper 제출 프로그램 치환.
 
 wrapper 경로는 argv를 그대로 실행하므로(프로그램명이 커맨드에 박혀 있다)
 bsub_path 같은 노브가 없다. 이 옵션은 argv[0]만 갈아끼워 커맨드를 안 고치고
@@ -32,7 +32,7 @@ def _submit_wrapper(mgr, qtbot, cmd="mytool_sub -q normal a.sp"):
 # ----------------------------------------------------------------------
 def test_pattern_match_replaces_program(qtbot, fake_lsf):
     """argv[0]만 대체되고 나머지 인자는 그대로 — 그 결과 실제로 제출된다."""
-    mgr = _make(fake_lsf, submit_wrapper_pattern_cmd=("*_sub", MOCK))
+    mgr = _make(fake_lsf, test_submit_wrapper_pattern_cmd=("*_sub", MOCK))
     try:
         js = _submit_wrapper(mgr, qtbot)
         # mock wrapper(basename customwrapper_sub)가 실행되어 job_id 파싱까지 성공
@@ -49,7 +49,7 @@ def test_pattern_match_replaces_program(qtbot, fake_lsf):
 
 def test_record_keeps_original_command(qtbot, fake_lsf):
     """치환은 실행만 바꾼다 — 레코드의 command는 원본(표시·재제출 기준)."""
-    mgr = _make(fake_lsf, submit_wrapper_pattern_cmd=("*_sub", MOCK))
+    mgr = _make(fake_lsf, test_submit_wrapper_pattern_cmd=("*_sub", MOCK))
     try:
         js = _submit_wrapper(mgr, qtbot)
         assert mgr.get_jobs(js.id)[0].command == "mytool_sub -q normal a.sp"
@@ -60,7 +60,7 @@ def test_record_keeps_original_command(qtbot, fake_lsf):
 def test_token_list_prepends_fixed_args(qtbot, fake_lsf):
     """대체값이 토큰 목록이면 고정 인자가 앞에 붙는다 (bsub_path와 같은 규약)."""
     mgr = _make(fake_lsf,
-                submit_wrapper_pattern_cmd=("*_sub", [MOCK, "--mock"]))
+                test_submit_wrapper_pattern_cmd=("*_sub", [MOCK, "--mock"]))
     try:
         _submit_wrapper(mgr, qtbot)
         assert fake_lsf.calls_of("customwrapper_sub")[0] == [
@@ -71,7 +71,7 @@ def test_token_list_prepends_fixed_args(qtbot, fake_lsf):
 
 def test_matches_on_basename_not_full_path(qtbot, fake_lsf):
     """커맨드가 경로째로 와도 같은 규칙이 걸린다 — basename으로 매칭."""
-    mgr = _make(fake_lsf, submit_wrapper_pattern_cmd=("*_sub", MOCK))
+    mgr = _make(fake_lsf, test_submit_wrapper_pattern_cmd=("*_sub", MOCK))
     try:
         _submit_wrapper(mgr, qtbot, cmd="/prod/bin/mytool_sub -q normal a.sp")
         assert fake_lsf.calls_of("customwrapper_sub")[0][0] == MOCK
@@ -81,7 +81,7 @@ def test_matches_on_basename_not_full_path(qtbot, fake_lsf):
 
 def test_non_matching_program_untouched(qtbot, fake_lsf):
     """패턴에 안 맞는 프로그램은 원본 그대로 실행된다 (치환은 *_sub만)."""
-    mgr = _make(fake_lsf, submit_wrapper_pattern_cmd=("*_sub", MOCK))
+    mgr = _make(fake_lsf, test_submit_wrapper_pattern_cmd=("*_sub", MOCK))
     try:
         _submit_wrapper(mgr, qtbot, cmd="mytool_run -x a.sp")
         assert fake_lsf.calls_of("mytool_run")[0] == ["mytool_run", "-x",
@@ -122,15 +122,15 @@ def test_no_option_is_noop(qtbot, fake_lsf):
 ])
 def test_invalid_option_rejected(bad):
     with pytest.raises(ValueError):
-        LsfConfig(submit_wrapper_pattern_cmd=bad)
+        LsfConfig(test_submit_wrapper_pattern_cmd=bad)
 
 
 def test_manager_kwarg_and_typo(fake_lsf):
     """②(생성자) 계층 옵션 — kwarg로도 받고 오타는 TypeError (OPT-2)."""
     mgr = LsfJobManager(store=InMemoryStore(), runner=fake_lsf,
-                        submit_wrapper_pattern_cmd=("*_sub", MOCK))
+                        test_submit_wrapper_pattern_cmd=("*_sub", MOCK))
     try:
-        assert mgr.config.submit_wrapper_pattern_cmd == ("*_sub", MOCK)
+        assert mgr.config.test_submit_wrapper_pattern_cmd == ("*_sub", MOCK)
     finally:
         mgr.shutdown()
     with pytest.raises(TypeError):

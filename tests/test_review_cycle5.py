@@ -105,7 +105,7 @@ def test_verify_none_array_index_not_element_matched(qtbot, manager, fake_lsf):
     # array_index=None인 RUN 레코드 (비array/collapsed)
     manager.store.store_add_jobs([JobRecord(
         job_id=500, array_index=None, jobset_id=jsid,
-        lsf_job_name=f"{jsid}_0", state=JobState.RUN, command="r")])
+        job_key=f"{jsid}_0", state=JobState.RUN, command="r")])
     fake_lsf.jobs["500"] = FakeJob(
         job_id=500, array_index=None, name=f"{jsid}_0", group=None,
         queue="q", command="r", stat="RUN")   # verify 재조회에서 RUN 유지

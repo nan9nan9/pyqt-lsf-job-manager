@@ -17,7 +17,7 @@
 ```python
 from lsfmgr import LsfJobManager
 
-mgr = LsfJobManager()          # bsub_path 지정 불필요 (wrapper 가 커맨드에 포함됨)
+mgr = LsfJobManager()          # 제출 프로그램은 커맨드에 포함됨
 
 # 모니터링은 매니저 통합 Signal 한 번만 연결하면 모든 JobSet 이벤트가 온다.
 # (JobSet 마다 connect 할 필요 없음 — jobset_id 가 함께 온다)
@@ -423,7 +423,7 @@ mgr.submit(js)
 
 - 더 쉬운 방법은 `examples/common.py` 의 `make_manager()` / `wrapper()` 헬퍼를
   쓰는 것이다.
-- `examples/basic_example.py` 는 wrapper 선택/‏혼합으로 제출하고, **실제 실행된
+- `examples/gui_demo.py` 는 wrapper 선택/‏혼합으로 제출하고, **실제 실행된
   커맨드**·**할당된 job_id**·**상태 전이**를 로그로 보여준다.
 
 ```
@@ -449,18 +449,11 @@ $ customwrapper_sub -q long tb_1.v
 
 ---
 
-## 10. (참고) 저수준 경로 — bsub 직접 조립 (`wrapper=False`)
+## 10. (기록) 저수준 bsub 조립 경로 — v10에서 삭제됨
 
-lsfmgr 가 **직접 `bsub` 명령을 조립**하는 저수준 경로도 있다. 모든 job 이 같은
-`bsub`(또는 같은 wrapper) 를 쓰고, lsfmgr 가 `-q/-J/-g` 를 붙여 그룹·이름
-기반으로 관리하길 원할 때 `create_jobset(..., wrapper=False)` 로 쓴다.
-
-```python
-mgr = LsfJobManager(bsub_path="bsub")          # 또는 ["customwrapper_sub", "--proj", "X"]
-js = mgr.create_jobset(["mytool run_1.sp", ...], wrapper=False)  # bsub 인자 조립
-mgr.submit(js)
-```
-
-- 이 경로는 `-g` 그룹 기반 "kill 1회" 등 부착물 최적화를 쓴다.
-- 하지만 **job 마다 다른 wrapper** 는 표현할 수 없다(프로그램이 매니저 1개 고정).
-  그 경우는 기본(wrapper=True) 경로를 쓴다.
+lsfmgr 가 직접 `bsub` 인자를 조립하던 경로(`create_jobset(..., wrapper=False)`
++ `bsub_path`/`JobSpec`/`-q`/`-J`/`-g` 부착물, group 기반 kill tier, bgdel)는
+**v10에서 전부 삭제됐다** — 운영 환경이 wrapper 제출 전용이기 때문이다.
+제출은 wrapper 커맨드 실행 단일 경로이고, 조회·kill 은 job_id chunk 단일
+경로다. 관련 옵션(`queue`/`resource_req`/`output_dir`/`default_queue`/
+`bsub_path`/`bgdel_path`/`lsf_group_root`)은 지정 시 경고 후 무시된다.

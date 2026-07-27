@@ -90,17 +90,33 @@ def test_retry_delay_clamped_to_qtimer_range():
 # 4. chunk bkill 장애에도 kill_finished 발행
 # ----------------------------------------------------------------------
 def test_kill_chunk_failure_still_finishes(qtbot, manager, fake_lsf):
+    """v10.1: 전체 kill도 confirm 경로 — 일시 장애 1회는 **재시도가 흡수**해
+    errors 없이 완료되고, 지속 장애는 미확인+errors로 정직하게 보고하되
+    kill_finished는 어느 쪽이든 반드시 발행된다."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js = submit_cmds(manager, ["customwrapper_sub -i a.sp"], wrapper=True,
                                     auto_poll=False)
-    fake_lsf.fail_next_bkill = 1          # mbatchd 장애 주입
+    # ① 일시 장애 1회 — 재시도로 회복 (이전엔 kill 통째 무위 + errors)
+    fake_lsf.fail_next_bkill = 1
     with qtbot.waitSignal(manager.kill_finished, timeout=5000) as blocker:
         manager.kill(js)
     report = blocker.args[1]
-    assert report.errors
-    # 장애 상황이므로 optimistic 오표시(EXIT) 금지 — 재시도 여지 유지
-    assert js.jobs(states={JobState.EXIT}) == []
-    # 장애 해소 후 재kill은 정상 완료
+    assert not report.errors
+    assert report.kill_retries >= 1 and report.unconfirmed == 0
+    assert fake_lsf.alive_jobs() == []
+    assert js.jobs(states={JobState.EXIT})       # 확인된 kill은 EXIT 반영
+
+    # ② 지속 장애 — 재시도 소진 후 미확인+errors, 확인 안 된 job은 EXIT 금지
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        manager.submit(js, auto_poll=False)      # 재제출로 되살림
+    fake_lsf.fail_next_bkill = 10                # 전 라운드 장애
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
+        manager.kill(js)
+    report = blocker.args[1]
+    assert report.errors and report.unconfirmed >= 1
+    assert js.jobs(states={JobState.EXIT}) == []  # 미확인 — optimistic 억제
+    # ③ 장애 해소 후 재kill은 정상 완료
+    fake_lsf.fail_next_bkill = 0
     with qtbot.waitSignal(manager.kill_finished, timeout=5000) as blocker:
         manager.kill(js)
     assert not blocker.args[1].errors

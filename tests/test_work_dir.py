@@ -113,21 +113,6 @@ def test_work_dirs_length_mismatch_raises(qtbot, manager):
 
 
 # ----------------------------------------------------------------------
-# bsub 경로(wrapper=False)도 work_dir을 cwd로 전달한다
-# ----------------------------------------------------------------------
-def test_bsub_path_uses_work_dir(qtbot, manager, fake_lsf):
-    js = manager.create_jobset(["run.sp"], work_dirs=["/scratch/bsub_a"],
-                               wrapper=False)
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        manager.submit(js, auto_poll=False)
-    subs = [(argv, cwd)
-            for argv, cwd in zip(fake_lsf.calls, fake_lsf.call_cwds)
-            if argv and argv[0].rsplit("/", 1)[-1] == "bsub"]
-    assert subs, "bsub 호출 없음"
-    assert all(cwd == "/scratch/bsub_a" for _a, cwd in subs)
-
-
-# ----------------------------------------------------------------------
 # 하위호환: 구 2-arg runner((argv, timeout))도 어댑터로 감싸져 동작한다
 # (Runner 계약이 cwd 추가로 확장됐지만 기존 주입 runner를 깨지 않는다)
 # ----------------------------------------------------------------------
@@ -158,13 +143,10 @@ def test_invalid_work_dir_classified_submit_error():
     def raising_runner(argv, timeout, cwd=None):
         raise FileNotFoundError(2, "No such file or directory", cwd)
     cmd = LsfCommand(config=LsfConfig(), runner=raising_runner)
-    for call in (lambda: cmd.run_submit(["customwrapper_sub", "a.sp"],
-                                        cwd="/nope"),
-                 lambda: cmd.bsub("run.sh", cwd="/nope")):
-        with pytest.raises(SubmitError) as ei:
-            call()
-        assert ei.value.fail_reason == "BSUB_OSERROR"
-        assert ei.value.retryable is False
+    with pytest.raises(SubmitError) as ei:
+        cmd.run_submit(["customwrapper_sub", "a.sp"], cwd="/nope")
+    assert ei.value.fail_reason == "BSUB_OSERROR"
+    assert ei.value.retryable is False
 
 
 def test_submit_invalid_work_dir_lands_submit_failed(qtbot, fake_lsf, config):

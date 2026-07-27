@@ -1,8 +1,7 @@
-"""Killer — kill 전략 자동 선택 + verify (FR-3).
+"""Killer — chunked bkill + verify (FR-3).
 
-전략 우선순위 (ARG_MAX 방지, LSF master 부하 최소화):
-① bkill -g <path> 0   ② bkill <array_id>   ③ bkill -J "<pattern>" 0
-④ chunked bkill (최후 수단). 부착물 복수면 전부 순회, 없으면 ④ 직행.
+(v10: group/array/name 전략 tier 삭제 — 부착물이 생성되지 않으므로
+ kill은 job_id 기반 chunked bkill 단일 경로다. ARG_MAX 안전은 chunk_args.)
 """
 from __future__ import annotations
 
@@ -243,8 +242,9 @@ class _KillTask(QRunnable):
             if not quiesced:
                 # 대기 초과는 report.errors에 남긴다 — 스냅샷 이후 제출이
                 # 완료된 job이 kill 대상에서 빠졌을 수 있다는 뜻이라, 로그로만
-                # 삼키면 kill_finished가 '전부 정리됨'으로 오보된다. errors가
-                # 남으면 optimistic EXIT 표시도 함께 억제된다(오표시 방지).
+                # 삼키면 kill_finished가 '전부 정리됨'으로 오보된다.
+                # (v10.1: per-id 확인 도입으로 optimistic 마킹은 resolved
+                # 기반 — errors가 있어도 확인된 job의 EXIT 표시는 정확하다)
                 msg = ("quiesce: submit 정지 대기 초과 — 그 사이 제출된 "
                        "job이 kill에서 빠졌을 수 있음")
                 log.warning("%s: %s", msg, self.jobset_id)
@@ -288,17 +288,22 @@ class _KillTask(QRunnable):
                     killed_recs = [r for r in recs
                                    if self._id_str(r) in resolved]
         else:
-            requested, calls, alive = self._kill_whole_jobset(
+            (requested, calls, alive,
+             unconfirmed, retries, resolved) = self._kill_whole_jobset(
                 strategies, errors)
-            # 전체 kill은 group/name 전략(1명령)이라 per-id 확인이 없다 —
-            # 전략이 오류 없이 수행됐으면 살아있던 대상 전부를 확인된 것으로
-            # 간주한다(kill 명령이 수락됨). verify는 **bare job_id**(whole)로
-            # 센다 — 전체 kill은 그 job_id 전부가 대상이므로, kill 창에 rerun
-            # (bsub -r)으로 되살아난 element(스냅샷엔 없던)도 잔존으로 잡는다.
+            # 전체 kill도 confirm 경로(per-id 확인 + chunk 격리 + 재시도)다 —
+            # v10.1: 무확인 bkill_targets는 첫 chunk 장애에 나머지 chunk를
+            # 건너뛰고 재시도도 없어 kill이 통째로 무위가 됐다(부분/개별
+            # kill과 비대칭). verify는 **bare job_id**(whole)로 센다 — 전체
+            # kill은 그 job_id 전부가 대상이므로, kill 창에 rerun(bsub -r)으로
+            # 되살아난 element(스냅샷엔 없던)도 잔존으로 잡는다.
             verify_targets = {str(r.job_id) for r in alive
                               if r.job_id is not None}
-            if optimistic and not errors:
-                killed_recs = alive
+            if optimistic:
+                # per-id 확인이 있으므로 errors 유무와 무관하게 **확인된
+                # id만** 마킹한다 — 확인 안 된 id는 on-LSF로 남아 폴링/재kill
+                killed_recs = [r for r in alive
+                               if str(r.job_id) in resolved]
 
         # verify를 optimistic 마킹보다 **먼저** 한다. 먼저 EXIT로 찍으면 그
         # 레코드가 재조회 대상(_ON_LSF)과 잔존 집계(is_on_lsf)에서 모두 빠져
@@ -307,8 +312,10 @@ class _KillTask(QRunnable):
         # EXIT로 덮어 숨기지 않고 폴링/재kill에 남긴다.
         still_alive: Optional[int] = None
         alive_keys: set = set()
+        verify_changed: List = []
         if self.verify and self.jobset_id:
-            still_alive, alive_keys = self._verify(verify_targets)
+            still_alive, alive_keys, verify_changed = \
+                self._verify(verify_targets)
 
         # optimistic 정책: 확인된 job을 즉시 EXIT로 전이 (bjobs 대기 없이).
         # EXIT는 terminal이라 폴링 대상(is_on_lsf)에서 빠져 다시 조회되지 않는다.
@@ -318,11 +325,17 @@ class _KillTask(QRunnable):
                        if alive_keys else killed_recs)
             changed = self._mark_exited(to_mark)
 
+        # verify 조회가 수행한 전이도 report.changed로 합류시킨다 — verify가
+        # terminal(EXIT/DONE)로 전이시킨 job은 이후 폴링(_ON_LSF만 조회)에도,
+        # optimistic 마킹(is_on_lsf guard)에도 다시 안 잡혀 행 갱신 신호가
+        # 영구 유실됐다(리뷰 M5). verify 전이 → optimistic 마킹 순서라
+        # 중복 시에도 최신(optimistic) 레코드가 batch 뒤에 온다.
         return KillReport(
             jobset_id=self.jobset_id, requested=requested,
             strategies=strategies, command_calls=calls,
             still_alive=still_alive, unconfirmed=unconfirmed,
-            kill_retries=retries, changed=changed, errors=errors)
+            kill_retries=retries, changed=verify_changed + changed,
+            errors=errors)
 
     @staticmethod
     def _id_str(rec) -> str:
@@ -392,113 +405,42 @@ class _KillTask(QRunnable):
 
     def _kill_whole_jobset(self, strategies: List[str],
                            errors: List[str]) -> tuple:
-        """FR-3.1 전략 우선순위. 부착물 성공 시 chunking 생략.
-        envpath 지정 시(MC forward) group/‏name은 forward job에 안 닿으므로
-        그 env를 source한 id 기반 chunk로만 죽인다."""
+        """전체 kill — 살아있는 job_id 전부를 confirm chunked bkill로
+        (v10.1: 부분/개별 kill과 동일한 _kill_confirm 경로 — chunk 단위
+        장애 격리 + 미확인분 재시도 + per-id 해소 확인).
+        envpath 지정 시(MC forward) 그 env를 source한 bkill로 죽인다.
+        array element는 parent id 1개로 전체가 죽으므로 dedupe.
+        반환: (requested, calls, alive, unconfirmed, retries, resolved)."""
         k = self.killer
-        js = k.store.get_jobset(self.jobset_id)
+        k.store.get_jobset(self.jobset_id)       # 존재 검증 (없으면 예외)
         alive = [r for r in k.store.get_jobs(self.jobset_id)
                  if r.state.is_on_lsf]
         if not alive:
-            return 0, 0, []
+            return 0, 0, [], 0, 0, set()
 
-        if self.envpath:
-            ids = sorted({str(r.job_id) for r in alive
+        targets = sorted({str(r.job_id) for r in alive
                           if r.job_id is not None})
-            calls = 0
-            if ids:
-                n = len(ids)
-                try:
-                    calls = k.command.bkill_targets(
-                        ids, envpath=self.envpath,
-                        on_progress=lambda done: self._emit_progress(done, n))
-                    strategies.append("chunk(sourced)")
-                except LsfmgrError as e:
-                    errors.append(f"chunk: {e}")
-                    log.warning("kill 전략 실패 chunk(sourced): %s", e)
-            return len(alive), calls, alive
+        calls = unconfirmed = retries = 0
+        resolved: set = set()
+        if targets:
+            calls, unconfirmed, retries, resolved = self._kill_confirm(
+                targets, errors)
+            strategies.append("chunk(sourced)" if self.envpath else "chunk")
+        return len(alive), calls, alive, unconfirmed, retries, resolved
 
-        calls = 0
-        covered = False
-        # 부착물 하나라도 "실행 실패"(예외)면 커버 여부를 신뢰할 수 없다 —
-        # merge된 jobset에서 group A 성공 + group B 장애 시 covered만 믿으면
-        # B 소속 job이 영원히 살아남는다. 장애 시 fallback을 강제한다.
-        had_error = False
-        # 부착물(-g/-J/array)은 bsub 경로 job에만 존재한다 — wrapper job은
-        # 커버 자체가 불가능하므로 부착물 성공(covered) 여부와 무관하게
-        # ④ chunk로 직접 죽인다. merge된 혼합 jobset에서 group 성공만 믿으면
-        # wrapper job이 영원히 살아남고, optimistic 정책은 그 생존 job까지
-        # EXIT로 오표시한다.
-        attachable = [r for r in alive if not r.via_wrapper]
-
-        def run_tier(attempts) -> None:
-            nonlocal calls, covered, had_error
-            for name, fn in attempts:
-                matched = self._attempt(fn, name, strategies, errors)
-                if matched is None:
-                    had_error = True
-                else:
-                    calls += 1
-                    covered = covered or matched
-
-        if attachable:
-            run_tier([(f"group:{p}", lambda p=p: k.command.bkill_by_group(p))
-                      for p in js.lsf_group_paths]                   # ①
-                     + [(f"array:{a}", lambda a=a: k.command.bkill_array(a))
-                        for a in js.array_job_ids])                  # ②
-            if not covered or had_error:
-                run_tier([(f"name:{pt}",
-                           lambda pt=pt: k.command.bkill_by_name(pt))
-                          for pt in js.name_patterns])               # ③
-        # ④ 최후 수단 — 부착물이 못 덮은 bsub job + 애초에 커버 불가인 wrapper job
-        chunk_recs = (attachable if (not covered or had_error) else [])
-        chunk_recs = chunk_recs + [r for r in alive if r.via_wrapper]
-        if chunk_recs:
-            # array element는 parent id 1개로 전체가 죽으므로 dedupe.
-            # 이미 죽은 job에 대한 중복 bkill은 no-match로 무해.
-            targets = sorted({str(r.job_id) for r in chunk_recs
-                              if r.job_id is not None})
-            if targets:
-                n = len(targets)
-                # 장애(LSF 순단 등)는 errors에 담고 계속 — 예외가 여기서
-                # 전파되면 kill_finished가 영영 발행되지 않고, errors가
-                # 남아야 optimistic 오표시(killed_recs=alive)도 막힌다
-                try:
-                    calls += k.command.bkill_targets(
-                        targets,
-                        on_progress=lambda done: self._emit_progress(done, n))
-                    strategies.append("chunk")
-                except LsfmgrError as e:
-                    errors.append(f"chunk: {e}")
-                    log.warning("kill 전략 실패 chunk: %s", e)
-        return len(alive), calls, alive
-
-    @staticmethod
-    def _attempt(fn, name: str, strategies: List[str],
-                 errors: List[str]) -> Optional[bool]:
-        """전략 1회 시도. 반환: True=대상 kill / False=no-match(커버 실패,
-        부착물이 유실됐거나 job이 부착물에 안 붙은 경우 — fallback 필요) /
-        None=실행 자체 실패(예외)."""
-        try:
-            matched = fn()
-        except LsfmgrError as e:
-            errors.append(f"{name}: {e}")
-            log.warning("kill 전략 실패 %s: %s", name, e)
-            return None
-        strategies.append(name if matched else f"{name}(no-match)")
-        return matched
-
-    def _verify(self, targets: set) -> Tuple[Optional[int], set]:
-        """재조회로 실제 종료 확인 (FR-3.3). 반환: (잔존 수, 잔존 job_key 집합).
+    def _verify(self, targets: set) -> Tuple[Optional[int], set, List]:
+        """재조회로 실제 종료 확인 (FR-3.3).
+        반환: (잔존 수, 잔존 job_key 집합, 조회가 전이시킨 레코드 목록 —
+        caller가 report.changed에 합류시켜 신호 유실을 막는다).
         kill 대상(targets: "id"/"id[idx]"/"id[m-n]" 문자열) 중 아직 LSF에
         잔존하는 job을 센다 — 부분/개별 kill에서 대상 아닌 job은 세지 않는다.
         element 지정("id[idx]")은 그 element만, 범위("id[m-n]")는 그 범위
         element만, bare id("id")는 그 job_id 전체. 파싱 불가한 target은 bare
         id로 관대 처리(강건성 — 예외로 kill_finished가 오보되지 않게).
-        targets가 비면 (0, set()), 조회 실패는 (None, set())=미검증."""
+        targets가 비면 (0, set(), []), 조회 실패는 (None, set(), [])=미검증."""
         k = self.killer
         if not targets:
-            return 0, set()
+            return 0, set(), []
         exact: set = set()          # (job_id, array_index) — element 지정
         ranges: List[Tuple[int, int, int]] = []  # (job_id, lo, hi) — 범위 지정
         whole: set = set()          # job_id — bare id (비array/array 전체)
@@ -520,12 +462,12 @@ class _KillTask(QRunnable):
             else:                                  # 범위 [m-n]
                 ranges.append((pid, int(m.group(2)), int(m.group(3))))
         try:
-            k.querier.query(self.jobset_id)      # Store 갱신 목적 (반환값 미사용)
+            qr = k.querier.query(self.jobset_id)   # Store 갱신 + 전이 수집
         except LsfmgrError as e:
             log.warning("kill verify 조회 실패: %s", e)
             # 조회 실패는 '미확인'이다 — 수(-1 같은 센티넬)로 뭉개지 않는다.
             # None을 caller가 KillReport.still_alive(None=미검증)로 그대로 전달.
-            return None, set()
+            return None, set(), []
 
         # element/범위 target은 (job_id, array_index)로 정확 매칭한다.
         # array_index=None 레코드(비array job, 또는 monitor가 array를 접은
@@ -545,7 +487,7 @@ class _KillTask(QRunnable):
         alive = [r for r in k.store.get_jobs(self.jobset_id)
                  if _hit(r) and r.state.is_on_lsf
                  and r.state not in (JobState.UNKWN, JobState.ZOMBI)]
-        # 생존 수 + 생존 레코드의 job_key 집합을 함께 반환한다 — caller가
-        # optimistic EXIT 마킹에서 이 생존분을 제외해(EXIT로 덮어 숨기지
-        # 않도록) 폴링/재kill에 남긴다.
-        return len(alive), {r.job_key for r in alive}
+        # 생존 수 + 생존 레코드의 job_key 집합 + 조회 전이분을 함께 반환한다.
+        # 생존분은 caller가 optimistic EXIT 마킹에서 제외해(EXIT로 덮어 숨기지
+        # 않도록) 폴링/재kill에 남기고, 전이분은 report.changed로 합류시킨다.
+        return len(alive), {r.job_key for r in alive}, list(qr.changed)

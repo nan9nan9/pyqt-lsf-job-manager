@@ -150,14 +150,15 @@ def test_whole_kill_envpath(qtbot, fake_lsf, config):
 # ----------------------------------------------------------------------
 # envpath 없으면 기존 group 전략 그대로 (회귀)
 # ----------------------------------------------------------------------
-def test_no_envpath_keeps_group_strategy(qtbot, manager, fake_lsf):
+def test_no_envpath_uses_plain_bkill(qtbot, manager, fake_lsf):
+    """envpath 미지정이면 tcsh source 없이 plain bkill chunk로 죽인다."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js = submit_cmds(manager, ["a", "b"], auto_poll=False)
     fake_lsf.set_all("RUN")
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as b:
         manager.kill(js)
     assert fake_lsf.alive_jobs() == []
-    assert any("group:" in s for s in b.args[1].strategies)
+    assert "chunk" in b.args[1].strategies
     assert not fake_lsf.calls_of("tcsh")
 
 
@@ -177,7 +178,7 @@ def test_kill_array_element_envpath(qtbot, fake_lsf, config):
         jsid, aid = js.id, 9300
         mgr.store.store_add_jobs([JobRecord(
             job_id=aid, array_index=i, jobset_id=jsid,
-            lsf_job_name=f"{jsid}[{i}]", state=JobState.RUN, command="r")
+            job_key=f"{jsid}[{i}]", state=JobState.RUN, command="r")
             for i in (1, 2, 3)])
         for i in (1, 2, 3):
             fake_lsf.jobs[f"{aid}[{i}]"] = FakeJob(

@@ -41,10 +41,11 @@ class JobsetQuerier:
         self.command = command
 
     def query(self, jobset_id: str) -> QueryResult:
-        js = self.store.get_jobset(jobset_id)
-        # 조회 대상(is_on_lsf)만 SQL 단에서 걸러 가져온다 — 전체 스캔 대신
-        # 인덱스(jobset_id,state)로. 대다수가 terminal인 대형 jobset에서 매
-        # 사이클 terminal 레코드까지 재구성하던 비용을 없앤다 (NFR-3).
+        self.store.get_jobset(jobset_id)     # 존재 검증 (없으면 예외)
+        # 조회 대상(is_on_lsf)만 store 단에서 걸러 가져온다 — 대다수가
+        # terminal인 대형 jobset에서 매 사이클 terminal 레코드까지 재구성해
+        # 나르던 비용을 줄인다 (NFR-3. InMemory는 상태 필터만, SQL 백엔드를
+        # 다시 붙인다면 (jobset_id,state) 인덱스 전제).
         targets = self.store.get_jobs(jobset_id, states=_ON_LSF)   # FR-4.2
         if not targets:
             return QueryResult(jobset_id, self.store.summary(jobset_id))
@@ -62,8 +63,7 @@ class JobsetQuerier:
         # 행을 섞어 folded 레코드를 잘못된 terminal로 확정하지 않게 한다.
         by_id: Dict[int, Dict[Optional[int], JobStatus]] = {}
 
-        ids = sorted({r.job_id for r in targets if r.job_id is not None}
-                     | set(js.array_job_ids))
+        ids = sorted({r.job_id for r in targets if r.job_id is not None})
         bjobs_failed: set = set()
         if ids:
             sts, bjobs_failed = self.command.bjobs_by_ids(ids)
@@ -118,33 +118,42 @@ class JobsetQuerier:
             # 반영(start/finish/cwd는 set-once). run_time_s(경과 실행시간)은
             # RUN 중 매 폴링 증가하므로, poll_runtime_updates=True일 때만 갱신
             # 대상에 넣어 jobs_updated로 live runtime을 발행한다(끄면 상태 전이
-            # 시점에만 반영 — 대량 job 폴링 부하 절감). 클러스터 필드는
-            # collect_clusters일 때만 비교·기록한다 — 안 그러면 이전 세션이
-            # 채운 forward_cluster를 (수집 안 하는) 이번 세션 폴링이 st의 None으로
-            # 덮어 데이터가 소실된다(store 주입/복원 시나리오).
-            # bjobs -o가 MC 필드를 거부해 FULL 포맷으로 저하되면 st의 cluster는
-            # None이 된다 — 이때 저장된 forward_cluster(non-None)를 None으로 덮으면
-            # MC forwarding 정보가 소실된다. cluster는 forward 시 한 번 set되고
-            # 되돌지 않으므로, st가 None이면 '판정 불가'로 보고 저장값을 보존한다.
+            # 시점에만 반영 — 대량 job 폴링 부하 절감).
+            #
+            # 확장 필드(run_time/start/finish/cwd)는 **유효값(eff) 기준**으로
+            # 비교·기록한다 — 포맷이 CORE로 강등되면 st의 확장 필드가 전부
+            # None인데, 이를 그대로 쓰면 이미 채워진 저장값을 None으로 덮어
+            # 소실시키고(리뷰 M6), None!=저장값 비교가 매 사이클 참이 되어
+            # 전 job이 무의미하게 재전이(jobs_updated 스팸)된다. st가 None이면
+            # '판정 불가'로 보고 저장값을 보존한다 — set-once 계약과 정합
+            # (재제출 리셋이 이 필드들을 지우므로 None으로 되돌릴 필요 없음).
+            # 클러스터 필드도 같은 원리(+collect_clusters 꺼짐 시 무접촉).
+            eff_run = (st.run_time_s if st.run_time_s is not None
+                       else rec.run_time_s)
+            eff_start = (st.start_time if st.start_time is not None
+                         else rec.start_time)
+            eff_finish = (st.finish_time if st.finish_time is not None
+                          else rec.finish_time)
+            eff_cwd = (st.working_dir if st.working_dir is not None
+                       else rec.working_dir)
             src_changed = (collect_clusters and st.source_cluster is not None
                            and st.source_cluster != rec.source_cluster)
             fwd_changed = (collect_clusters and st.forward_cluster is not None
                            and st.forward_cluster != rec.forward_cluster)
             if (st.state is not rec.state or st.exit_code != rec.exit_code
-                    or st.start_time != rec.start_time
-                    or st.finish_time != rec.finish_time
-                    or st.working_dir != rec.working_dir
+                    or eff_start != rec.start_time
+                    or eff_finish != rec.finish_time
+                    or eff_cwd != rec.working_dir
                     or src_changed or fwd_changed
                     or (runtime_updates
-                        and st.run_time_s != rec.run_time_s)):
+                        and eff_run != rec.run_time_s)):
                 fields = {
-                    "exit_code": st.exit_code, "run_time_s": st.run_time_s,
-                    "start_time": st.start_time, "finish_time": st.finish_time,
-                    "working_dir": st.working_dir,
+                    "exit_code": st.exit_code, "run_time_s": eff_run,
+                    "start_time": eff_start, "finish_time": eff_finish,
+                    "working_dir": eff_cwd,
                     "job_id": rec.job_id if rec.job_id is not None
                     else st.job_id}
                 if collect_clusters:     # 끄면 저장값 보존(덮지 않음)
-                    # st가 None(포맷 저하)이면 저장값 보존 — 소실 방지
                     fields["source_cluster"] = (st.source_cluster
                         if st.source_cluster is not None else rec.source_cluster)
                     fields["forward_cluster"] = (st.forward_cluster
@@ -251,7 +260,7 @@ def _aggregate_elements(rec: JobRecord,
     fwds = [e.forward_cluster for e in elems if e.forward_cluster]
     return JobStatus(
         job_id=rec.job_id, array_index=None, state=state,
-        exit_code=exit_code, job_name=rec.lsf_job_name,
+        exit_code=exit_code, job_name=rec.job_key,
         run_time_s=max(rts) if rts else None,
         start_time=min(starts) if starts else None,
         # 실행 중 element가 남았으면 종료 시각은 아직 실측이 아니다

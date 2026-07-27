@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import pytest
 
-from lsfmgr import JobSpec, JobState
+from lsfmgr import JobState
 from tests.conftest import submit_cmds
 
 
 @pytest.fixture
 def submitted(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        jsid = submit_cmds(manager, [JobSpec(command="run 0")]).id
+        jsid = submit_cmds(manager, ["run 0"]).id
     return jsid
 
 

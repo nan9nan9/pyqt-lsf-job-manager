@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import pytest
 
-from lsfmgr import JobSpec, JobState
+from lsfmgr import JobState
 from tests.conftest import submit_cmds
 
 
 @pytest.fixture
 def submitted(qtbot, manager, fake_lsf):
     """job 20개 submit 완료된 jobset."""
-    jobs = [JobSpec(command=f"r {i}") for i in range(20)]
+    jobs = [f"r {i}" for i in range(20)]
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         jsid = submit_cmds(manager, jobs).id
     return jsid
@@ -90,29 +90,35 @@ def test_runtime_captured_from_bjobs(qtbot, manager, fake_lsf, submitted):
     assert all(r.run_time_s is None for r in others)
 
 
-def test_name_fallback_rejects_id_mismatch(qtbot, manager, fake_lsf,
-                                           submitted):
-    """이름은 같지만 job_id가 다른 인스턴스(name 재사용)는 fallback 매칭에서
-    버린다 — 다른 job의 상태/exit_code가 이 레코드에 혼입되면 안 된다."""
-    from tests.fake_lsf import FakeJob
+def test_core_downgrade_preserves_runtime_fields(qtbot, manager, fake_lsf,
+                                                  submitted):
+    """리뷰 M6 회귀 — 포맷이 CORE로 강등돼 확장 필드가 안 오는 사이클이
+    이미 저장된 run_time/start/finish/cwd를 None으로 덮지 않고, 무의미한
+    재전이(jobs_updated 스팸)도 만들지 않는다."""
+    from datetime import datetime
     rec0 = manager.get_jobs(submitted)[0]
-    # 원본 job은 bjobs에서 사라지고(bhist에도 없음),
-    fake_lsf.vanish_job(rec0.job_id, in_bhist=False)
-    # 같은 이름의 '다른' job(id 상이)이 group probe에 잡히도록 심는다
-    js = manager.store.get_jobset(submitted)
-    fake_lsf.jobs["99999"] = FakeJob(
-        job_id=99999, array_index=None, name=rec0.lsf_job_name,
-        group=js.lsf_group_paths[0], queue="normal", command="impostor",
-        stat="DONE", exit_code=0)
+    j = fake_lsf.jobs[str(rec0.job_id)]
+    j.stat, j.run_time_s = "RUN", 42
+    j.start_time = "2026-07-28 09:00:00"
+    j.working_dir = "/proj/run"
+    manager.query_once(submitted)
+    qtbot.waitUntil(lambda: manager.store.get_job(
+        submitted, rec0.job_key).run_time_s == 42, timeout=10000)
 
-    with qtbot.waitSignal(manager.jobset_updated, timeout=10000):
-        manager.query_once(submitted)
+    # CORE 강등 재현 — 이후 조회는 확장 필드 없이 온다
+    cmd = manager.querier.command
+    cmd._bjobs_fmt_idx = len(cmd._bjobs_formats) - 1
+    got = []
+    manager.jobs_updated.connect(lambda _j, rs: got.append(rs))
+    manager.query_once(submitted)
+    qtbot.wait(50)
 
     after = manager.store.get_job(submitted, rec0.job_key)
-    # 사칭 job의 DONE이 혼입되지 않아야 한다 — id 불일치로 fallback 거부
-    # (원본은 미발견 → bhist에도 없음 → LOST 경로)
-    assert not (after.state is JobState.DONE and after.job_id == rec0.job_id)
-    assert after.state in (JobState.LOST, rec0.state)
+    assert after.run_time_s == 42                       # 보존 (None 덮기 금지)
+    assert after.start_time == datetime(2026, 7, 28, 9, 0, 0)
+    assert after.working_dir == "/proj/run"
+    # 상태·값 무변화 사이클 — 재전이/발행 없음 (스팸 방지)
+    assert not any(any(r.job_key == rec0.job_key for r in rs) for rs in got)
 
 
 # ----------------------------------------------------------------------
@@ -124,7 +130,7 @@ def test_bhist_fallback(qtbot, manager, fake_lsf, submitted):
     fake_lsf.vanish_job(recs[0].job_id, in_bhist=True)   # bjobs엔 없음
     with qtbot.waitSignal(manager.jobset_updated, timeout=10000):
         manager.query_once(submitted)
-    rec = manager.store.get_job(submitted, recs[0].lsf_job_name)
+    rec = manager.store.get_job(submitted, recs[0].job_key)
     assert rec.state is JobState.DONE                    # bhist로 복구
 
 
@@ -177,7 +183,7 @@ def test_graceful_degradation_without_attachments(qtbot, manager, fake_lsf,
     from dataclasses import replace
     js = manager.store.get_jobset(submitted)
     manager.store.update_jobset(replace(
-        js, lsf_group_paths=[], name_patterns=[], array_job_ids=[]))
+        js))
     fake_lsf.set_all("RUN")
     fake_lsf.calls.clear()
     with qtbot.waitSignal(manager.jobset_updated, timeout=10000) as blocker:

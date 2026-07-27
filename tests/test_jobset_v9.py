@@ -11,7 +11,7 @@ import shlex
 
 import pytest
 
-from lsfmgr import JobSpec, JobState
+from lsfmgr import JobState
 from lsfmgr.errors import JobNotFoundError, LsfmgrError
 
 
@@ -48,21 +48,15 @@ def test_create_jobset_with_merge_id_and_user_data(qtbot, manager, fake_lsf):
 
 
 def test_create_jobset_paths(manager):
-    """항목 타입별 제출 경로 — JobSpec=bsub / argv=wrapper / str=wrapper 기본."""
+    """항목 타입 — argv/str 모두 wrapper 단일 경로 (v10: bsub 경로 삭제)."""
     js = manager.create_jobset([
-        JobSpec(command="make sim", queue="priority"),   # bsub
-        ["customwrapper_sub", "-i", "b sp.sp"],          # argv → wrapper (공백 인자)
-        "customwrapper_sub c.sp",                        # str → wrapper 기본
+        ["customwrapper_sub", "-i", "b sp.sp"],          # argv (공백 인자 보존)
+        "customwrapper_sub c.sp",                        # str → shlex 분해
     ])
-    r1, r2, r3 = js.jobs()
-    assert r1.via_wrapper is False and r1.spec_json
+    r2, r3 = js.jobs()
     assert r2.via_wrapper is True
     assert shlex.split(r2.command) == ["customwrapper_sub", "-i", "b sp.sp"]
     assert r3.via_wrapper is True
-
-    # wrapper=False → 문자열도 bsub 경로
-    js2 = manager.create_jobset(["echo x"], wrapper=False)
-    assert js2.jobs()[0].via_wrapper is False
 
 
 def test_create_jobset_duplicate_merge_id_rejected(manager):
@@ -233,7 +227,7 @@ def test_clear_guard_and_force(qtbot, manager, fake_lsf):
 def test_submit_resubmits_all_inactive(qtbot, manager, fake_lsf):
     """DONE/EXIT 포함 전 job이 리셋 후 재제출된다 — 같은 job_key 유지."""
     js = manager.create_jobset(
-        ["customwrapper_sub a.sp", JobSpec(command="make sim", queue="priority")],
+        ["customwrapper_sub a.sp", "customwrapper_sub b.sp"],
         merge_ids=["m1", None], user_datas=[{"keep": True}, None])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
@@ -250,9 +244,6 @@ def test_submit_resubmits_all_inactive(qtbot, manager, fake_lsf):
     assert {r.job_id for r in js.jobs()}.isdisjoint(old_ids)  # 새 실행
     by_mid = {r.merge_id: r for r in js.jobs()}
     assert by_mid["m1"].user_data == {"keep": True}      # user_data 보존
-    # bsub 경로 옵션(queue) 보존
-    spec_rec = next(r for r in js.jobs() if not r.via_wrapper)
-    assert fake_lsf.jobs[str(spec_rec.job_id)].queue == "priority"
 
 
 def test_submit_rejected_while_active(qtbot, manager, fake_lsf):

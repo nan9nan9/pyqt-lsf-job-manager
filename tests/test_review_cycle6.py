@@ -26,7 +26,7 @@ def test_verify_collapsed_array_not_element_overcounted(qtbot, manager, fake_lsf
     # monitor가 wrapper array를 접은 집계 레코드 (id, None) — RUN 유지
     manager.store.store_add_jobs([JobRecord(
         job_id=8800, array_index=None, jobset_id=jsid,
-        lsf_job_name=f"{jsid}", state=JobState.RUN, command="r")])
+        job_key=f"{jsid}", state=JobState.RUN, command="r")])
     fake_lsf.jobs["8800"] = FakeJob(
         job_id=8800, array_index=None, name=f"{jsid}", group=None,
         queue="q", command="r", stat="RUN")

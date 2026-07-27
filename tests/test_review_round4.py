@@ -67,17 +67,7 @@ def test_kill_merged_optimistic_no_false_exit(qtbot, manager, fake_lsf):
         f"{[(r.job_key, r.job_id) for r in lying]}")
 
 
-def test_kill_pure_bsub_jobset_still_skips_chunk(qtbot, manager, fake_lsf):
-    """수정 후에도 부착물이 커버하는 순수 bsub jobset은 chunk fallback을
-    생략해야 한다 (LSF 부하 최소화 설계 유지)."""
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = submit_cmds(manager, ["echo x", "echo y"],
-                            auto_poll=False)
-    fake_lsf.calls.clear()
-    with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
-        manager.kill(js)
-    assert fake_lsf.alive_jobs() == []
-    assert "chunk" not in blocker.args[1].strategies
+# (v10: kill tier 삭제 — '부착물 커버 시 chunk 생략' 시나리오 소멸)
 
 
 # ----------------------------------------------------------------------
@@ -93,7 +83,7 @@ def test_kill_jobs_single_array_element(qtbot, manager, fake_lsf):
     jsid, parent = js.id, 9400
     manager.store.store_add_jobs([JobRecord(
         job_id=parent, array_index=i, jobset_id=jsid,
-        lsf_job_name=f"{jsid}[{i}]", state=JobState.RUN, command="r")
+        job_key=f"{jsid}[{i}]", state=JobState.RUN, command="r")
         for i in (1, 2, 3)])
     for i in (1, 2, 3):
         fake_lsf.jobs[f"{parent}[{i}]"] = FakeJob(

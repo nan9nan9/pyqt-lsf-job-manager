@@ -3,10 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from lsfmgr import JobRecord, JobSpec, JobState, LsfJobManager
+from lsfmgr import JobRecord, JobState, LsfJobManager
 from tests.conftest import submit_cmds
-from lsfmgr.command import LsfCommand
-from lsfmgr.config import LsfConfig
 from lsfmgr.errors import LsfmgrError
 from lsfmgr.options import resolve_options
 from tests.test_store_contract import make_job, make_jobset
@@ -67,17 +65,8 @@ def test_failed_close_keeps_polling_and_handle(qtbot, manager, fake_lsf):
 
 
 # ----------------------------------------------------------------------
-# 버그 4: bsub group 거부 재시도가 job_name(-J)까지 버림 + 무한재귀 가능성
-# ----------------------------------------------------------------------
-def test_bsub_group_reject_keeps_job_name(fake_lsf):
-    fake_lsf.reject_group = True
-    cmd = LsfCommand(LsfConfig(), fake_lsf)
-    jid = cmd.bsub("echo hi", job_name="js1_0", group_path="/bad/group")
-    job = fake_lsf.jobs[str(jid)]
-    assert job.group is None                # group만 포기
-    assert job.name == "js1_0"              # name은 유지 (fallback 식별자)
-
-
+# (버그 4의 group 거부 재시도는 v10에서 기능 자체가 제거됨 —
+#  현행 계약은 test_command.py::test_bsub_group_rejected_fails)
 # ----------------------------------------------------------------------
 # 버그 5: tags="sweep" (str) → ('s','w','e','e','p')로 분해
 # ----------------------------------------------------------------------
@@ -118,26 +107,9 @@ def test_empty_jobset_submit_rejected(manager, fake_lsf):
 
 
 # ----------------------------------------------------------------------
-# 버그 9 (2차): kill 전략의 no-match를 커버 성공으로 오판
-#   — group 부착이 거부된 jobset은 bkill -g가 no-match인데도 covered=True
-#     처리되어 fallback을 건너뛰고 job이 하나도 죽지 않았음
+# (버그 9의 no-match 커버 오판은 v10에서 kill 전략 tier 자체가 삭제되어
+#  시나리오가 소멸 — kill은 항상 id chunk로 전원 대상)
 # ----------------------------------------------------------------------
-def test_kill_falls_through_when_group_rejected(qtbot, manager, fake_lsf):
-    fake_lsf.reject_group = True            # 모든 job이 group 없이 submit됨
-    js = submit_cmds(manager, [f"r {i}" for i in range(20)],
-                        auto_poll=False)
-    with qtbot.waitSignal(js.submit_finished, timeout=10000):
-        pass
-    assert all(j.group is None for j in fake_lsf.jobs.values())
-
-    with qtbot.waitSignal(js.kill_finished, timeout=10000) as blocker:
-        manager.kill(js)
-    rpt = blocker.args[0]
-    # group 전략은 no-match로 표시되고 name 패턴으로 fallback해 전부 kill
-    assert any("(no-match)" in s for s in rpt.strategies)
-    assert fake_lsf.alive_jobs() == [], "group 커버 오판으로 job이 살아남음"
-
-
 # ----------------------------------------------------------------------
 # 버그 10 (2차): array 부분 kill이 parent id로 전체를 죽임
 # ----------------------------------------------------------------------
@@ -151,7 +123,7 @@ def test_array_partial_kill_only_pend(qtbot, manager, fake_lsf):
     jsid, parent = js.id, 9000
     manager.store.store_add_jobs([JobRecord(
         job_id=parent, array_index=i, jobset_id=jsid,
-        lsf_job_name=f"{jsid}[{i}]",
+        job_key=f"{jsid}[{i}]",
         state=JobState.RUN if i <= 5 else JobState.PEND, command="r")
         for i in range(1, 11)])
     for i in range(1, 11):
@@ -177,7 +149,7 @@ def test_array_partial_kill_only_pend(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_lowlevel_submit_tags_string(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        jsid = submit_cmds(manager, [JobSpec(command="x")], tags="sweep").id
+        jsid = submit_cmds(manager, ["x"], tags="sweep").id
     assert manager.store.get_jobset(jsid).tags == ["sweep"]
 
 

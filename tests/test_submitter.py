@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from lsfmgr import JobSpec, JobState
+from lsfmgr import JobState
 from tests.conftest import submit_cmds
 
 
@@ -17,7 +17,7 @@ def wait_submit_finished(qtbot, mgr, timeout=10000):
 # 대량 submit (FR-1.1 / FR-1.2)
 # ----------------------------------------------------------------------
 def test_bulk_submit_parallel(qtbot, manager, fake_lsf):
-    jobs = [JobSpec(command=f"run {i}") for i in range(100)]
+    jobs = [f"run {i}" for i in range(100)]
     with qtbot.waitSignal(manager.submit_finished, timeout=15000) as blocker:
         jsid = submit_cmds(manager, jobs, workers=8).id
     rpt_jsid, report = blocker.args
@@ -30,14 +30,12 @@ def test_bulk_submit_parallel(qtbot, manager, fake_lsf):
     assert s["PEND"] == 100
     # 전 job이 ID 확보 (수용 기준 1)
     assert all(r.job_id is not None for r in manager.get_jobs(jsid))
-    # 부착물 자동 부여 확인 (FR-1.4)
-    js = manager.store.get_jobset(jsid)
-    assert len(js.lsf_group_paths) == 1
-    assert js.name_patterns == [f"{jsid}_*"]
+    # v10.1: 부착물 필드는 스키마에서 삭제됨 — jobset 메타만 확인
+    assert manager.store.get_jobset(jsid).intended_count == 100
 
 
 def test_bulk_submit_sequential(qtbot, manager, fake_lsf):
-    jobs = [JobSpec(command=f"run {i}") for i in range(10)]
+    jobs = [f"run {i}" for i in range(10)]
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         jsid = submit_cmds(manager, jobs, workers=1).id
     assert manager.summary(jsid)["PEND"] == 10
@@ -51,7 +49,7 @@ def test_submit_emits_jobset_updated_with_initial_pend(qtbot, manager,
     updates = []
     manager.jobset_updated.connect(lambda jsid, s: updates.append(s))
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        jsid = submit_cmds(manager, [JobSpec(command=f"r {i}")
+        jsid = submit_cmds(manager, [f"r {i}"
                                     for i in range(5)]).id
     assert updates, "submit 완료 후 jobset_updated 미발화"
     assert updates[-1]["PEND"] == 5 and updates[-1]["total"] == 5
@@ -64,7 +62,7 @@ def test_submit_emits_submitting_immediately(qtbot, manager, fake_lsf):
     batches = []
     manager.jobs_updated.connect(
         lambda jsid, recs: batches.append([r.state for r in recs]))
-    js = manager.create_jobset([f"r {i}" for i in range(3)], wrapper=False)
+    js = manager.create_jobset([f"r {i}" for i in range(3)])
     assert batches and batches[0] == [JobState.CREATED] * 3   # 생성 즉시
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js)
@@ -78,7 +76,7 @@ def test_submit_emits_jobs_updated_progressively(qtbot, manager, fake_lsf):
     manager.jobs_updated.connect(
         lambda jsid, recs: seen.update({r.job_key: r for r in recs}))
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        submit_cmds(manager, [JobSpec(command=f"r {i}") for i in range(4)])
+        submit_cmds(manager, [f"r {i}" for i in range(4)])
     qtbot.wait(50)                       # 마지막 배치 소진
     assert len(seen) == 4
     assert all(r.job_id is not None and r.state is JobState.PEND
@@ -102,7 +100,7 @@ def test_submit_failure_emits_failed_once(qtbot, manager, fake_lsf):
 def test_submit_updated_relayed_to_handle(qtbot, manager, fake_lsf):
     """핸들 js.jobset_updated로도 초기 PEND 요약이 온다 (사용자 예제 경로)."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        jsid = submit_cmds(manager, [JobSpec(command="x")]).id
+        jsid = submit_cmds(manager, ["x"]).id
     js = manager.jobset(jsid)
     got = []
     js.jobset_updated.connect(lambda s: got.append(s))
@@ -114,7 +112,7 @@ def test_submit_updated_relayed_to_handle(qtbot, manager, fake_lsf):
 
 def test_submit_started_signal(qtbot, manager):
     with qtbot.waitSignal(manager.submit_started, timeout=5000) as blocker:
-        jsid = submit_cmds(manager, [JobSpec(command="x")]).id
+        jsid = submit_cmds(manager, ["x"]).id
     assert blocker.args == [jsid]
     qtbot.waitSignal(manager.submit_finished, timeout=5000)
 
@@ -130,7 +128,7 @@ def test_progress_throttle_option_reduces_emits(qtbot, fake_lsf, config):
         c = [0]
         mgr.jobs_updated.connect(lambda j, rs: c.__setitem__(0, c[0] + 1))
         with qtbot.waitSignal(mgr.submit_finished, timeout=20000):
-            submit_cmds(mgr, [JobSpec(command=f"r {i}") for i in range(300)],
+            submit_cmds(mgr, [f"r {i}" for i in range(300)],
                             workers=32)
         mgr.shutdown()
         return c[0]
@@ -143,7 +141,7 @@ def test_progress_throttle_option_reduces_emits(qtbot, fake_lsf, config):
 def test_progress_signal(qtbot, manager):
     seen = []
     manager.submit_progress.connect(lambda j, d, t: seen.append((d, t)))
-    jobs = [JobSpec(command=f"r {i}") for i in range(50)]
+    jobs = [f"r {i}" for i in range(50)]
     with qtbot.waitSignal(manager.submit_finished, timeout=15000):
         submit_cmds(manager, jobs)
     assert seen, "progress Signal이 한 번도 오지 않음"
@@ -157,7 +155,7 @@ def test_progress_signal(qtbot, manager):
 def test_retry_then_success(qtbot, manager, fake_lsf):
     fake_lsf.fail_next_bsub = 2          # 처음 2회 실패 → 재시도로 성공
     with qtbot.waitSignal(manager.submit_finished, timeout=15000) as blocker:
-        jsid = submit_cmds(manager, [JobSpec(command="x")], max_retry=3).id
+        jsid = submit_cmds(manager, ["x"], max_retry=3).id
     _, report = blocker.args
     assert report.succeeded == 1
     assert report.retried == 1
@@ -169,7 +167,7 @@ def test_retry_then_success(qtbot, manager, fake_lsf):
 def test_submit_failed_after_max_retry(qtbot, manager, fake_lsf):
     fake_lsf.fail_next_bsub = 99
     with qtbot.waitSignal(manager.submit_finished, timeout=15000) as blocker:
-        jsid = submit_cmds(manager, [JobSpec(command="x")], max_retry=2).id
+        jsid = submit_cmds(manager, ["x"], max_retry=2).id
     _, report = blocker.args
     assert report.failed == 1
     rec = manager.get_jobs(jsid)[0]
@@ -181,7 +179,7 @@ def test_submit_failed_after_max_retry(qtbot, manager, fake_lsf):
 def test_no_jobid_parse_failure_classified(qtbot, manager, fake_lsf):
     fake_lsf.no_jobid_next_bsub = 99
     with qtbot.waitSignal(manager.submit_finished, timeout=15000) as blocker:
-        submit_cmds(manager, [JobSpec(command="x")], max_retry=1)
+        submit_cmds(manager, ["x"], max_retry=1)
     _, report = blocker.args
     assert report.fail_reasons == {"NO_JOBID_PARSED": 1}
 
@@ -191,7 +189,7 @@ def test_no_jobid_parse_failure_classified(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_cancel_submit(qtbot, manager, fake_lsf):
     # rate limit으로 느리게 만들어 중간 취소 여지를 확보
-    jobs = [JobSpec(command=f"r {i}") for i in range(50)]
+    jobs = [f"r {i}" for i in range(50)]
     with qtbot.waitSignal(manager.submit_finished, timeout=30000) as blocker:
         jsid = submit_cmds(manager, jobs, workers=1, rate_limit_per_s=20).id
         manager.cancel_submit(jsid)

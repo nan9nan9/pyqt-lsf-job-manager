@@ -13,11 +13,17 @@ from tests.fake_lsf import FakeLsf
 from tests.conftest import submit_cmds
 
 
+_LSF_QUERY_CMDS = {"bjobs", "bkill", "bhist", "bmod", "tcsh", "lsid"}
+
+
 def _gated_runner(fake: FakeLsf, gate: threading.Event):
-    """bsub만 gate가 풀릴 때까지 붙잡는 runner — 제출을 in-flight로 유지."""
+    """제출(wrapper) 호출만 gate가 풀릴 때까지 붙잡는 runner — 제출을
+    in-flight로 유지한다. (v10: 제출은 임의 wrapper 프로그램 — LSF 조회/kill
+    명령이 아닌 호출을 전부 제출로 본다. "bsub"만 잡던 구버전은 gate가
+    무효라 빠른 머신에서 즉시 완료 → is_submitting 단언이 flaky했다)"""
     def runner(argv, timeout, cwd=None):
         prog = argv[0].rsplit("/", 1)[-1]
-        if prog == "bsub":
+        if prog not in _LSF_QUERY_CMDS:
             gate.wait(10)
         return fake(argv, timeout)
     return runner

@@ -95,20 +95,19 @@ if mgr.can_submit(js):
 | `rate_limit_per_s` | None(무제한) | ②③ | 초당 bsub 상한 |
 | `poll_interval_s` | 10 | ②③ | polling 주기 (5~60) |
 | `auto_poll` | True | ②③ | submit 후 polling 자동 시작 |
-| `queue` | LSF 기본 | ②(`default_queue`)③ | 대상 queue |
-| `resource_req` | None | ②③ | `-R` 문자열 |
-| `output_dir` | None | ②③ | `-o`/`-e` 경로 규칙 |
-| `submit_timeout_s` | 30 | ②③ | bsub 1건 timeout |
+| `submit_timeout_s` | 30 | ②③ | 제출 1건 timeout |
 | `verify_kill` | False | ②③(kill) | kill 후 실제 종료 확인 |
 | `label`, `tags`, `description` | "" / () / "" | ②③ | JobSet 메타데이터 |
-| `chunk_size` | 200 | ② | chunking fallback 크기 |
+| `chunk_size` | 500 | ② | chunking 크기 (v10.1: 200→500) |
 | `kill_status_policy` | "optimistic" | ② | kill 확인 시 즉시 EXIT / "actual"=폴링만 |
 | `kill_max_retry` | 2 | ② | kill 확인 실패 재시도 |
 | `collect_clusters` | False | ② | MC forward 정보 수집(opt-in) |
-| `bsub_path` 등 명령 경로 | PATH 탐색 | ② | LSF 명령 위치 (문자열/wrapper 토큰) |
+| `bjobs_path` 등 명령 경로 | PATH 탐색 | ② | LSF 조회/kill 명령 위치 (bjobs/bkill/bhist) |
 
 > v7 대비 삭제된 옵션: `mode`(array 자동/강제), `persistent`/`db_path`(SQLite),
 > `bmod_path`(add_job 제거).
+> v10 삭제: `queue`/`resource_req`/`output_dir`/`default_queue`/`bsub_path`/
+> `bgdel_path`/`lsf_group_root` — bsub 인자 조립 제출·부착물 제거(경고 후 무시).
 
 - **OPT-1** 옵션 해석은 `resolve_options(call_kwargs) -> Options` 한 함수로 일원화
   (defaults → manager → call 순 merge, frozen dataclass 반환).
@@ -120,8 +119,8 @@ if mgr.can_submit(js):
 
 ```python
 # --- 생성/구성 (sync) ---
-mgr.create_jobset(commands=(), *, merge_ids=None, user_datas=None, wrapper=True,
-                  label="", tags=(), parent=None, intended_count=0) -> JobSet
+mgr.create_jobset(commands=(), *, merge_ids=None, user_datas=None,
+                  label="", tags=(), intended_count=0) -> JobSet
 mgr.merge(target, source, *, force=False) -> list[JobRecord]  # in-place 흡수
 mgr.can_merge(target, source) -> bool
 mgr.remove_job(js, *, job_id=None, merge_id=None, job_key=None, force=False)
@@ -188,8 +187,8 @@ class JobSet(QObject):
 | **JobSet** | `jobset_id`, `JobSet` 객체 | 논리적 job 묶음. 모든 기능의 기본 단위 |
 | **merge_id** | `JobRecord.merge_id` | job의 **논리 키** — merge 시 같은 merge_id 기존 job을 replace |
 | **user_data** | `JobRecord.user_data` | 사용자 정의 dict(JSON-able). 라이브러리는 **보존만** |
-| **LSF Job Group** | `lsf_group_path` | LSF native (`bsub -g`). 1회 호출 최적화 **수단** |
-| **LSF Job Name** | `lsf_job_name`(=job_key) | LSF native (`bsub -J`). 패턴 조회/kill **수단**, fallback |
+| **LSF Job Group** | (v10 삭제) | LSF native (`bsub -g`) — bsub 조립 경로와 함께 제거됨 |
+| **job_key** | `JobRecord.job_key` | jobset 내 유일한 물리 키 (v10.1: 구명 lsf_job_name — LSF `-J` 부착은 v10에서 삭제, 순수 내부 키) |
 | **Array Job** | `array_index` | wrapper 제출 산물로만 존재하는 element(직접 array 제출 없음) |
 
 관계 규칙:
@@ -321,15 +320,17 @@ JobSetStore(ABC) ── InMemoryStore
   재실행되므로 같은 job_key가 전이(핸들·테이블 연속). 항목 타입별 제출 경로:
   JobSpec=bsub 조립 / argv 토큰 리스트=wrapper 그대로 실행 / 문자열=wrapper 기본
   (`wrapper=False`면 bsub). 부착물 실패해도 submit 진행.
-  - **FR-1.4** job_key = `<jsid>_<idx>` (`-J`), **FR-1.5** wrapper 경로는 `Job <id>`
+  - **FR-1.4** job_key = `<jsid>_<idx>` (내부 키 — v10: `-J` 부착 제거),
+    **FR-1.5** 제출은 wrapper 단일 경로(v10: bsub 인자 조립 삭제) — `Job <id>`
     파싱으로 job_id만 관리(인자 조립 없음).
 - **FR-2 Retry**: 실패 감지(exit≠0/파싱 실패/timeout) + fail_reason 분류,
   최대 `max_retry`회, `retry_backoff` 정책(**FR-2.1** timeout, **FR-2.2** backoff),
   재시도는 QTimer 스케줄(sleep 없음). 재제출 리셋 시 이전 실행 흔적 소거.
-- **FR-3 Kill**: 전략 우선순위 ①`bkill -g` ②array ③`-J` 패턴 ④id chunking,
+- **FR-3 Kill**: job_id chunked `bkill` 단일 경로(v10: group/array/name
+  전략 tier 삭제),
   부분 kill(`only_state`)·선택 kill(`kill_jobs`). MC forward는 `envpath`로 그
   클러스터 env를 source한 bkill.
-  - **FR-3.1~3.3** 전략 순회/부착물 유실 fallback, **FR-3.4** 확인 문구 파싱 +
+  - **FR-3.1~3.3** (v10: 전략 순회 삭제 — chunk 단일), **FR-3.4** 확인 문구 파싱 +
     미확인분 재시도(`kill_max_retry`), `KillReport.unconfirmed`/`kill_retries`,
     **FR-3.5** `kill_status_policy`("optimistic"=확인 즉시 EXIT / "actual"=폴링만).
   - **kill 우선권 (구조적 보장)**: kill은 진행 중 submit에 우선. `SubmitGate` barrier —
@@ -357,7 +358,7 @@ JobSetStore(ABC) ── InMemoryStore
     (`can_merge`), `force`=레코드만 강제(LSF 정리는 앱 책임), 폴링 source→target 이관,
   - **FR-5.6** remove_job(job_id/merge_id/job_key, force)·clear(force) — 비활성만, force로
     레코드만 강제 삭제, intended_count 함께 감소,
-  - **FR-5.7** close(전원 terminal일 때 종결, LSF group `bgdel` 정리).
+  - **FR-5.7** close(전원 terminal일 때 종결; v10: `bgdel` 정리 삭제 — 부착물 없음).
 - **FR-7 JobSet Handler**: 이름 있는 handler를 등록해 **폴링 사이클마다**(별도 타이머
   없이 `poll_interval_s`에 tie — bjobs 갱신 직후) job별로 worker 스레드에서 실행.
   `start_states`(기본 {RUN})부터 시작, `end_states`(기본 {DONE,EXIT}) 도달 시

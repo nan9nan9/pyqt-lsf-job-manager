@@ -27,7 +27,7 @@ class JobSetStateError(LsfmgrError):
 class SubmitNotAllowedError(JobSetStateError):
     """submit 불가 — 활성(진행 중) job 존재 / 제출할 job 없음 / submit·kill
     진행 중. `mgr.can_submit(js)`로 사전 확인할 수 있다.
-    (bsub 실행 자체의 실패는 SubmitError — 별개)."""
+    (제출 subprocess 실행 자체의 실패는 SubmitError — 별개)."""
 
 
 class MergeNotAllowedError(JobSetStateError):
@@ -57,7 +57,7 @@ class JobNotFoundError(LsfmgrError):
 
 
 class LsfCommandError(LsfmgrError):
-    """LSF 명령 실행 실패 (bsub 제외 — bsub는 SubmitError)."""
+    """LSF 조회/kill 명령 실행 실패 (제출 실패는 SubmitError)."""
 
     def __init__(self, message: str, returncode: Optional[int] = None,
                  stderr: str = ""):
@@ -67,7 +67,8 @@ class LsfCommandError(LsfmgrError):
 
 
 class SubmitError(LsfmgrError):
-    """bsub 실패. fail_reason은 JobRecord.fail_reason으로 그대로 기록된다."""
+    """제출(wrapper 실행) 실패. fail_reason은 JobRecord.fail_reason으로
+    그대로 기록된다 (분류명 BSUB_*는 과거 호환 유지)."""
 
     def __init__(self, message: str, fail_reason: str,
                  returncode: Optional[int] = None, stderr: str = "",

@@ -97,7 +97,7 @@ class JobSetStore(ABC):
                    **fields: Any) -> Optional[JobRecord]:
         """원자적 상태 전이 (read-modify-write, CS-1).
         fields로 job_id/exit_code/fail_reason 등 동시 갱신.
-        키 필드(lsf_job_name/jobset_id)는 변경 불가 — ValueError.
+        키 필드(job_key/jobset_id)는 변경 불가 — ValueError.
         guard가 주어지면 lock 안에서 현재 레코드로 평가해 False면 전이를
         건너뛰고 None 반환 (CAS) — 스냅샷 기반 갱신(polling)이 그 사이
         바뀐 레코드(재제출 등)를 덮어쓰는 것을 막는다.
@@ -111,7 +111,12 @@ class JobSetStore(ABC):
         반환: 실제로 전이된 레코드 목록(guard 거부·키 소실분은 제외, 입력 순서).
         구현은 일괄 처리로 건당 오버헤드를 없앤다 — 수만 건
         전이가 한 사이클에 몰릴 때 폴링 스레드 블로킹/WAL 락 독점을 막는다.
-        기본 구현은 건당 transition (계약 유지)."""
+        기본 구현은 건당 transition (계약 유지).
+        키 필드 검증은 적용 시작 전 일괄 — 부분 적용 후 예외로 반환 목록이
+        유실되지 않게 한다 (memory 구현과 동일 원자성)."""
+        specs = list(specs)
+        for _key, _st, _g, fields in specs:
+            self._reject_key_fields(fields)
         out: List[JobRecord] = []
         for job_key, new_state, guard, fields in specs:
             try:
@@ -127,7 +132,7 @@ class JobSetStore(ABC):
     def _reject_key_fields(fields: Dict[str, Any]) -> None:
         """transition의 키 필드 변경 거부 — 허용하면 옛 키의 레코드가
         잔존해 키-레코드 불일치가 생긴다."""
-        for key in ("lsf_job_name", "jobset_id"):
+        for key in ("job_key", "jobset_id"):
             if key in fields:
                 raise ValueError(
                     f"transition으로 키 필드({key})는 변경할 수 없습니다")

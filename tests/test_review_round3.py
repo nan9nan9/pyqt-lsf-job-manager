@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from lsfmgr import JobRecord, JobSpec, JobState, LsfJobManager
+from lsfmgr import JobRecord, JobState, LsfJobManager
 from tests.conftest import submit_cmds
 from tests.test_store_contract import make_job, make_jobset
 
@@ -49,30 +49,7 @@ def test_real_loss_still_detected_after_recovery(qtbot, manager, fake_lsf):
 
 
 # ----------------------------------------------------------------------
-# R3-3: kill — 부착물 일부가 예외로 실패하면 covered여도 fallback 필요
-#       (merge된 jobset에서 group A 성공 + group B 장애 → B 소속 전원 생존)
-# ----------------------------------------------------------------------
-def test_kill_falls_back_when_one_attachment_errors(qtbot, manager, fake_lsf):
-    a = submit_cmds(manager, [f"a {i}" for i in range(5)],
-                       auto_poll=False)
-    b = submit_cmds(manager, [f"b {i}" for i in range(5)],
-                       auto_poll=False)
-    # merge 가드 조건(submit 마감) 자체를 기다린다 — summary가 전원 PEND여도
-    # ctx 마감 전이면 merge가 거부되는 창을 피한다 (신호 타이밍 무관)
-    qtbot.waitUntil(lambda: not manager.submitter.is_active(a.id)
-                    and not manager.submitter.is_active(b.id), timeout=10000)
-    merged = a                                    # in-place 흡수 (v9)
-    manager.merge(a, b, force=True)                  # PEND 활성 — force로 레코드 흡수
-
-    fake_lsf.fail_next_bkill = 1                 # 첫 group bkill만 장애
-    with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
-        manager.kill(merged)
-    rpt = blocker.args[1]
-    assert rpt.errors, "장애가 errors에 기록되어야 함"
-    assert fake_lsf.alive_jobs() == [], \
-        "부착물 하나가 장애여도 fallback으로 전원 kill되어야 함"
-
-
+# (R3-3: 부착물 일부 실패 fallback — v10에서 kill tier 삭제로 시나리오 소멸)
 # ----------------------------------------------------------------------
 # R3-4: merge 후 삭제된 원본 jobset을 영구 polling
 # ----------------------------------------------------------------------
@@ -103,7 +80,7 @@ def test_shutdown_finalizes_pending_retries(qtbot, fake_lsf, config):
     reports = []
     mgr.submit_finished.connect(lambda j, r: reports.append(r))
     # 긴 retry delay — shutdown 시점에 RETRY_WAIT로 잔류하도록
-    jsid = submit_cmds(mgr, [JobSpec(command="x")], max_retry=5).id
+    jsid = submit_cmds(mgr, ["x"], max_retry=5).id
     mgr._defaults["retry_backoff"] = "fixed:30"  # (다음 retry만 느리게)
     qtbot.waitUntil(
         lambda: any(r.state is JobState.RETRY_WAIT
@@ -120,20 +97,7 @@ def test_shutdown_finalizes_pending_retries(qtbot, fake_lsf, config):
 # R3-6: mode="array" 강제 시 JobSpec 옵션 소실 방지
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
-# R3-7: JobSpec.env가 조용히 무시되던 문제 — bsub -env로 전달
-# ----------------------------------------------------------------------
-def test_jobspec_env_passed_to_bsub(qtbot, manager, fake_lsf):
-    spec = JobSpec(command="sim.sh", env=(("OMP_NUM_THREADS", "4"),))
-    js = submit_cmds(manager, [spec], auto_poll=False)
-    with qtbot.waitSignal(js.submit_finished, timeout=10000):
-        pass
-    argv = fake_lsf.calls_of("bsub")[0]
-    assert "-env" in argv
-    assert "OMP_NUM_THREADS=4" in argv[argv.index("-env") + 1]
-    job = list(fake_lsf.jobs.values())[0]
-    assert "OMP_NUM_THREADS=4" in job.env
-
-
+# (R3-7: JobSpec.env — v10에서 bsub 조립 경로 삭제로 기능 소멸)
 # ----------------------------------------------------------------------
 # R3-8: 빈 jobset / cancel로 CREATED만 잔존 시 polling 영구 지속 (AUTO-2 확장)
 # ----------------------------------------------------------------------
@@ -161,7 +125,7 @@ def test_merge_rejects_duplicate_job_keys(qtbot, manager, fake_lsf):
     dup_key = a.jobs()[0].job_key
     manager.store.store_add_job(JobRecord(
         job_id=None, array_index=None, jobset_id=b.id,
-        lsf_job_name=dup_key, state=JobState.CREATED, command=""))
+        job_key=dup_key, state=JobState.CREATED, command=""))
     with pytest.raises(ValueError, match="충돌"):
         # dup_key(merge_id 없음 → 신규 추가 경로)가 양쪽에 존재 — force로
         # 활성 가드를 지나도 key 충돌은 거부된다
@@ -201,7 +165,7 @@ def test_array_bhist_fallback_per_element(qtbot, manager, fake_lsf):
     jsid, parent = js.id, 9100
     manager.store.store_add_jobs([JobRecord(
         job_id=parent, array_index=i, jobset_id=jsid,
-        lsf_job_name=f"{jsid}[{i}]", state=JobState.RUN, command="r")
+        job_key=f"{jsid}[{i}]", state=JobState.RUN, command="r")
         for i in (1, 2, 3)])
     stats = {1: ("DONE", 0), 2: ("EXIT", 9), 3: ("DONE", 0)}
     for i, (st, ec) in stats.items():
@@ -227,24 +191,21 @@ def test_array_bhist_fallback_per_element(qtbot, manager, fake_lsf):
 def test_transition_rejects_key_fields(store):
     store.store_insert_jobset(make_jobset(n=1))
     store.store_add_job(make_job(idx=0))
-    with pytest.raises(ValueError):
-        store.transition("js1", "js1_0", JobState.PEND,
-                         lsf_job_name="other")
-    # jobset_id는 위치 인자와 충돌해 Python 수준(TypeError)에서 원천 차단됨
+    # v10.1 rename 후 job_key/jobset_id는 transition의 위치 인자와 충돌해
+    # Python 수준(TypeError)에서 원천 차단된다
+    with pytest.raises(TypeError):
+        store.transition("js1", "js1_0", JobState.PEND, job_key="other")
     with pytest.raises(TypeError):
         store.transition("js1", "js1_0", JobState.PEND, jobset_id="js2")
+    # fields를 dict로 받는 transition_many는 _reject_key_fields가 막는다
+    with pytest.raises(ValueError):
+        store.transition_many("js1", [("js1_0", JobState.PEND, None,
+                                       {"job_key": "other"})])
+    with pytest.raises(ValueError):
+        store.transition_many("js1", [("js1_0", JobState.PEND, None,
+                                       {"jobset_id": "js2"})])
 
 
 # ----------------------------------------------------------------------
-# R3-15: bgdel timeout이 호출자로 전파되던 문제 — 경고 후 진행
+# (R3-15: bgdel timeout — v10에서 bgdel 자체가 삭제됨)
 # ----------------------------------------------------------------------
-def test_bgdel_timeout_swallowed(fake_lsf):
-    import subprocess
-    from lsfmgr.command import LsfCommand
-    from lsfmgr.config import LsfConfig
-
-    def timeout_runner(argv, timeout, cwd=None):
-        raise subprocess.TimeoutExpired(argv, timeout)
-
-    cmd = LsfCommand(LsfConfig(), timeout_runner)
-    cmd.bgdel("/g/x")                            # 예외 없이 경고만

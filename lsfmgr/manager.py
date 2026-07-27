@@ -12,15 +12,13 @@ from __future__ import annotations
 
 import atexit
 import logging
-import os
-import re
 import shlex
 from dataclasses import replace as dc_replace
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 from .command import LsfCommand, Runner
-from .config import JobSpec, LsfConfig, spec_from_json, spec_to_json
+from .config import LsfConfig
 from .errors import (
     CloseNotAllowedError,
     JobNotFoundError,
@@ -52,14 +50,13 @@ from .store.memory import InMemoryStore
 log = logging.getLogger("lsfmgr.manager")
 
 #: LsfConfig 필드로 직접 전달되는 manager 전용 키
-_CONFIG_KEYS = ("bsub_path", "bjobs_path", "bkill_path", "bhist_path",
-                "bgdel_path", "lsf_group_root",
-                "arg_max", "default_queue", "chunk_size",
+_CONFIG_KEYS = ("bjobs_path", "bkill_path", "bhist_path",
+                "arg_max", "chunk_size",
                 "kill_status_policy", "kill_max_retry", "kill_retry_delay_s",
                 "progress_min_interval_s", "progress_min_step_ratio",
                 "poll_runtime_updates", "submit_finished_on_gate_reject",
                 "collect_clusters", "min_state_dwell_s",
-                "submit_wrapper_pattern_cmd")
+                "test_submit_wrapper_pattern_cmd")
 
 
 class LsfJobManager(QObject):
@@ -138,7 +135,6 @@ class LsfJobManager(QObject):
                               else f"expo:{cfg.retry_delay_s:g}"),
             "rate_limit_per_s": cfg.rate_limit_per_s,
             "poll_interval_s": cfg.poll_interval_s,
-            "queue": cfg.default_queue,
             "submit_timeout_s": cfg.submit_timeout_s,
             "chunk_size": cfg.chunk_size,
         }
@@ -150,6 +146,9 @@ class LsfJobManager(QObject):
 
         # --- 컴포넌트 조립 ---
         self.command = LsfCommand(self.config, runner)
+        # 현재 클러스터명(lsid) 1회 조회 — 이후 mgr.cluster_name으로 노출되고
+        # 제출 성공 레코드의 source_cluster에 스탬프된다. 실패는 None(경고만).
+        self.command.fetch_cluster_name()
         self.jobsets = JobSetManager(self.store, self.command, self.config)
         self.querier = JobsetQuerier(self.store, self.command)
 
@@ -190,7 +189,7 @@ class LsfJobManager(QObject):
         self.handlers = JobSetHandlerService(self.store, parent=self)
         self.handlers.finished.connect(self.handler_finished)
 
-        # jobset별 마지막 polling interval — resubmit 후 polling 재개에 사용
+        # jobset별 마지막 polling interval — merge 시 폴링 설정 이관에 사용
         self._poll_intervals: Dict[str, float] = {}
 
         self._misc_pool = QThreadPool(self)     # 단발 작업 (detail 조회 등)
@@ -298,7 +297,7 @@ class LsfJobManager(QObject):
         신호: post_processing_started → post_processing_finished(result).
         ※ pre_submit·post_process 콜백 모두 worker 스레드 실행 — GUI 접근 금지.
         옵션(kwargs): workers/max_retry/rate_limit_per_s/auto_poll/
-        poll_interval_s/queue/submit_timeout_s 등 (§1.2)."""
+        poll_interval_s/submit_timeout_s 등 (§1.2)."""
         return self._submit_jobset(js, pre_submit=pre_submit,
                                    post_process=post_process, **kwargs)
 
@@ -314,7 +313,7 @@ class LsfJobManager(QObject):
     def jobset(self, jobset_id: str) -> JobSet:
         """[sync, snapshot] JobSet 핸들 재획득 (복원/검색 결과에서).
         close된 jobset은 JobSetClosedError — 닫힌 jobset에 새 열린 핸들을
-        발급하면 close 계약이 우회된다(부착물은 이미 bgdel로 정리됨)."""
+        발급하면 close 계약이 우회된다."""
         handle = self._handles.get(jobset_id)
         if handle is not None:
             return handle
@@ -428,6 +427,11 @@ class LsfJobManager(QObject):
         오버헤드 없음). LSF에 제출됐던 job(job_id 확보)은 `bhist -l` 원문,
         제출 실패 job(job_id 없음)은 저장된 fail_message(터미널 stderr/stdout).
         blocking(bhist)은 worker 스레드에서 수행되므로 GUI가 멎지 않는다."""
+        if self._shutdown_done:
+            # shutdown 후 drain된 _misc_pool에 새 worker를 띄우면 아무도
+            # join하지 않는 좀비가 된다 (CS-8) — kill/submit 경로와 동일 가드
+            log.warning("shutdown 후 fetch_job_detail 무시: %s", jobset_id)
+            return
         jobset_id = self._jsid(jobset_id)
         rec = self.store.get_job(jobset_id, job_key)   # 존재 검증 (동기)
 
@@ -552,9 +556,7 @@ class LsfJobManager(QObject):
                       user_datas: Optional[Sequence[Optional[dict]]] = None,
                       work_dir: Optional[str] = None,
                       work_dirs: Optional[Sequence[Optional[str]]] = None,
-                      wrapper: bool = True,
                       label: str = "", tags: Sequence[str] = (),
-                      parent: Optional[str] = None,
                       intended_count: int = 0) -> JobSet:
         """[sync] JobSet 생성 — job까지 함께 만들고 핸들 즉시 반환 (CREATED).
 
@@ -569,11 +571,9 @@ class LsfJobManager(QObject):
             if mgr.can_submit(js):
                 mgr.submit(js, workers=8)     # 전 job (재)제출
 
-        commands 각 항목의 타입으로 제출 경로가 정해진다:
-          - JobSpec          → bsub 경로 (queue/resources 등 옵션 보존)
-          - 토큰 리스트(argv) → wrapper 경로 (그대로 실행)
-          - 문자열           → wrapper=True(기본)면 wrapper(공백 분해),
-                               False면 bsub(JobSpec(command=...))
+        commands 각 항목 (v10: wrapper 단일 경로 — bsub 조립 경로 삭제):
+          - 토큰 리스트(argv) → 그대로 실행
+          - 문자열           → shlex 분해 후 실행
         merge_ids: 각 job의 논리 키 — merge 시 같은 merge_id의 기존 job이
         이 내용으로 replace된다. jobset 내 유일해야 한다(None 제외).
         user_datas: job별 사용자 정의 dict (JSON 직렬화 가능) — 보존만.
@@ -589,14 +589,14 @@ class LsfJobManager(QObject):
         if isinstance(tags, str):             # 편의: 단일 태그 문자열 허용
             tags = [tags]
         rec = self.jobsets.local_create_jobset(
-            intended_count, label=label, tags=tags, parent=parent)
+            intended_count, label=label, tags=tags)
         jsid = rec.jobset_id
         items = list(commands)
         if items:
             try:
                 records = self._build_job_records(
                     jsid, items, merge_ids, user_datas,
-                    work_dir, work_dirs, wrapper)
+                    work_dir, work_dirs)
                 out = self.jobsets.local_create_jobs(jsid, records)
             except BaseException:
                 # 검증 실패(길이 불일치·빈 커맨드·merge_id 중복 등) — 방금
@@ -611,8 +611,8 @@ class LsfJobManager(QObject):
                            merge_ids: Optional[Sequence[Optional[str]]],
                            user_datas: Optional[Sequence[Optional[dict]]],
                            work_dir: Optional[str],
-                           work_dirs: Optional[Sequence[Optional[str]]],
-                           wrapper: bool) -> List[JobRecord]:
+                           work_dirs: Optional[Sequence[Optional[str]]]
+                           ) -> List[JobRecord]:
         """commands → CREATED JobRecord 목록 (create_jobset 내부용).
         submit_cwd: work_dir(전체 단일) 또는 work_dirs(job별) — 동시 지정 불가."""
         if work_dir is not None and work_dirs is not None:
@@ -628,43 +628,19 @@ class LsfJobManager(QObject):
             raise ValueError(
                 "merge_ids/user_datas/work_dirs 길이가 commands와 다릅니다")
 
-        # job_key 연번 — 기존 키의 최대 suffix 다음부터
-        used = set()
-        for r in self.get_jobs(jsid):
-            m = re.match(rf"^{re.escape(jsid)}_(\d+)$", r.job_key)
-            if m:
-                used.add(int(m.group(1)))
-        nxt = (max(used) + 1) if used else 0
-
+        # job_key 연번 — create_jobset은 항상 갓 만든(빈) jobset에만 호출되므로
+        # 0부터 시작한다 (v9의 기존-jobset 추가 경로(new_jobs)는 삭제됨 —
+        # 이후 추가는 merge뿐이고 merge는 자기 키를 갖고 온다)
         records = []
-        for item, mid, ud, cwd in zip(items, mids, uds, wds):
+        for nxt, (item, mid, ud, cwd) in enumerate(zip(items, mids, uds, wds)):
             key = f"{jsid}_{nxt}"
-            nxt += 1
-            if isinstance(item, JobSpec):
-                records.append(JobRecord(
-                    job_id=None, array_index=None, jobset_id=jsid,
-                    lsf_job_name=key, state=JobState.CREATED,
-                    command=item.command, via_wrapper=False,
-                    spec_json=spec_to_json(item), merge_id=mid, user_data=ud,
-                    submit_cwd=cwd))
-                continue
-            if isinstance(item, str):
-                if not wrapper:
-                    records.append(JobRecord(
-                        job_id=None, array_index=None, jobset_id=jsid,
-                        lsf_job_name=key, state=JobState.CREATED,
-                        command=item, via_wrapper=False,
-                        spec_json=spec_to_json(JobSpec(command=item)),
-                        merge_id=mid, user_data=ud, submit_cwd=cwd))
-                    continue
-                argv = shlex.split(item)
-            else:
-                argv = [str(t) for t in item]
+            argv = (shlex.split(item) if isinstance(item, str)
+                    else [str(t) for t in item])
             if not argv:
                 raise ValueError("create_jobset: 빈 커맨드")
             records.append(JobRecord(
                 job_id=None, array_index=None, jobset_id=jsid,
-                lsf_job_name=key, state=JobState.CREATED,
+                job_key=key, state=JobState.CREATED,
                 command=shlex.join(argv), via_wrapper=True,
                 merge_id=mid, user_data=ud, submit_cwd=cwd))
         return records
@@ -931,25 +907,28 @@ class LsfJobManager(QObject):
 
     @staticmethod
     def _record_to_item(r: JobRecord):
-        """레코드 → 제출 item 재구성. 경로는 job 단위 속성(rec.via_wrapper)
-        으로 결정 — jobset 부착물로 판별하면 merge된 혼합 jobset에서
-        오판한다."""
-        if r.via_wrapper:
-            return shlex.split(r.command)
-        # bsub 경로 — 원 제출 옵션(queue/resources/outfile/env) 복원.
-        # command만 다시 만들면 이 옵션들이 기본값으로 조용히 소실된다
-        try:
-            return (spec_from_json(r.spec_json) if r.spec_json
-                    else JobSpec(command=r.command))
-        except (ValueError, TypeError) as e:
-            log.warning("spec_json 복원 실패(%s) — 옵션 없이 제출: %s",
-                        e, r.job_key)
-            return JobSpec(command=r.command)
+        """레코드 → 제출 item(wrapper argv) 재구성 (v10: wrapper 단일 경로 —
+        command 문자열의 shlex 왕복이 원본 argv를 복원한다)."""
+        return shlex.split(r.command)
 
     def detect_lost(self, jobset_id: str) -> List[JobRecord]:
-        """[sync, LSF 조회 포함] 손실 감지/복구 (FR-5.3) — blocking 주의."""
+        """[sync] 손실 감지 (FR-5.3) — ID 미확보 SUBMITTING을 LOST 확정
+        (v10: LSF 조회/복구 없음 — 순수 Store 판정).
+
+        LOST 전이는 job_lost/jobs_updated/jobset_updated로 발행한다 — LOST는
+        terminal이라 폴링이 다시 보고하지 않으므로 여기서 안 내면 push 기반
+        UI가 영구 고착된다(리뷰 M3).
+
+        ⚠️ 제출 진행 중(SUBMITTING이 정상 과도 상태) 호출하면 순간 LOST
+        오확정될 수 있다 — 제출 성공이 PEND로 자가 복구하지만 job_lost가
+        오발화된다. submit_finished 이후에 호출할 것."""
         jobset_id = self._jsid(jobset_id)
-        return self.jobsets.detect_lost(jobset_id)
+        lost = self.jobsets.detect_lost(jobset_id)
+        if lost:
+            self._relay_jobs_changed(jobset_id, lost)
+            for r in lost:
+                self.job_lost.emit(jobset_id, r)
+        return lost
 
     def search_jobsets(self, *, tag: Optional[str] = None,
                        label: Optional[str] = None,
@@ -959,11 +938,10 @@ class LsfJobManager(QObject):
 
     def close(self, jobset_id, *, force: bool = False) -> None:
         """[sync] 종결 (전원 terminal일 때) — 핸들도 파괴.
-        전원 terminal이 아니면 예외 — polling/핸들은 건드리지 않고 유지.
-        LSF group 정리(bgdel)는 worker 스레드에서 비동기 수행 (QT-1)."""
+        전원 terminal이 아니면 예외 — polling/핸들은 건드리지 않고 유지."""
         jobset_id = self._jsid(jobset_id)
-        was_submitting = self.submitter.is_active(jobset_id)
-        if was_submitting or self.killer.is_active(jobset_id):
+        if (self.submitter.is_active(jobset_id)
+                or self.killer.is_active(jobset_id)):
             # pre_submit 게이트 대기 중엔 레코드가 아직 전원 terminal이라
             # 아래 local_close_jobset 검사를 통과해 버린다 — 게이트가 통과하면
             # '닫힌 jobset'에 실제 LSF job이 제출되므로(merge와 동일 가드)
@@ -978,41 +956,22 @@ class LsfJobManager(QObject):
                     jobset_id=jobset_id)
             self.submitter.cancel_submit(jobset_id)
             self.submitter.abort_retries(jobset_id)
-        js = self.jobsets.local_close_jobset(jobset_id, force=force,
-                                       run_bgdel=False)   # 실패 시 여기서 예외
+        self.jobsets.local_close_jobset(jobset_id, force=force)  # 실패 시 예외
         self.polling.stop_polling(jobset_id)
         self.handlers.remove_all(jobset_id)
+        self._forget_paced(jobset_id)    # dwell 보류분 — 닫힌 jobset의
+                                         # 늦은 발행 방지 (merge/remove 대칭)
         self._poll_intervals.pop(jobset_id, None)
         self._post_process.pop(jobset_id, None)
         self._pending_arm.pop(jobset_id, None)
         self._invalidate_handle(jobset_id)
-        if js.lsf_group_paths:
-            paths = list(js.lsf_group_paths)
-            if was_submitting:
-                # in-flight bsub가 있었다 — bgdel을 그 제출이 멎은 뒤로 미룬다.
-                # cancel_submit은 비블로킹이라 워커가 bsub를 완주해 job을
-                # 만들 수 있는데, 그 전에 bgdel하면 방금 지운 그룹에 job이
-                # 들어가 고아가 된다(kill의 cancel→quiesce→정리와 동일 규칙).
-                # kill barrier(scope)로 제출 정지까지 대기한 뒤 bgdel한다 —
-                # 전부 worker에서 수행해 main(QT-1)을 막지 않는다.
-                scope = self._gate.kill_scope(jobset_id)
 
-                def _quiesce_bgdel():
-                    # acquire()도 try 안에 둔다 — barrier↑ 뒤 정지 대기(wait
-                    # 콜백)에서 예외가 나면 release가 반드시 돌아 barrier가
-                    # 영구 잔류(이후 그 jobset의 모든 submit이 born-cancelled로
-                    # 거부)하지 않게 한다. _barrier_down은 0 이하면 no-op이라
-                    # acquire가 barrier_up 전에 죽어도 안전하다.
-                    try:
-                        scope.acquire()      # 진행 중 제출 취소 + 정지 대기
-                        for p in paths:
-                            self.command.bgdel(p)
-                    finally:
-                        scope.release()
-                self._misc_pool.start(_CallTask(_quiesce_bgdel))
-            else:
-                self._misc_pool.start(_CallTask(
-                    lambda: [self.command.bgdel(p) for p in paths]))
+    @property
+    def cluster_name(self) -> Optional[str]:
+        """[sync] 이 프로세스 env가 가리키는 LSF 클러스터명 (초기화 시 lsid
+        1회 조회 결과 — 조회 실패면 None). 제출 성공 레코드의
+        source_cluster에도 이 값이 스탬프된다."""
+        return self.command.cluster_name
 
     def list_jobsets(self) -> List[JobSetRecord]:
         """[sync, snapshot] 현재 세션의 JobSet 목록."""
@@ -1211,7 +1170,7 @@ class LsfJobManager(QObject):
 
 
 class _CallTask(QRunnable):
-    """임의 callable을 worker 스레드에서 실행 (bgdel 등 fire-and-forget)."""
+    """임의 callable을 worker 스레드에서 실행 (detail 조회 등 fire-and-forget)."""
 
     def __init__(self, fn):
         super().__init__()

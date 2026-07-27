@@ -21,7 +21,7 @@ def _array_jobset(manager, fake_lsf, n, base=9700):
     jsid = js.id
     manager.store.store_add_jobs([JobRecord(
         job_id=base, array_index=i, jobset_id=jsid,
-        lsf_job_name=f"{jsid}[{i}]", state=JobState.RUN, command="r")
+        job_key=f"{jsid}[{i}]", state=JobState.RUN, command="r")
         for i in range(n)])
     for i in range(n):
         fake_lsf.jobs[f"{base}[{i}]"] = FakeJob(

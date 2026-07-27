@@ -22,7 +22,7 @@ from lsfmgr import (InMemoryStore, JobRecord, JobState, LsfConfig,
 #       (verify를 optimistic 마킹보다 먼저 수행, 생존분은 EXIT로 안 덮음)
 # ----------------------------------------------------------------------
 def test_optimistic_verify_reports_survivor(qtbot, manager, fake_lsf, monkeypatch):
-    js = manager.create_jobset(["echo a"], wrapper=False)   # bsub 경로
+    js = manager.create_jobset(["echo a"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
     fake_lsf.set_all("RUN")
@@ -64,7 +64,7 @@ def test_cluster_preserved_on_format_downgrade(qtbot, fake_lsf, tmp_path):
         # forward_cluster가 이미 채워진 RUN 레코드 (이전 MC 폴링/복원 결과)
         mgr.store.store_add_jobs([JobRecord(
             job_id=700, array_index=None, jobset_id=jsid,
-            lsf_job_name=f"{jsid}_0", state=JobState.RUN, command="r",
+            job_key=f"{jsid}_0", state=JobState.RUN, command="r",
             source_cluster="cA", forward_cluster="cB")])
         # 이후 폴링에서 job이 DONE으로 바뀌고(갱신 유발), 사이트가 MC 필드를
         # 거부해 포맷이 저하된다(cluster None) — 저장값이 소실되면 안 된다.
@@ -110,7 +110,7 @@ def test_find_jobs_skips_deleted_jobset(store):
     store.store_insert_jobset(JobSetRecord(jobset_id="JS-B", intended_count=1))
     store.store_add_jobs([JobRecord(
         job_id=10, array_index=None, jobset_id="JS-A",
-        lsf_job_name="JS-A_0", state=JobState.RUN, command="r")])
+        job_key="JS-A_0", state=JobState.RUN, command="r")])
 
     # get_jobs가 특정 jobset에서 삭제 경합을 흉내내 예외를 던지게 한다
     real_get = store.get_jobs

@@ -35,12 +35,14 @@ def test_manager_layer_overrides_builtin():
 
 
 def test_call_layer_overrides_manager():
-    manager_defaults = {"workers": 32, "max_retry": 5, "queue": "priority"}
+    manager_defaults = {"workers": 32, "max_retry": 5,
+                        "rate_limit_per_s": 5.0}
     opts = resolve_options(manager_defaults,
-                           {"workers": 8, "max_retry": 0, "queue": "short"})
+                           {"workers": 8, "max_retry": 0,
+                            "rate_limit_per_s": 2.0})
     assert opts.workers == 8
     assert opts.max_retry == 0                 # 0 == 재시도 없음
-    assert opts.queue == "short"
+    assert opts.rate_limit_per_s == 2.0
 
 
 def test_frozen_options():

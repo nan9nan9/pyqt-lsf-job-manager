@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import pytest
 
-from lsfmgr import JobSpec, JobState
+from lsfmgr import JobState
 from tests.conftest import submit_cmds
 
 
 @pytest.fixture
 def submitted(qtbot, manager, fake_lsf):
-    jobs = [JobSpec(command=f"r {i}") for i in range(30)]
+    jobs = [f"r {i}" for i in range(30)]
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         jsid = submit_cmds(manager, jobs).id
     return jsid
@@ -18,7 +18,34 @@ def submitted(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 # 전략 ① group 1회 호출 (수용 기준 2)
 # ----------------------------------------------------------------------
-def test_kill_by_group_single_call(qtbot, manager, fake_lsf, submitted):
+def test_whole_kill_survives_chunk_failure_with_retry(qtbot, fake_lsf):
+    """v10.1: 전체 kill도 confirm 경로 — 첫 bkill chunk가 순단(rc=255)이어도
+    나머지 chunk를 계속 시도하고, 미확인분은 재시도로 살려낸다 (이전에는
+    첫 장애에 kill 전체가 무위였다 — 리뷰 H2 회귀)."""
+    from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
+    cfg = LsfConfig(chunk_size=10, kill_retry_delay_s=0.05)
+    mgr = LsfJobManager(store=InMemoryStore(), config=cfg, runner=fake_lsf)
+    try:
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            js = submit_cmds(mgr, [f"k {i}" for i in range(30)],
+                             auto_poll=False)
+        fake_lsf.set_all("RUN")
+        fake_lsf.fail_next_bkill = 1             # 첫 chunk만 장애
+        with qtbot.waitSignal(mgr.kill_finished, timeout=10000) as blk:
+            mgr.kill(js)
+        report = blk.args[1]
+        assert report.requested == 30
+        assert report.unconfirmed == 0           # 재시도로 전원 확인
+        assert report.kill_retries >= 1
+        assert fake_lsf.alive_jobs() == []       # 유출 0
+        assert all(r.state is JobState.EXIT for r in js.jobs())
+    finally:
+        mgr.shutdown()
+
+
+def test_kill_whole_jobset_chunk_single_call(qtbot, manager, fake_lsf,
+                                              submitted):
+    """전체 kill — 30 job이 chunk_size(200) 이내라 bkill 1회 (v10 단일 경로)."""
     fake_lsf.calls.clear()
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
         manager.kill(submitted)
@@ -26,7 +53,7 @@ def test_kill_by_group_single_call(qtbot, manager, fake_lsf, submitted):
     assert jsid == submitted
     assert report.requested == 30
     assert report.command_calls == 1                  # bkill 1회
-    assert any(s.startswith("group:") for s in report.strategies)
+    assert report.strategies == ["chunk"]
     assert fake_lsf.alive_jobs() == []
 
 
@@ -40,7 +67,7 @@ def test_kill_chunk_fallback(qtbot, manager, fake_lsf, submitted, config):
     from dataclasses import replace
     js = manager.store.get_jobset(submitted)
     manager.store.update_jobset(replace(
-        js, lsf_group_paths=[], name_patterns=[], array_job_ids=[]))
+        js))
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
         manager.kill(submitted)
     _, report = blocker.args
@@ -84,7 +111,7 @@ def test_kill_progress_signal(qtbot, fake_lsf, config):
                         config=replace(config, chunk_size=10),  # 여러 chunk
                         runner=fake_lsf)
     try:
-        jobs = [JobSpec(command=f"r {i}") for i in range(60)]
+        jobs = [f"r {i}" for i in range(60)]
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             jsid = submit_cmds(mgr, jobs).id
         ids = [r.job_id for r in mgr.get_jobs(jsid)]
@@ -177,7 +204,7 @@ def test_kill_actual_waits_for_lsf(qtbot, fake_lsf, config):
     try:
         assert mgr.config.kill_status_policy == "actual"
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            jsid = submit_cmds(mgr, [JobSpec(command=f"r {i}")
+            jsid = submit_cmds(mgr, [f"r {i}"
                                     for i in range(5)]).id
         with qtbot.waitSignal(mgr.kill_finished, timeout=10000) as blocker:
             mgr.kill(jsid)                     # verify 없음

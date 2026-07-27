@@ -12,16 +12,14 @@ from lsfmgr.states import JobRecord, JobSetRecord, JobState
 
 def make_jobset(jsid="js1", n=3, **kw) -> JobSetRecord:
     defaults = dict(jobset_id=jsid, intended_count=n,
-                    lsf_group_paths=[f"/lsfmgr/u/{jsid}"],
-                    name_patterns=[f"{jsid}_*"], label="lbl",
-                    tags=["t1", "t2"], created_by="u")
+                    label="lbl", tags=["t1", "t2"])
     defaults.update(kw)
     return JobSetRecord(**defaults)
 
 
 def make_job(jsid="js1", idx=0, **kw) -> JobRecord:
     defaults = dict(job_id=None, array_index=None, jobset_id=jsid,
-                    lsf_job_name=f"{jsid}_{idx}", state=JobState.CREATED,
+                    job_key=f"{jsid}_{idx}", state=JobState.CREATED,
                     command=f"run {idx}")
     defaults.update(kw)
     return JobRecord(**defaults)
@@ -35,7 +33,7 @@ def test_jobset_crud(store):
     assert js.created_at is not None
     got = store.get_jobset("js1")
     assert got.intended_count == 3
-    assert got.lsf_group_paths == ["/lsfmgr/u/js1"]
+    assert got.tags == ["t1", "t2"]
     assert got.tags == ["t1", "t2"]
 
     from dataclasses import replace
@@ -82,7 +80,7 @@ def test_get_jobs_with_state_filter(store):
     store.store_add_job(make_job(idx=2))
     assert len(store.get_jobs("js1")) == 3
     only = store.get_jobs("js1", states={JobState.RUN, JobState.PEND})
-    assert {r.lsf_job_name for r in only} == {"js1_0", "js1_1"}
+    assert {r.job_key for r in only} == {"js1_0", "js1_1"}
 
 
 def test_transition(store):
@@ -106,8 +104,8 @@ def test_remove_job(store):
         store.store_add_job(make_job(idx=i, job_id=100 + i))
     # 제거 → 제거된 레코드 반환 + 나머지 유지
     rec = store.store_delete_job("js1", "js1_1")
-    assert rec.lsf_job_name == "js1_1" and rec.job_id == 101
-    assert {r.lsf_job_name for r in store.get_jobs("js1")} == {"js1_0", "js1_2"}
+    assert rec.job_key == "js1_1" and rec.job_id == 101
+    assert {r.job_key for r in store.get_jobs("js1")} == {"js1_0", "js1_2"}
     with pytest.raises(JobNotFoundError):
         store.get_job("js1", "js1_1")
 
@@ -153,10 +151,11 @@ def test_find_jobs_global(store):
 
 def test_via_wrapper_roundtrip(store):
     store.store_insert_jobset(make_jobset(n=2))
-    store.store_add_job(make_job(idx=0, via_wrapper=True))
+    # v10: 기본값 True — 과거 bsub 경로 레코드(False)도 왕복 보존돼야 한다
+    store.store_add_job(make_job(idx=0, via_wrapper=False))
     store.store_add_job(make_job(idx=1))
-    assert store.get_job("js1", "js1_0").via_wrapper is True
-    assert store.get_job("js1", "js1_1").via_wrapper is False
+    assert store.get_job("js1", "js1_0").via_wrapper is False
+    assert store.get_job("js1", "js1_1").via_wrapper is True
 
 
 def test_runtime_fields_roundtrip(store):

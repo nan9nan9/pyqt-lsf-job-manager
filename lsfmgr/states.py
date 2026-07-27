@@ -71,11 +71,14 @@ LSF_STAT_MAP["EXIT"] = JobState.EXIT
 
 @dataclass(frozen=True)
 class JobRecord:
-    """job 1개의 추적 레코드. jobset 내에서 lsf_job_name이 유일 키."""
+    """job 1개의 추적 레코드. jobset 내에서 job_key가 유일 키."""
     job_id: Optional[int]            # SUBMIT_FAILED 등 미확보 시 None
     array_index: Optional[int]       # array element면 인덱스, 아니면 None
     jobset_id: str
-    lsf_job_name: str                # "<jobset_id>_<idx>" 또는 "<jobset_id>[<idx>]"
+    #: Store 내 물리 키 — "<jobset_id>_<idx>". (v10.1: 구명 lsf_job_name에서
+    #: 개명 — v10부터 LSF에 -J로 부착되지 않는 순수 내부 키라 옛 이름이
+    #: 오해를 유발했다. 구명 별칭 없음 — 호출부는 job_key만 쓴다.)
+    job_key: str
     state: JobState
     fail_reason: Optional[str] = None    # "NO_JOBID_PARSED"|"BSUB_TIMEOUT"|...
     # 실패 진단 원문 — UI가 "왜 실패했나"를 그대로 보여주는 용도.
@@ -96,19 +99,13 @@ class JobRecord:
     # LSF MultiCluster(job forwarding) — collect_clusters=True일 때 폴링이 채운다
     source_cluster: Optional[str] = None     # 제출(로컬) 클러스터
     forward_cluster: Optional[str] = None    # 포워딩된 실행(원격) 클러스터
-    # 제출 경로 — wrapper(커맨드 그대로 실행) vs bsub(lsfmgr 인자 조립).
-    # job 단위 속성이다: merge로 wrapper/bsub jobset이 섞여도 재제출 경로를
-    # 레코드만 보고 정확히 고를 수 있어야 한다 (resubmit_jobs)
-    via_wrapper: bool = False
+    # 제출 경로 표식 (v10: wrapper 단일 경로 — 항상 True로 기록된다.
+    # 과거 bsub 경로 레코드(False)와의 구분용 스키마 호환 필드)
+    via_wrapper: bool = True
     # 제출 시 subprocess를 실행할 작업 디렉토리(요청값). None이면 부모(GUI)
-    # 프로세스의 cwd에서 실행. wrapper 경로는 bsub 인자로 -cwd를 못 주므로
-    # subprocess cwd로 지정한다(스레드 안전 — os.chdir 금지). job 단위 속성이라
+    # 프로세스의 cwd에서 실행(스레드 안전 — os.chdir 금지). job 단위 속성이라
     # merge/재제출에도 보존된다. 관측값 working_dir(bjobs exec_cwd)과는 별개다.
     submit_cwd: Optional[str] = None
-    # bsub 경로의 제출 옵션 스냅샷(JobSpec 직렬화 JSON) — 재제출 시
-    # queue/resources/outfile/env 를 원본 그대로 복원하는 근거.
-    # command 만 다시 만들면 이 옵션들이 조용히 기본값으로 소실된다
-    spec_json: Optional[str] = None
     # --- 논리 정체성/사용자 데이터 (GUI 직접 제어용, v9) ---
     # merge_id: job의 논리 키 — merge 시 같은 merge_id의 기존 job을 이
     # 레코드 내용으로 replace한다(물리 키 job_key는 유지 → 테이블 행 연속).
@@ -120,27 +117,19 @@ class JobRecord:
     # 고치지 말고 set_user_data로 교체할 것.
     user_data: Optional[dict] = None
 
-    @property
-    def job_key(self) -> str:
-        """Store 내 job 식별 키."""
-        return self.lsf_job_name
-
 
 @dataclass(frozen=True)
 class JobSetRecord:
-    """논리적 job 묶음. LSF 부착물(group/name/array)은 실행 수단일 뿐이며
-    전부 유실돼도 JobRecord의 job_id 목록만으로 동작한다 (graceful degradation)."""
+    """논리적 job 묶음 — 추적은 JobRecord의 job_id 목록으로만 한다.
+    (v10.1: 사장 필드 일괄 삭제 — 부착물(lsf_group_paths/name_patterns/
+    array_job_ids)은 v10부터 생성 자체가 없고, session_id(세션복원)/
+    parent_jobset_id/created_by는 쓰기만 되고 어디서도 읽지 않았다.
+    영속 저장소가 v9에서 제거돼 과거 데이터 호환 부담도 없다.)"""
     jobset_id: str
     intended_count: int                          # 손실 감지 기준
-    lsf_group_paths: List[str] = field(default_factory=list)
-    name_patterns: List[str] = field(default_factory=list)
-    array_job_ids: List[int] = field(default_factory=list)
     label: str = ""
-    tags: List[str] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)   # search_jobsets(tag=) 필터
     description: str = ""
-    parent_jobset_id: Optional[str] = None
-    created_by: str = ""
-    created_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None        # search_jobsets(since=) 필터
     merged_from: List[str] = field(default_factory=list)
-    session_id: str = ""
     closed: bool = False

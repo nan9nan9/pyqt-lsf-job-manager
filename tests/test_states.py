@@ -35,7 +35,7 @@ def test_on_lsf_states():
 
 def test_job_record_frozen():
     rec = JobRecord(job_id=1, array_index=None, jobset_id="js1",
-                    lsf_job_name="js1_0", state=JobState.PEND)
+                    job_key="js1_0", state=JobState.PEND)
     with pytest.raises(dataclasses.FrozenInstanceError):
         rec.state = JobState.RUN                # type: ignore[misc]
 
@@ -48,5 +48,5 @@ def test_jobset_record_frozen():
 
 def test_job_key():
     rec = JobRecord(job_id=None, array_index=None, jobset_id="js1",
-                    lsf_job_name="js1_3", state=JobState.CREATED)
+                    job_key="js1_3", state=JobState.CREATED)
     assert rec.job_key == "js1_3"

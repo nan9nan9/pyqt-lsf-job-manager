@@ -105,7 +105,7 @@ def test_job_detail_array_element(qtbot, manager, fake_lsf):
     jsid, parent = js.id, 9200
     manager.store.store_add_jobs([JobRecord(
         job_id=parent, array_index=i, jobset_id=jsid,
-        lsf_job_name=f"{jsid}[{i}]", state=JobState.DONE, command="r")
+        job_key=f"{jsid}[{i}]", state=JobState.DONE, command="r")
         for i in (1, 2, 3)])
     for i in (1, 2, 3):
         fake_lsf.jobs[f"{parent}[{i}]"] = FakeJob(

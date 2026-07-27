@@ -23,38 +23,27 @@ def test_sibling_refresh_not_stale_from_cache(qtbot, manager):
     jsid = "JS-STALE"
     # name probe가 도는 jobset (group/array 부착물 없음 → element1은 leftover)
     manager.store.store_insert_jobset(JobSetRecord(
-        jobset_id=jsid, intended_count=2,
-        name_patterns=[f"{jsid}_*"]))
+        jobset_id=jsid, intended_count=2))
     manager.store.store_add_jobs([
         JobRecord(job_id=900, array_index=0, jobset_id=jsid,
-                  lsf_job_name=f"{jsid}_0", state=JobState.RUN, command="r"),
+                  job_key=f"{jsid}_0", state=JobState.RUN, command="r"),
         JobRecord(job_id=900, array_index=1, jobset_id=jsid,
-                  lsf_job_name=f"{jsid}_1", state=JobState.RUN, command="r")])
+                  job_key=f"{jsid}_1", state=JobState.RUN, command="r")])
 
     cmd = manager.querier.command
-    # 첫 probe(name)는 element0을 **RUN**으로만 반환(element1은 미포함 → leftover).
-    # 실제 LSF에선 두 bjobs 호출 사이 상태가 바뀔 수 있는 상황을 흉내낸다.
-    def fake_by_name(pattern):
-        return [JobStatus(job_id=900, array_index=0, state=JobState.RUN,
-                          exit_code=None, job_name=f"{jsid}_0")]
-    def fake_by_group(path):
-        return []
-    # element1의 leftover by-id 재조회는 job_id=900의 **전 element를 최신(DONE)**
-    # 으로 반환한다 — element0도 여기서 DONE으로 최신화된다.
+    # (v10: probe/leftover 2단이 사라져 원래의 'stale probe' 시나리오는 구조적으로
+    # 불가능해졌다 — by-id 단일 조회 결과가 전 element 레코드에 반영되는지만 검증)
     def fake_by_ids(ids):
         if 900 in set(ids):
             return ([JobStatus(900, 0, JobState.DONE, 0, f"{jsid}_0"),
                      JobStatus(900, 1, JobState.DONE, 0, f"{jsid}_1")], set())
         return ([], set())
-    cmd.bjobs_by_name = fake_by_name
-    cmd.bjobs_by_group = fake_by_group
     cmd.bjobs_by_ids = fake_by_ids
 
     manager.querier.query(jsid)
 
     states = {r.array_index: r.state for r in manager.get_jobs(jsid)}
-    # 두 element 모두 DONE — element0이 첫 probe의 stale RUN으로 남지 않는다
-    assert states[0] is JobState.DONE, f"element0 stale: {states}"
+    assert states[0] is JobState.DONE, f"element0 미반영: {states}"
     assert states[1] is JobState.DONE
 
 

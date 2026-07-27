@@ -68,7 +68,9 @@ def test_default_off_no_cluster_fields(qtbot, manager, fake_lsf):
     fj.stat = "RUN"; fj.source_cluster = "seoul"
     fake_lsf.calls.clear()
     manager.querier.query(js.id)
-    assert js.jobs()[0].source_cluster is None
+    # collect_clusters=False — 폴링은 cluster를 관측하지 않으므로 제출 시점
+    # lsid 스탬프("fake_cluster")가 그대로 유지된다 (seoul로 안 덮임)
+    assert js.jobs()[0].source_cluster == "fake_cluster"
     # bjobs -o 포맷에 cluster 필드가 없어야
     for call in fake_lsf.calls_of("bjobs"):
         assert "source_cluster" not in " ".join(call)
@@ -90,7 +92,8 @@ def test_cluster_field_unsupported_degrades_to_full(qtbot, fake_lsf, config):
         mgr.querier.query(js.id)
         rec = js.jobs()[0]
         assert rec.run_time_s == 42          # FULL 확장 필드는 유지
-        assert rec.source_cluster is None    # MC 필드만 포기
+        # MC 필드 미지원 — 폴링 관측은 포기되고 제출 시점 lsid 스탬프만 남는다
+        assert rec.source_cluster == "fake_cluster"
         # 포맷이 FULL(인덱스 1)로 강등됐고 MC 필드는 빠졌다
         assert "source_cluster" not in mgr.command._bjobs_fmt
     finally:
@@ -111,6 +114,32 @@ def test_cluster_degradation_is_permanent(qtbot, fake_lsf, config):
         mgr.querier.query(js.id)             # 이후 사이클
         for call in fake_lsf.calls_of("bjobs"):
             assert "source_cluster" not in " ".join(call)
+    finally:
+        mgr.shutdown()
+
+
+def test_submit_stamps_source_cluster(qtbot, manager, fake_lsf):
+    """제출 성공 시점에 source_cluster가 즉시 스탬프된다 (lsid 1회 캐시) —
+    폴링(collect_clusters) 전 공백 제거. mgr.cluster_name으로도 노출."""
+    assert manager.cluster_name == "fake_cluster"      # 초기화 시 lsid 1회
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        js = submit_cmds(manager, ["echo a"], auto_poll=False)
+    rec = js.jobs()[0]
+    assert rec.state is JobState.PEND
+    assert rec.source_cluster == "fake_cluster"        # 폴링 전인데 이미 존재
+    assert rec.forward_cluster is None
+
+
+def test_lsid_failure_leaves_cluster_none(qtbot, fake_lsf, config):
+    """lsid 실패(LSF 순단 등)여도 기동은 정상 — cluster_name/스탬프만 None."""
+    fake_lsf.fail_all_queries = True                   # lsid rc=255
+    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf)
+    try:
+        assert mgr.cluster_name is None
+        fake_lsf.fail_all_queries = False
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            js = submit_cmds(mgr, ["echo a"], auto_poll=False)
+        assert js.jobs()[0].source_cluster is None     # 스탬프도 None 그대로
     finally:
         mgr.shutdown()
 
@@ -161,7 +190,9 @@ def test_full_resubmit_clears_cluster(qtbot, mc_manager, fake_lsf):
         mc_manager.submit(js)
     rec = js.jobs()[0]
     assert rec.state is JobState.PEND
-    assert rec.source_cluster is None
+    # 재제출 리셋이 이전 관측치(seoul/busan)를 지우고, 성공 시점에 현재
+    # 클러스터(lsid)가 새로 스탬프된다 — 이전 실행의 흔적만 사라지면 된다
+    assert rec.source_cluster == "fake_cluster"
     assert rec.forward_cluster is None
 
 

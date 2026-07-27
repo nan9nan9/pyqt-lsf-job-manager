@@ -15,7 +15,7 @@ def _array_jobset(manager, fake_lsf, n=10):
     jsid, parent = js.id, 9500
     manager.store.store_add_jobs([JobRecord(
         job_id=parent, array_index=i, jobset_id=jsid,
-        lsf_job_name=f"{jsid}[{i}]", state=JobState.RUN, command="r")
+        job_key=f"{jsid}[{i}]", state=JobState.RUN, command="r")
         for i in range(n)])
     for i in range(n):
         fake_lsf.jobs[f"{parent}[{i}]"] = FakeJob(
@@ -69,7 +69,7 @@ def test_verify_partial_kill_counts_only_targeted(qtbot, manager, fake_lsf):
               2: JobState.PEND, 3: JobState.RUN}
     manager.store.store_add_jobs([JobRecord(
         job_id=parent, array_index=i, jobset_id=jsid,
-        lsf_job_name=f"{jsid}[{i}]", state=st, command="r")
+        job_key=f"{jsid}[{i}]", state=st, command="r")
         for i, st in states.items()])
     for i, st in states.items():
         fake_lsf.jobs[f"{parent}[{i}]"] = FakeJob(

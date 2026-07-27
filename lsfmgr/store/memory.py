@@ -63,6 +63,11 @@ class InMemoryStore(JobSetStore):
         with self._lock:
             if record.jobset_id not in self._jobsets:
                 raise JobSetNotFoundError(record.jobset_id)
+            if record.job_key in self._jobs[record.jobset_id]:
+                # 조용한 덮어쓰기 금지 — 교체는 update_job/transition의 몫
+                # (add가 덮어쓰면 중복 키 버그가 무증상으로 데이터를 삼킨다)
+                raise ValueError(
+                    f"job_key 중복: {record.jobset_id}/{record.job_key}")
             if record.updated_at is None:
                 record = replace(record, updated_at=datetime.now())
             self._jobs[record.jobset_id][record.job_key] = record
@@ -74,10 +79,17 @@ class InMemoryStore(JobSetStore):
         now = datetime.now()
         with self._lock:                        # lock 1회로 일괄 처리
             # 선검증 — 중간 실패 시 앞선 레코드만 반영되는 부분 적용을
-            # 막는다 (일괄 연산의 원자성 계약)
+            # 막는다 (일괄 연산의 원자성 계약). 키 중복(기존/배치 내)도
+            # 여기서 거른다 — dict 대입의 조용한 덮어쓰기 방지.
+            seen: set = set()
             for record in records:
                 if record.jobset_id not in self._jobsets:
                     raise JobSetNotFoundError(record.jobset_id)
+                k = (record.jobset_id, record.job_key)
+                if k in seen or record.job_key in self._jobs[record.jobset_id]:
+                    raise ValueError(
+                        f"job_key 중복: {record.jobset_id}/{record.job_key}")
+                seen.add(k)
             for record in records:
                 if record.updated_at is None:
                     record = replace(record, updated_at=now)
@@ -132,13 +144,18 @@ class InMemoryStore(JobSetStore):
             return new
 
     def transition_many(self, jobset_id, specs):
-        """lock 1회로 다건 전이 — 건당 lock acquire/release 제거."""
+        """lock 1회로 다건 전이 — 건당 lock acquire/release 제거.
+        키 필드 검증은 **적용 시작 전** 일괄 수행한다 — 루프 도중 예외면
+        앞선 전이는 커밋됐는데 반환 목록이 유실되어 호출자(폴링)의
+        jobs_updated 통지가 영구 누락된다 (store_add_jobs와 동일 원자성)."""
+        specs = list(specs)
+        for _key, _st, _g, fields in specs:
+            self._reject_key_fields(fields)
         out: List[JobRecord] = []
         now = datetime.now()
         with self._lock:
             jobs = self._jobs.get(jobset_id, {})
             for job_key, new_state, guard, fields in specs:
-                self._reject_key_fields(fields)
                 old = jobs.get(job_key)
                 if old is None:
                     continue                     # 사이클 도중 remove_job 등
