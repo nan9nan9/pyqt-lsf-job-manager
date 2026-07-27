@@ -25,6 +25,7 @@ from .errors import (
     CloseNotAllowedError,
     JobNotFoundError,
     JobSetClosedError,
+    JobSetNotFoundError,
     LsfmgrError,
     MergeNotAllowedError,
     SubmitNotAllowedError,
@@ -392,6 +393,26 @@ class LsfJobManager(QObject):
         """[sync, snapshot] Store의 현재 요약 (LSF 호출 없음)."""
         jobset_id = self._jsid(jobset_id)
         return self.store.summary(jobset_id)
+
+    def total_summary(self) -> Dict[str, Any]:
+        """[sync, snapshot] 전체 jobset을 가로지른 상태별 카운트 합산.
+
+        각 jobset의 summary()를 합산한다. "total"은 intended_count 합계,
+        나머지 키는 JobState.value별 개수 합계. LSF 호출 없이 Store 스냅샷만
+        읽으므로, 최신 LSF 상태는 각 jobset이 폴링되고 있어야 반영된다.
+
+        list_jobsets() 스냅샷과 이후 summary() 사이에 다른 스레드가 그 jobset을
+        close/merge로 지울 수 있다(find_jobs와 동일한 경합) — 사라진 jobset은
+        건너뛴다."""
+        agg: Dict[str, int] = {}
+        for js in self.store.list_jobsets():
+            try:
+                s = self.store.summary(js.jobset_id)
+            except JobSetNotFoundError:
+                continue
+            for key, val in s.items():
+                agg[key] = agg.get(key, 0) + val
+        return agg
 
     def get_jobs(self, jobset_id: str,
                  states: Optional[Set[JobState]] = None) -> List[JobRecord]:
