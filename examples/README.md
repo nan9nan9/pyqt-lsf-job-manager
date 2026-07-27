@@ -1,81 +1,55 @@
-# lsfmgr 기본 예제
+# lsfmgr 통합 예제
 
-lsfmgr 의 주요 기능을 **하나의 GUI 대시보드**(`basic_example.py`)에서 모두 다룹니다.
-실제 LSF cluster 없이 실행되도록 저장소에 동봉된 **mocklsf**(가상 LSF)를 테스트
-환경으로 씁니다. job 제출은 **`create_jobset([...])` → `submit`**
-(v9 단일 경로)로 이뤄지며, job 마다
-`customwrapper_sub` 같은 wrapper 커맨드(job마다 다른 커맨드/wrapper 혼합 가능)를 그대로
-실행하고 그 결과의 `Job <id>` 로 job 을 관리합니다(실제 bsub 직접 호출 아님).
+lsfmgr 의 주요 기능을 **하나의 GUI 대시보드**(`gui_demo.py`)에서 모두 다룹니다
+(v10.1: basic/handler/mc 예제를 이 파일 하나로 통합).
+실제 LSF cluster 없이 실행되도록 저장소 동봉 **mocklsf**(가상 LSF)를 테스트
+환경으로 쓰며, job 제출은 **`create_jobset([...])` → `submit`** 단일 경로 —
+job 마다 `customwrapper_sub` 같은 wrapper 커맨드(혼합 가능)를 그대로 실행하고
+그 출력의 `Job <id>` 로 관리합니다.
 
 ```bash
 pip install -e .[test]        # 프로젝트 루트에서
-python examples/basic_example.py      # 통합 GUI 대시보드
-python examples/gui_demo.py           # Signal 연결 최소 데모 GUI (README §5)
-python examples/handler_example.py    # JobSet handler 예제 (콘솔)
-python examples/mc_example.py         # MultiCluster forward job kill 예제 (콘솔)
+python examples/gui_demo.py   # 통합 GUI 데모
 ```
 
-## 대시보드가 다루는 기능
+## 다루는 기능
 
 | 영역 | 데모하는 기능 |
 |---|---|
-| Submit 옵션 폼 | `create_jobset`+`submit`, wrapper 선택/‏혼합, job 수, `workers`, `max_retry`, `rate_limit_per_s`, queue |
-| 진행률 바 / Cancel | `progress` throttle(QT-5), `cancel()` 안전 중단(QT-6) |
-| JobSet 목록 | 다중 JobSet 요약 실시간 갱신, Facade Signal 스트림(README §8) |
-| job 모니터링 테이블 | 선택 JobSet 의 job 상태 배치 갱신(QT-4), 상태별 색 |
-| Kill 제어 | 전체 kill(job_id chunk, verify), `PEND만 Kill`(`only_state`), `KillReport` |
+| Submit 옵션 폼 | `create_jobset`+`submit`, wrapper 선택/혼합, `workers`/`max_retry`/`rate_limit_per_s`, queue |
+| 진행률 바 / Cancel | progress throttle(QT-5), `cancel_submit` 안전 중단(QT-6) |
+| JobSet 트리 | 다중 JobSet 요약 실시간 갱신, Facade Signal 스트림 (README §8) |
+| job 테이블 | 변경분 배치 **증분 upsert**(QT-4, 전체 재그리기 금지), 상태별 색, cluster 열 |
+| 클러스터 배지 | 기동 시 `lsid` 1회 조회(`mgr.cluster_name`) — 제출 시 `source_cluster` 스탬프 |
+| job 추가 / 재실행 | **merge** 로만 추가(v9), 실패분 같은 `merge_id` 교체 후 전체 재제출 |
+| Kill 제어 | 전체 kill(verify, **MC-aware** — forward job 은 `envpath` 분류 kill), `PEND만`, 선택 행만(`kill_jobs`) |
+| handler (FR-7) | 체크 시 `add_handler` — RUN 중 폴링마다 job 출력 파싱 + 종료 시 최종 1회 → `handler_finished` 로그 |
+| post_process (FR-10) | 전원 terminal 도달 시 worker 에서 1회 종합 집계 → `post_processing_finished` |
+| job 상세 | 테이블 더블클릭 → `fetch_job_detail`(bhist -l 온디맨드) → `job_detail_ready` |
 | 실패 처리 | retry(비정상 종료만), `SUBMIT_FAILED`/`EXIT`, `detect_lost()` |
-| 실행 로그 | 실제 실행된 wrapper 커맨드 · 할당 job_id · 상태 전이 |
 
 기본으로 제출 실패율(0.12)·EXIT 확률(0.12)을 주입해 retry/EXIT 상태가 자연스럽게
 관찰됩니다.
 
-## handler 예제 (`handler_example.py`)
+### MC(MultiCluster) 시나리오
 
-JobSet 에 **이름 있는 handler** 를 붙여, job 이 RUN 인 동안 **폴링 사이클마다**
-worker 스레드에서 job 출력 파일을 파싱하고(중간 수집), DONE/EXIT 시 최종 수집을 한
-번 더 수행하는 콘솔 예제입니다. `js.add_handler(name, fn, start_states=,
-end_states=)` 등록 → `handler_finished(jsid, name, HandlerResult)` 로 결과 수신 →
-모든 job 최종 수집까지의 전체 흐름을 보여줍니다.
-`ctx.working_dir`(LSF exec_cwd)/`run_time_s` 같은 LSF 유래 필드 활용도 포함합니다.
-자세한 동작 규칙은 [`../docs/lsfmgr.md`](../docs/lsfmgr.md) §2.5 참고.
-
-## MultiCluster 예제 (`mc_example.py`)
-
-실제 LSF MultiCluster 에서 다른 클러스터로 **forward 된 job** 은 로컬 `bkill`
-로 안 죽고 그 클러스터 env(cshrc)를 `source` 해야 죽습니다. mocklsf 의 MC 흉내
-(`MOCKLSF_FORWARD_CLUSTERS`)로 이를 재현하고, lsfmgr 의 `envpath` kill 로
-해결하는 콘솔 예제입니다:
-
-1. MC 켠 mocklsf 로 제출 → 일부 job 이 forward 됨(`collect_clusters=True` 로
-   `forward_cluster` 를 폴링으로 확인).
-2. forward 된 job 을 **그냥** `js.kill_jobs([key])` → 안 죽는 것을 확인.
-3. `forward_cluster` 로 분류해, forward 는 `js.kill_jobs(keys, envpath=<cshrc>)`,
-   로컬은 일반 kill → 전부 종료. (`envpath` cshrc 경로는
-   `common.cluster_env_path(cluster)` 로 얻음)
-
-mocklsf 의 MC 흉내 상세는 [`../docs/mocklsf.md`](../docs/mocklsf.md) 참고.
+폼의 "MC forward 흉내"를 켜고 제출하면 mocklsf 가 일부 job 을 원격 클러스터로
+forward 합니다(`collect_clusters=True` 폴링이 `forward_cluster` 를 채움 —
+테이블 cluster 열에서 확인). 이후 "Kill+verify (MC-aware)"는 forward job 을
+클러스터별로 분류해 그 env(cshrc)를 `source` 한 bkill(`envpath=`)로, 로컬 job 은
+일반 kill 로 죽입니다 — forward job 이 로컬 bkill 로 안 죽는 실제 MC 환경의
+해법 시연입니다. 상세는 [`../docs/mocklsf.md`](../docs/mocklsf.md) 참고.
 
 ## 파일
 
-- `basic_example.py` — 통합 GUI 대시보드 (기본 예제).
-- `gui_demo.py` — **Signal 연결 최소 데모** — README §5 'GUI 통합 규칙'의
-  위젯별 연결 패턴(요약 배지/테이블 행 갱신/진행 바/kill_started 스피너/실패
-  알림)을 1:1 최소 코드로. 스모크:
-  `LSFMGR_DEMO_AUTORUN=1 LSFMGR_DEMO_AUTOQUIT=12 QT_QPA_PLATFORM=offscreen python examples/gui_demo.py`
-- `handler_example.py` — JobSet handler 주기 실행/최종 수집 (콘솔 예제).
-- `mc_example.py` — MultiCluster forward job 의 `envpath` kill (콘솔 예제).
+- `gui_demo.py` — **통합 GUI 데모** (유일한 예제).
 - `common.py` — mocklsf 테스트 환경 셋업 + manager 생성 헬퍼:
-  - `make_manager(wrapper="customwrapper_sub", **kwargs)` / `mocklsf_paths(...)` —
-    mocklsf 명령 경로를 주입한 manager 구성. `wrapper` 로
-    `customwrapper_sub` 지정 가능(실제 환경에선 여러 wrapper 사용 가능).
+  - `mocklsf_paths()` / `make_manager(**kwargs)` — mocklsf 조회/kill 명령 경로 주입.
+  - `wrapper(tool, *args)` — 제출 wrapper 커맨드(토큰 리스트) 생성.
   - `configure_mocklsf(pend=, run=, submit_fail_rate=, exit_rate=,
-    forward_clusters=, forward_rate=, ...)` — mocklsf 타이밍/실패율/MC 를
-    `MOCKLSF_*` 환경변수로 설정(첫 submit 이전 호출).
+    forward_clusters=, forward_rate=, ...)` — `MOCKLSF_*` 환경변수 설정.
   - `cluster_env_path(cluster)` — forward 클러스터 cshrc 경로(kill `envpath` 용).
   - `install_logging`, `maybe_autoquit`(`LSFMGR_DEMO_AUTOQUIT=<초>`).
-
-mocklsf 자체에 대한 자세한 내용은 [`../docs/mocklsf.md`](../docs/mocklsf.md) 참고.
 
 > 참고: LOST(job이 흔적 없이 소실)는 mocklsf 가 재현하지 않습니다. `detect_lost()`
 > 는 호출 가능하지만 mocklsf 환경에서는 보통 0건입니다.
@@ -83,21 +57,24 @@ mocklsf 자체에 대한 자세한 내용은 [`../docs/mocklsf.md`](../docs/mock
 ## 실제 LSF 에서 실행
 
 ```bash
-LSFMGR_REAL=1 python examples/basic_example.py   # mocklsf 대신 PATH 의 bsub/bjobs/bkill
+LSFMGR_REAL=1 python examples/gui_demo.py   # mocklsf 대신 PATH 의 bjobs/bkill/lsid
 ```
 
 ## 스모크 테스트 (headless)
 
+기동 → 소량 제출(handler 포함) → kill → 자동 종료:
+
 ```bash
-LSFMGR_DEMO_AUTOQUIT=20 QT_QPA_PLATFORM=offscreen python examples/basic_example.py
+LSFMGR_DEMO_AUTORUN=1 LSFMGR_DEMO_AUTOQUIT=15 \
+    QT_QPA_PLATFORM=offscreen python examples/gui_demo.py
 ```
 
 ## 대량 job 스트레스 테스트
 
-`LSFMGR_DEMO_SUBMIT=<개수>` 를 주면 기동 직후 그 개수로 자동 제출한다(워커 32).
-대량 job에서도 테이블은 **job_key 증분 upsert**라 부드럽게 갱신된다(매 배치 전체
-재구성 아님 — 5000행 기준 렌더링 작업이 ~17s → ~0.3s).
+`LSFMGR_DEMO_SUBMIT=<개수>` 를 주면 기동 직후 그 개수로 자동 제출합니다(워커 32).
+테이블은 job_key **증분 upsert**라 대량에서도 부드럽습니다(5000행 기준 렌더링
+~17s → ~0.3s).
 
 ```bash
-LSFMGR_DEMO_SUBMIT=5000 python examples/basic_example.py           # GUI로 관찰
+LSFMGR_DEMO_SUBMIT=5000 python examples/gui_demo.py
 ```

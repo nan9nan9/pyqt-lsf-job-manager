@@ -4,8 +4,8 @@ PyQt5/qtpy GUI 앱에서 `LsfJobManager`로 LSF job을 제출·감시·kill하�
 **반드시 지켜야 할 주의사항**을 정리한다. 진행 표시(`QProgressDialog`/
 `QProgressBar`) 연결 패턴을 포함한다.
 
-> 예제 코드는 `examples/gui_demo.py`(전체 위젯 통합), `examples/basic_example.py`,
-> `examples/handler_example.py`를 참고하라. 이 문서는 그 패턴의 근거와 함정을 설명한다.
+> 예제 코드는 `examples/gui_demo.py`(통합 GUI 데모 — v10.1에서 예제 단일화)를
+> 참고하라. 이 문서는 그 패턴의 근거와 함정을 설명한다.
 
 ---
 

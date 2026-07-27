@@ -40,6 +40,11 @@ WRAPPERS = ["customwrapper_sub"]
 
 _REAL = os.environ.get("LSFMGR_REAL") == "1"
 
+# mocklsf 모드: bare "lsid"(lsfmgr 기동 시 클러스터명 캐시)가 bin/의 mock을
+# 잡도록 PATH 선두에 추가한다 — 실제 LSF 모드는 PATH의 실명령 그대로.
+if not _REAL:
+    os.environ["PATH"] = BIN + os.pathsep + os.environ.get("PATH", "")
+
 
 def wrapper(tool: str, *args) -> list:
     """create_jobs 에 넘길 wrapper 커맨드(토큰 리스트)를 만든다.
@@ -145,16 +150,16 @@ def mocklsf_paths(wrapper: str = DEFAULT_WRAPPER) -> dict:
     """LsfJobManager 에 넘길 mocklsf 명령 경로 kwargs.
 
     실제 LSF 모드(LSFMGR_REAL=1)면 빈 dict — PATH 의 실제 LSF 명령을 쓴다.
-    그 외엔 bsub 를 wrapper 로, 나머지 명령을 mocklsf 가상 명령으로 지정한다.
+    그 외엔 조회/kill 명령을 mocklsf 가상 명령으로 지정한다.
+    (v10: 제출 경로 노브(bsub_path)와 bgdel_path는 삭제됨 — 제출 프로그램은
+    wrapper() 헬퍼가 커맨드에 절대경로로 박아준다.)
     """
     if _REAL:
         return {}
     return {
-        "bsub_path": os.path.join(BIN, wrapper),      # 제출은 wrapper 경유
         "bjobs_path": os.path.join(BIN, "bjobs"),
         "bkill_path": os.path.join(BIN, "bkill"),
         "bhist_path": os.path.join(BIN, "bhist"),
-        "bgdel_path": os.path.join(BIN, "bgdel"),
     }
 
 
