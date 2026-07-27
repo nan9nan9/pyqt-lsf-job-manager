@@ -19,17 +19,17 @@ def submitted(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 # 조회 전략 (FR-4.1) — group 기반 1회 호출
 # ----------------------------------------------------------------------
-def test_query_uses_group_first(qtbot, manager, fake_lsf, submitted):
+def test_query_uses_id_chunks_only(qtbot, manager, fake_lsf, submitted):
+    """v10: 조회는 explicit id chunked bjobs뿐 — -g/-J를 쓰지 않는다."""
     fake_lsf.calls.clear()
     fake_lsf.set_all("RUN")
     with qtbot.waitSignal(manager.jobset_updated, timeout=10000) as blocker:
         manager.query_once(submitted)
     jsid, summary = blocker.args
     assert summary["RUN"] == 20
-    # 부착물(group/name) 기반 조회 — job 수에 비례하지 않음 (수용 기준 5)
     bjobs_calls = fake_lsf.calls_of("bjobs")
-    assert 1 <= len(bjobs_calls) <= 3
-    assert any("-g" in c for c in bjobs_calls)
+    assert 1 <= len(bjobs_calls) <= 3          # 20 jobs / chunk 200 → 1회
+    assert all("-g" not in c and "-J" not in c for c in bjobs_calls)
 
 
 def test_jobs_updated_carries_only_changes(qtbot, manager, fake_lsf,

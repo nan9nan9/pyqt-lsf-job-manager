@@ -19,16 +19,17 @@ def submitted(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 # 손실 감지 (FR-5.3)
 # ----------------------------------------------------------------------
-def test_detect_lost_recovers_by_name(qtbot, manager, fake_lsf, submitted):
-    # ID를 잃어버린 상황 재현: 레코드의 job_id를 지우고 SUBMITTING으로 되돌림
+def test_detect_lost_no_name_recovery(qtbot, manager, fake_lsf, submitted):
+    """v10: name 역조회 복구 제거 — ID 미확보 SUBMITTING은 조회 없이 바로
+    LOST 확정한다 (LSF에 job이 살아있어도)."""
     rec = manager.get_jobs(submitted)[0]
     manager.store.transition(submitted, rec.job_key, JobState.SUBMITTING,
                              job_id=None)
+    fake_lsf.calls.clear()
     lost = manager.detect_lost(submitted)
-    assert lost == []                          # name 패턴으로 ID 복구 성공
-    recovered = manager.store.get_job(submitted, rec.job_key)
-    assert recovered.job_id == rec.job_id
-    assert recovered.state is JobState.PEND
+    assert len(lost) == 1
+    assert lost[0].state is JobState.LOST
+    assert not fake_lsf.calls_of("bjobs")      # 역조회 자체를 안 한다
 
 
 def test_detect_lost_marks_lost(qtbot, manager, fake_lsf, submitted):

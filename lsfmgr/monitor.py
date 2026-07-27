@@ -1,7 +1,8 @@
 """상태 조회/모니터링 (FR-4).
 
-- JobsetQuerier: 조회 전략(group → array → name → chunking) + bhist fallback
-  → LOST 전이. blocking이므로 반드시 worker 스레드에서 호출.
+- JobsetQuerier: job_id chunked bjobs 조회 + bhist fallback → LOST 전이.
+  (v10: group/name 부착물 조회 제거 — id 기반 단일 경로.)
+  blocking이므로 반드시 worker 스레드에서 호출.
 - PollingService: 전용 QThread + 그 스레드 소속 QTimer로 주기 polling (QT-1).
   결과는 batch Signal로만 통지 (QT-4).
 """
@@ -48,82 +49,48 @@ class JobsetQuerier:
         if not targets:
             return QueryResult(jobset_id, self.store.summary(jobset_id))
 
-        # --- 1) 부착물 기반 조회 (FR-4.1 우선순위) ---
-        statuses: Dict[Tuple[int, Optional[int]], JobStatus] = {}
-        by_name: Dict[str, JobStatus] = {}
-        # by_id는 array_index별 **최신값**만 유지한다(append 아님). 같은 element가
-        # 여러 probe(array probe + leftover 재조회)에서 수집되면 append는 stale+
-        # fresh 행을 함께 쌓아, _aggregate_elements가 옛 상태(예: stale EXIT)를
-        # 섞어 folded 레코드를 잘못된 terminal로 확정할 수 있다. array_index를
-        # 키로 덮어써 statuses(이미 dedup)와 동일하게 최신만 집계한다.
-        by_id: Dict[int, Dict[Optional[int], JobStatus]] = {}
-
-        def collect(items: List[JobStatus]):
-            for st in items:
-                statuses[(st.job_id, st.array_index)] = st
-                by_name[st.job_name] = st
-                by_id.setdefault(st.job_id, {})[st.array_index] = st
-
+        # --- 1) job_id chunked 조회 — 유일한 조회 수단 (v10) ---
+        # group/name 부착물 조회는 제거됐다: wrapper 제출 job은 부착물로
+        # 커버되지 않고, explicit id 조회는 -a 없이도 CLEAN_PERIOD 내 종료
+        # job을 보여주므로 id chunk가 모든 제출 경로를 균일하게 덮는다.
         # 조회 수단 실패("장애")와 "job이 LSF에 없음"은 반드시 구분한다 —
         # 장애를 없음으로 오판하면 LSF 순단 1회에 전원 LOST(terminal) 확정됨.
-        # 하나가 실패해도 나머지 probe는 계속 수행해 최대한 수집한다.
-        probes = (
-            [(f"group {p}", lambda p=p: self.command.bjobs_by_group(p))
-             for p in js.lsf_group_paths]
-            + [(f"name {pt}", lambda pt=pt: self.command.bjobs_by_name(pt))
-               for pt in js.name_patterns])
-        probe_failed = False
-        for what, fn in probes:
-            probe_failed |= not self._try(lambda fn=fn: collect(fn()), what)
-        # array probe — 전체 id를 1회 chunked 조회로 배치(id당 subprocess
-        # 1회씩 띄우지 않는다). bjobs_by_ids는 격리형(예외 대신 실패 id 집합
-        # 반환)이라 실패 집합이 비어있지 않음 == probe 실패다.
-        if js.array_job_ids:
-            sts, arr_failed = self.command.bjobs_by_ids(js.array_job_ids)
-            collect(sts)
-            probe_failed |= bool(arr_failed)
+        # bjobs_by_ids는 chunk 단위 실패 격리형(예외 대신 실패 id 집합 반환) —
+        # 실패 chunk의 job만 판단을 보류하고 성공 chunk는 정상 반영한다.
+        statuses: Dict[Tuple[int, Optional[int]], JobStatus] = {}
+        # by_id는 array_index별 최신값만 유지 — _aggregate_elements가 stale
+        # 행을 섞어 folded 레코드를 잘못된 terminal로 확정하지 않게 한다.
+        by_id: Dict[int, Dict[Optional[int], JobStatus]] = {}
 
-        # --- 2) 부착물로 커버 안 된 job은 chunked bjobs (graceful degradation) ---
+        ids = sorted({r.job_id for r in targets if r.job_id is not None}
+                     | set(js.array_job_ids))
+        bjobs_failed: set = set()
+        if ids:
+            sts, bjobs_failed = self.command.bjobs_by_ids(ids)
+            for st in sts:
+                statuses[(st.job_id, st.array_index)] = st
+                by_id.setdefault(st.job_id, {})[st.array_index] = st
+
+        # --- 2) 레코드 ↔ 조회 결과 매칭 ---
         def lookup(rec: JobRecord) -> Optional[JobStatus]:
-            if rec.job_id is not None:
-                st = statuses.get((rec.job_id, rec.array_index))
-                if st is not None:
-                    return st
-                # wrapper가 array job을 제출한 경우: 레코드는 (id, None)인데
-                # bjobs는 element별 (id, idx) 행만 낸다 — 같은 id의 element들을
-                # 집계해 대표 상태를 만든다 (안 하면 RUN 중인데 LOST 오판)
-                if rec.array_index is None:
-                    elems = by_id.get(rec.job_id)
-                    if elems:
-                        return _aggregate_elements(rec, list(elems.values()))
-            st = by_name.get(rec.lsf_job_name)       # name fallback 매칭
-            # 동명이지만 다른 인스턴스(id 불일치)면 버린다 — 다른 job의
-            # 상태/exit_code가 이 레코드에 혼입되는 것을 막는다
-            if (st is not None and rec.job_id is not None
-                    and st.job_id != rec.job_id):
+            if rec.job_id is None:
+                # id 미확보 레코드는 id 조회로 확인 자체가 불가 —
+                # 복구/LOST 판단은 detect_lost(FR-5.3)의 몫이다
                 return None
-            return st
+            st = statuses.get((rec.job_id, rec.array_index))
+            if st is not None:
+                return st
+            # wrapper가 array job을 제출한 경우: 레코드는 (id, None)인데
+            # bjobs는 element별 (id, idx) 행만 낸다 — 같은 id의 element들을
+            # 집계해 대표 상태를 만든다 (안 하면 RUN 중인데 LOST 오판)
+            if rec.array_index is None:
+                elems = by_id.get(rec.job_id)
+                if elems:
+                    return _aggregate_elements(rec, list(elems.values()))
+            return None
 
-        # lookup은 folded array의 _aggregate_elements(비쌈)를 포함하므로 target당
-        # 한 번만 계산해 캐시한다. 단, 아래 by-id 재조회(leftover_ids)는 그
-        # job_id의 **전 element**를 새로 가져오므로, 같은 job_id를 공유하는
-        # 이미-resolved 레코드(형제 element)도 최신 데이터가 도착한다 — 그
-        # job_id는 재조회 뒤 다시 lookup해야 stale(직전 probe값)을 안 쓴다.
-        # (첫 probe로 완결돼 job_id가 재조회 대상이 아닌 대다수 레코드만 캐시로
-        #  재집계를 없앤다 — perf는 유지, 형제 staleness는 제거.)
         resolved: Dict[int, Optional[JobStatus]] = {id(r): lookup(r)
                                                      for r in targets}
-        leftover_ids = sorted({r.job_id for r in targets
-                               if r.job_id is not None
-                               and resolved[id(r)] is None})
-        refreshed_ids = set(leftover_ids)   # by-id 재조회로 최신화될 job_id들
-        # chunk 단위 실패 격리 (bhist와 대칭) — 한 chunk의 실패가 전역
-        # probe_failed로 뭉개지면 성공 chunk에서 부재 확인된 job의 LOST
-        # 확정까지 jobset 전체가 보류된다. 실패 chunk의 job만 보류한다.
-        bjobs_failed: set = set()
-        if leftover_ids:
-            sts, bjobs_failed = self.command.bjobs_by_ids(leftover_ids)
-            collect(sts)
 
         # --- 3) 상태 반영 + bjobs 미발견분은 bhist fallback (FR-4.3) ---
         # 이 사이클은 시작 시점 스냅샷(targets) 기반이고 bjobs 왕복 동안 수 초가
@@ -144,10 +111,6 @@ class JobsetQuerier:
         collect_clusters = self.command.config.collect_clusters
         for rec in targets:
             st = resolved[id(rec)]
-            # 초기 None(리프트오버)이거나, 같은 job_id가 by-id로 재조회됐으면
-            # (형제 element가 유발) 최신 데이터를 반영하려 다시 lookup한다.
-            if st is None or rec.job_id in refreshed_ids:
-                st = lookup(rec)
             if st is None:
                 missing.append(rec)
                 continue
@@ -217,19 +180,17 @@ class JobsetQuerier:
                     state, exit_code = found
                     update_specs.append((rec.job_key, state, unchanged(rec),
                                          {"exit_code": exit_code}))
-                elif (probe_failed or rec.job_id in bhist_failed
+                elif (rec.job_id in bhist_failed
                       or rec.job_id in bjobs_failed
                       or (rec.job_id is None
                           and (bhist_failed or bjobs_failed))):
                     # 마지막 조건: job_id 없는 레코드는 id 기반 조회(bjobs
                     # chunk/bhist)로 확인 자체가 불가 — 그 수단들의 장애가
-                    # 섞인 사이클엔 보수적으로 보류한다 (chunk 격리 도입
-                    # 전의 전역 보류와 동일 semantics, FR-4.3)
-                    # 조회 수단 실패가 섞인 사이클 — LOST 확정 보류.
-                    # probe(bjobs) 실패, 또는 이 job이 속한 bhist chunk가
-                    # 실패한 경우. LSF 순단이면 다음 사이클에서 정상 복구되고,
-                    # 진짜 소실이면 장애 해소 후 사이클에서 확정된다 (FR-4.3).
-                    # bhist chunk 격리 덕에 다른 chunk에서 확인된 job은 여기서
+                    # 섞인 사이클엔 보수적으로 보류한다 (FR-4.3).
+                    # 이 job이 속한 bjobs/bhist chunk가 실패한 사이클은 LOST
+                    # 확정을 보류한다 — LSF 순단이면 다음 사이클에서 정상
+                    # 복구되고, 진짜 소실이면 장애 해소 후 사이클에서 확정된다.
+                    # chunk 격리 덕에 다른 chunk에서 확인된 job은 여기서
                     # 안 걸리고 정상 전이/LOST 확정된다.
                     deferred.append(rec.job_key)
                 else:
@@ -262,17 +223,6 @@ class JobsetQuerier:
 
         return QueryResult(jobset_id, self.store.summary(jobset_id),
                            tuple(changed), tuple(lost), len(targets))
-
-    @staticmethod
-    def _try(fn, what: str) -> bool:
-        """조회 수단 하나의 실패가 전체 polling을 죽이지 않게 격리 (CS-5).
-        반환: 성공 여부 — False면 이번 사이클의 LOST 확정을 보류해야 한다."""
-        try:
-            fn()
-        except LsfmgrError as e:
-            log.warning("조회 실패(%s): %s", what, e)
-            return False
-        return True
 
 
 def _aggregate_elements(rec: JobRecord,

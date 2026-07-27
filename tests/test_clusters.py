@@ -119,20 +119,29 @@ def test_cluster_degradation_is_permanent(qtbot, fake_lsf, config):
 # sqlite 영속 — 클러스터 필드 저장/복원
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
-# 파서 단위 — 10필드(FULL+MC) / 8필드(FULL) / 4필드(CORE)
+# 파서 단위 — -json 레코드: FULL+MC / FULL / CORE (없는 키는 None)
 # ----------------------------------------------------------------------
+def _json_payload(*recs):
+    import json
+    return json.dumps({"COMMAND": "bjobs", "JOBS": len(recs),
+                       "RECORDS": list(recs)}) + "\n"
+
+
 def test_parse_bjobs_cluster_fields():
-    line10 = "1000;RUN;-;js_0;120 second(s);-;-;/work;seoul;busan"
-    (st,) = LsfCommand._parse_bjobs(line10 + "\n")
+    base = {"JOBID": "1000", "STAT": "RUN", "EXIT_CODE": "",
+            "JOB_NAME": "js_0", "RUN_TIME": "120 second(s)",
+            "START_TIME": "", "FINISH_TIME": "", "EXEC_CWD": "/work"}
+    mc = dict(base, SOURCE_CLUSTER="seoul", FORWARD_CLUSTER="busan")
+    (st,) = LsfCommand._parse_bjobs(_json_payload(mc))
     assert st.source_cluster == "seoul" and st.forward_cluster == "busan"
     assert st.run_time_s == 120 and st.working_dir == "/work"
 
-    line8 = "1000;RUN;-;js_0;120 second(s);-;-;/work"
-    (st8,) = LsfCommand._parse_bjobs(line8 + "\n")
+    (st8,) = LsfCommand._parse_bjobs(_json_payload(base))
     assert st8.source_cluster is None and st8.run_time_s == 120
 
-    line4 = "1000;RUN;-;js_0"
-    (st4,) = LsfCommand._parse_bjobs(line4 + "\n")
+    core = {"JOBID": "1000", "STAT": "RUN", "EXIT_CODE": "",
+            "JOB_NAME": "js_0"}
+    (st4,) = LsfCommand._parse_bjobs(_json_payload(core))
     assert st4.source_cluster is None and st4.run_time_s is None
 
 
@@ -168,11 +177,14 @@ def test_double_field_error_degrades_to_core():
             return CommandResult(255, "", "bad field name: source_cluster\n")
         if "exec_cwd" in fmt:
             return CommandResult(255, "", "Unknown field: exec_cwd\n")
-        return CommandResult(0, "111;RUN;-;j0\n", "")
+        return CommandResult(0, _json_payload(
+            {"JOBID": "111", "STAT": "RUN", "EXIT_CODE": "",
+             "JOB_NAME": "j0"}), "")
 
     cmd = LsfCommand(LsfConfig(collect_clusters=True), runner)
-    out = cmd.bjobs_by_group("/g")           # 한 호출에서 CORE까지 강등
+    out, failed = cmd.bjobs_by_ids([111])    # 한 호출에서 CORE까지 강등
     assert cmd._bjobs_fmt is cmd._BJOBS_CORE_FMT
+    assert failed == set()
     assert out[0].job_id == 111
 
 

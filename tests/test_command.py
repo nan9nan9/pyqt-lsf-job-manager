@@ -70,21 +70,14 @@ def test_bsub_arg_max(cmd):
 # ----------------------------------------------------------------------
 # bjobs
 # ----------------------------------------------------------------------
-def test_bjobs_by_group(cmd, fake_lsf):
-    for i in range(3):
-        cmd.bsub(f"run {i}", job_name=f"t_{i}", group_path="/g/a")
-    cmd.bsub("other", job_name="x_0", group_path="/g/b")
-    out = cmd.bjobs_by_group("/g/a")
-    assert len(out) == 3
-    assert {s.job_name for s in out} == {"t_0", "t_1", "t_2"}
-
-
-def test_bjobs_by_name_pattern(cmd, fake_lsf):
-    for i in range(3):
-        cmd.bsub(f"run {i}", job_name=f"t_{i}")
-    cmd.bsub("other", job_name="x_0")
-    out = cmd.bjobs_by_name("t_*")
-    assert len(out) == 3
+def test_bjobs_uses_json_output(cmd, fake_lsf):
+    """모든 bjobs 호출은 -json으로 나간다 (v10 — delimiter 파싱 제거)."""
+    jid = cmd.bsub("run", job_name="t_0")
+    out, _failed = cmd.bjobs_by_ids([jid])
+    assert [s.job_name for s in out] == ["t_0"]
+    for call in fake_lsf.calls_of("bjobs"):
+        assert "-json" in call
+        assert "-g" not in call and "-J" not in call
 
 
 def test_bjobs_by_ids_chunked(fake_lsf):
@@ -112,7 +105,10 @@ def test_bjobs_by_ids_chunk_failure_isolated(fake_lsf):
 
 
 def test_bjobs_empty_result(cmd):
-    assert cmd.bjobs_by_group("/none") == []
+    # 없는 id 조회 — no-match는 '장애'가 아니라 빈 결과 (failed에도 안 들어감)
+    out, failed = cmd.bjobs_by_ids([999999])
+    assert out == []
+    assert failed == set()
 
 
 def test_bjobs_array_elements(cmd, fake_lsf):
@@ -131,19 +127,24 @@ def test_bjobs_exit_code_parsing(cmd, fake_lsf):
     assert out[0].exit_code == 42
 
 
-def test_bjobs_downgrades_on_unsupported_field(fake_lsf):
+def test_bjobs_downgrades_on_unsupported_field():
     """확장 -o 필드를 거부하는 LSF에서 CORE 포맷으로 강등해 폴링을 살린다
     (강등 안 하면 bjobs가 매번 죽어 job이 PEND에 고착)."""
+    core = ('{"COMMAND":"bjobs","JOBS":2,"RECORDS":['
+            '{"JOBID":"111","STAT":"PEND","EXIT_CODE":"","JOB_NAME":"j0"},'
+            '{"JOBID":"222","STAT":"RUN","EXIT_CODE":"","JOB_NAME":"j1"}]}')
+
     def runner(argv, timeout, cwd=None):
         fmt = argv[argv.index("-o") + 1]
-        if "exec_cwd" in fmt:            # 확장 포맷 거부 (구형 LSF)
+        if "exec_cwd" in fmt:            # 확장 포맷 거부
             return CommandResult(255, "", "bjobs: Unknown field: exec_cwd\n")
-        return CommandResult(0, "111;PEND;-;j0\n222;RUN;-;j1\n", "")
+        return CommandResult(0, core + "\n", "")
 
     cmd = LsfCommand(LsfConfig(), runner)
     assert cmd._bjobs_fmt is cmd._BJOBS_FULL_FMT
-    out = cmd.bjobs_by_group("/g")
+    out, failed = cmd.bjobs_by_ids([111, 222])
     assert cmd._bjobs_fmt is cmd._BJOBS_CORE_FMT      # 강등됨
+    assert failed == set()
     assert [(s.job_id, s.state) for s in out] == \
         [(111, JobState.PEND), (222, JobState.RUN)]   # 상태는 정상 파싱
 
@@ -157,7 +158,7 @@ def test_bjobs_transient_error_no_downgrade():
 
     cmd = LsfCommand(LsfConfig(), runner)
     with pytest.raises(LsfCommandError):
-        cmd.bjobs_by_group("/g")
+        cmd._bjobs(["111"])
     assert cmd._bjobs_fmt is cmd._BJOBS_FULL_FMT      # 강등 안 됨
 
 

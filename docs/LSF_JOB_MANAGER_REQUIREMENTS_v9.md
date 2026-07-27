@@ -336,7 +336,8 @@ JobSetStore(ABC) ── InMemoryStore
     barrier 확인과 submit 등록이 한 lock 아래 **원자적**이라 "kill의 취소를
     빠져나가는 늦은 제출"이 불가능(`lifecycle.py` SubmitGate/KillScope). `kill_started`
     는 접수 즉시(동기) 발화 — 정지 대기로 완료가 늦어도 UI가 바로 표시.
-- **FR-4 Monitoring**: 조회 전략 group→array→name→id chunking, `is_on_lsf`만 조회,
+- **FR-4 Monitoring**: 조회는 explicit job id chunked `bjobs -json`뿐(v10에서
+  group/name 조회 제거 — wrapper job과 경로 통일), `is_on_lsf`만 조회,
   못 찾은 id → bhist chunk fallback → 그래도 없으면 `LOST`. polling은 batch 반영 후
   Signal(**FR-4.1** 요약+변경분, **FR-4.2** LOST 확정).
   - **FR-4.3 판단 보류**: 조회 실패(장애)와 부재(LOST)를 구분 — 미발견이라도
@@ -347,7 +348,8 @@ JobSetStore(ABC) ── InMemoryStore
     finish/exec_cwd)를 bjobs -o로 수집.
 - **FR-5 JobSet 관리**:
   - **FR-5.1** 요약(불변식 합계==intended_count), **FR-5.2** intended_count 정합,
-  - **FR-5.3** 손실 감지(name 패턴 복구 시도 후 LOST),
+  - **FR-5.3** 손실 감지(ID 미확보 SUBMITTING → LOST 확정; v10에서 name
+    패턴 복구 제거),
   - **FR-5.4** 생성(`create_jobset` 한 곳: commands/merge_ids/user_datas) — **이후 추가는
     merge만**,
   - **FR-5.5** merge(`merge_from`): in-place 흡수(target 핸들/테이블 유지, source 소멸),

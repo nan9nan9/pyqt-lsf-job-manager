@@ -343,7 +343,7 @@ js.is_inactive             # 전원 terminal(DONE/EXIT/SUBMIT_FAILED/LOST)이면
 js.failed_jobs             # SUBMIT_FAILED/EXIT/LOST 목록
 js.jobs()                  # 전체 JobRecord
 js.jobs(states={JobState.RUN})
-mgr.detect_lost(js)        # 손실 감지 (name 패턴 복구 시도 포함)
+mgr.detect_lost(js)        # 손실 감지 — ID 미확보 SUBMITTING을 LOST 확정
 js.id                      # jobset_id 문자열 (로그/저장용)
 ```
 

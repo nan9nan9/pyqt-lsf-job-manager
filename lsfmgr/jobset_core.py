@@ -24,7 +24,6 @@ from .config import LsfConfig
 from .errors import (
     CloseNotAllowedError,
     JobNotFoundError,
-    LsfmgrError,
     MergeNotAllowedError,
     RemoveNotAllowedError,
 )
@@ -236,46 +235,28 @@ class JobSetManager:
     # 손실 감지 (FR-5.3)
     # ------------------------------------------------------------------
     def detect_lost(self, jobset_id: str) -> List[JobRecord]:
-        """intended_count 대비 ID 미확보 job을 감지하고, name 패턴 조회로
-        '실제로는 submit된 job'의 ID를 복구한다. 복구 불가면 LOST 전이.
+        """intended_count 대비 ID 미확보 job을 감지해 LOST 전이한다.
+        (v10: name 패턴 역조회 복구는 bjobs group/name 조회 제거와 함께
+        삭제 — ID 미확보 job은 재조회 수단이 없어 바로 LOST 확정한다.)
         반환: 이번 호출로 LOST 확정된 레코드 목록."""
-        js = self.store.get_jobset(jobset_id)
+        self.store.get_jobset(jobset_id)     # 존재 검증 (없으면 예외)
         records = self.store.get_jobs(jobset_id)
         # ID 미확보이면서 submit이 시도된 (실패 확정도 아닌) 레코드
         candidates = [r for r in records if r.job_id is None
-                      and r.state in (JobState.SUBMITTING, JobState.LOST)]
-        if not candidates:
-            return []
-
-        # name 패턴으로 LSF에서 이름 → job_id 역조회
-        name_to_id = {}
-        for pattern in js.name_patterns:
-            try:
-                for st in self.command.bjobs_by_name(pattern):
-                    name_to_id[st.job_name] = st.job_id
-            except LsfmgrError as e:
-                log.warning("detect_lost 패턴 조회 실패 %s: %s", pattern, e)
+                      and r.state is JobState.SUBMITTING]
 
         # guard(CAS): 스냅샷 이후 submit 재시도가 job_id를 채웠으면(정상 PEND)
-        # 복구/LOST 확정 모두 건너뛴다 — 살아있는 레코드를 덮어쓰지 않는다
+        # LOST 확정을 건너뛴다 — 살아있는 레코드를 덮어쓰지 않는다
         lost: List[JobRecord] = []
         for rec in candidates:
             still = lambda cur, rec=rec: (cur.job_id is None       # noqa: E731
                                           and cur.state is rec.state)
-            jid = name_to_id.get(rec.lsf_job_name)
-            if jid is not None:
-                new = self.store.transition(
-                    jobset_id, rec.job_key, JobState.PEND,
-                    job_id=jid, fail_reason=None, guard=still)
-                if new is not None:
-                    log.info("손실 job 복구: %s → job_id=%d", rec.job_key, jid)
-            elif rec.state is not JobState.LOST:
-                new = self.store.transition(
-                    jobset_id, rec.job_key, JobState.LOST,
-                    fail_reason=rec.fail_reason or "NO_JOBID_PARSED",
-                    guard=still)
-                if new is not None:
-                    lost.append(new)
+            new = self.store.transition(
+                jobset_id, rec.job_key, JobState.LOST,
+                fail_reason=rec.fail_reason or "NO_JOBID_PARSED",
+                guard=still)
+            if new is not None:
+                lost.append(new)
         return lost
 
     # ------------------------------------------------------------------

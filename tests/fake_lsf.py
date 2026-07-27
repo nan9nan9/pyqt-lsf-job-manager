@@ -6,6 +6,7 @@ subprocess 없이 bsub/bjobs/bkill/bhist/bmod/bgdel 동작을 시뮬레이션한
 from __future__ import annotations
 
 import fnmatch
+import json
 import re
 import threading
 from dataclasses import dataclass, field
@@ -93,7 +94,8 @@ class FakeLsf:
     def set_job(self, job_id: int, stat: str,
                 exit_code: Optional[int] = None,
                 array_index: Optional[int] = None) -> None:
-        key = f"{job_id}[{array_index}]" if array_index else str(job_id)
+        key = (f"{job_id}[{array_index}]" if array_index is not None
+               else str(job_id))
         with self.lock:
             self.jobs[key].stat = stat
             self.jobs[key].exit_code = exit_code
@@ -155,7 +157,7 @@ class FakeLsf:
         if self.fail_all_queries:
             return CommandResult(255, "", "LSF is down. Please wait ...\n")
         opts, rest = _parse_opts(args, {"-o", "-g", "-J"},
-                                 flags={"-a", "-noheader"})
+                                 flags={"-a", "-noheader", "-json"})
         if self.bjobs_fail_ids:
             # 이 호출(chunk)에 실패 지정된 id가 하나라도 있으면 chunk 전체
             # rc=255. 문구에 _NO_JOB_PATTERNS가 없어야 '장애'로 취급된다.
@@ -176,20 +178,46 @@ class FakeLsf:
         if self.reject_clusters and "source_cluster" in fmt:
             return CommandResult(
                 255, "", "bad field name: source_cluster\n")
-        want_cluster = "source_cluster" in fmt          # 포맷이 요청할 때만 추가
-        lines = []
-        for j in matched:
-            jid = (f"{j.job_id}[{j.array_index}]" if j.array_index
-                   else str(j.job_id))
-            ec = "-" if j.exit_code is None else str(j.exit_code)
-            rt = "-" if j.run_time_s is None else f"{j.run_time_s} second(s)"
-            st_ = j.start_time or "-"
-            ft = j.finish_time or "-"
-            cwd = j.working_dir or "-"
-            row = f"{jid};{j.stat};{ec};{j.name};{rt};{st_};{ft};{cwd}"
-            if want_cluster:
-                row += f";{j.source_cluster or '-'};{j.forward_cluster or '-'}"
-            lines.append(row)
+        fields = [f.split(":", 1)[0] for f in fmt.split()
+                  if "=" not in f] or ["jobid", "stat", "exit_code",
+                                       "job_name"]
+        if "-json" in opts:
+            return self._bjobs_json(matched, fields)
+        return self._bjobs_delim(matched, fields)
+
+    @staticmethod
+    def _field_value(j: FakeJob, name: str, empty: str) -> str:
+        """-o 필드명 1개의 표시 값 — 미해당은 empty('-' 또는 '').
+        array_index=0도 element다 — falsy 판정 금지(실제 LSF는 "id[0]" 출력)."""
+        jid = (f"{j.job_id}[{j.array_index}]" if j.array_index is not None
+               else str(j.job_id))
+        return {
+            "jobid": jid,
+            "stat": j.stat,
+            "exit_code": empty if j.exit_code is None else str(j.exit_code),
+            "job_name": j.name,
+            "run_time": (empty if j.run_time_s is None
+                         else f"{j.run_time_s} second(s)"),
+            "start_time": j.start_time or empty,
+            "finish_time": j.finish_time or empty,
+            "exec_cwd": j.working_dir or empty,
+            "source_cluster": j.source_cluster or empty,
+            "forward_cluster": j.forward_cluster or empty,
+        }.get(name, empty)
+
+    def _bjobs_json(self, matched: List[FakeJob],
+                    fields: List[str]) -> CommandResult:
+        # 실제 LSF -json: -o 필드명의 대문자 키, 빈 값은 "" (padding/폭 무시)
+        recs = [{f.upper(): self._field_value(j, f, "") for f in fields}
+                for j in matched]
+        payload = json.dumps({"COMMAND": "bjobs", "JOBS": len(recs),
+                              "RECORDS": recs})
+        return CommandResult(0, payload + "\n", "")
+
+    def _bjobs_delim(self, matched: List[FakeJob],
+                     fields: List[str]) -> CommandResult:
+        lines = [";".join(self._field_value(j, f, "-") for f in fields)
+                 for j in matched]
         return CommandResult(0, "\n".join(lines) + "\n", "")
 
     def _select(self, opts, id_args: List[str],
@@ -319,8 +347,8 @@ class FakeLsf:
                     body = f"Exited with exit code {j.exit_code or 1}."
                 else:
                     body = "Job is still running."
-                jid_s = (f"{jid}[{j.array_index}]" if j.array_index
-                         else str(jid))
+                jid_s = (f"{jid}[{j.array_index}]"
+                         if j.array_index is not None else str(jid))
                 blocks.append(
                     f"Job <{jid_s}>, Job Name <{j.name}>\n  {body}\n")
         if not blocks:
