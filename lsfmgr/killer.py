@@ -482,8 +482,7 @@ class _KillTask(QRunnable):
             groups.setdefault(env_of.get(t, default_env), []).append(t)
         if len(groups) > 1 or any(e for e in groups):
             log.info("kill env 분류: %s",
-                     {e or "(프로세스 상속)": len(g)
-                      for e, g in groups.items()})
+                     {e or "None": len(g) for e, g in groups.items()})
         return groups
 
     def _record_pool(self) -> List:

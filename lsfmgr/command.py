@@ -279,13 +279,13 @@ class LsfCommand:
         cwd는 제출 경로만 넘긴다(bjobs/bkill은 None → 부모 cwd).
         envpath는 MC 분류 kill에서 source한 cluster env 파일 — 어느 클러스터
         env로 나간 bkill인지가 로그만 봐도 드러나야 오진을 막는다. 빈 값이면
-        `env=-(프로세스 상속)` = env source 없이 실행 = 앱 프로세스가 물려준
-        환경 그대로(보통 앱을 띄운 셸이 붙어 있던 클러스터)."""
+        `env=None`(cwd=None과 같은 표기 — 지정한 env가 없다는 뜻)이고, 그때는
+        env source 없이 실행되어 앱 프로세스의 환경을 그대로 물려받는다."""
         tname = threading.current_thread().name
         prog = argv[0].rsplit("/", 1)[-1] if argv else "?"   # 실행 프로그램 그대로
         log.debug("[%s] exec %s: %s (env=%s, cwd=%s, timeout=%.1fs)",
                   tname, prog, " ".join(map(str, argv)),
-                  envpath or "-(프로세스 상속)", cwd, timeout)
+                  envpath or None, cwd, timeout)
         t0 = time.monotonic()
         try:
             res = self.runner(argv, timeout, cwd)

@@ -322,7 +322,7 @@ mgr.close(js)                          # 종결 (전원 terminal일 때)
 > 없으면 source)별로 그 env를 `source`한 bkill(`tcsh -c "source ... &&
 > exec bkill ..."`)로 분류 실행 ③ 그래도 미상이면 **기본 env**로 죽입니다 —
 > 기본 env는 매핑의 와일드카드 키 `"*"`이고, 없으면 env source 없이 실행합니다
-> (= 앱 프로세스가 물려받은 환경 그대로 — 로그에 `env=-(프로세스 상속)`).
+> (로그에 `env=None` — 지정한 env가 없어 앱 프로세스의 환경을 그대로 씁니다).
 > 주의: GUI 프로세스 환경은 대화형 셸에서 rc를 source한 환경과 다를 수
 > 있습니다. 그 경우 `{"*": cshrc}`로 기본 env를 명시하세요. **제출 직후 즉시 kill해도 cluster를 알고
 > 죽는다**는 게 핵심입니다. cluster 관측은 `collect_clusters=True` 전제.
