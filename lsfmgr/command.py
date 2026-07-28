@@ -278,13 +278,14 @@ class LsfCommand:
         (또는 상위 "lsfmgr")로 레벨을 낮추고 핸들러를 붙이면 이 로그가 나온다.
         cwd는 제출 경로만 넘긴다(bjobs/bkill은 None → 부모 cwd).
         envpath는 MC 분류 kill에서 source한 cluster env 파일 — 어느 클러스터
-        env로 나간 bkill인지가 로그만 봐도 드러나야 오진을 막는다(빈 값이면
-        `env=-(local)` = env source 없이 로컬 bkill)."""
+        env로 나간 bkill인지가 로그만 봐도 드러나야 오진을 막는다. 빈 값이면
+        `env=-(프로세스 상속)` = env source 없이 실행 = 앱 프로세스가 물려준
+        환경 그대로(보통 앱을 띄운 셸이 붙어 있던 클러스터)."""
         tname = threading.current_thread().name
         prog = argv[0].rsplit("/", 1)[-1] if argv else "?"   # 실행 프로그램 그대로
         log.debug("[%s] exec %s: %s (env=%s, cwd=%s, timeout=%.1fs)",
                   tname, prog, " ".join(map(str, argv)),
-                  envpath or "-(local)", cwd, timeout)
+                  envpath or "-(프로세스 상속)", cwd, timeout)
         t0 = time.monotonic()
         try:
             res = self.runner(argv, timeout, cwd)
