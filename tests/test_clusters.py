@@ -119,21 +119,28 @@ def test_cluster_degradation_is_permanent(qtbot, fake_lsf, config):
 # sqlite 영속 — 클러스터 필드 저장/복원
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
-# 파서 단위 — delimiter 행: 10필드(FULL+MC) / 8필드(FULL) / 4필드(CORE)
+# 파서 단위 — delimiter 행: 9필드(FULL+MC) / 7필드(FULL) / 3필드(CORE)
+# (v10.3: job_name 필드 제거 — 이 필드를 넣으면 조회 결과가 비는 사이트가
+#  있고, 파서도 쓰지 않았다)
 # ----------------------------------------------------------------------
 def test_parse_bjobs_cluster_fields():
-    line10 = "1000;RUN;-;js_0;120 second(s);-;-;/work;seoul;busan"
-    (st,) = LsfCommand._parse_bjobs(line10 + "\n")
+    line9 = "1000;RUN;-;120 second(s);-;-;/work;seoul;busan"
+    (st,) = LsfCommand._parse_bjobs(line9 + "\n")
     assert st.source_cluster == "seoul" and st.forward_cluster == "busan"
     assert st.run_time_s == 120 and st.working_dir == "/work"
 
-    line8 = "1000;RUN;-;js_0;120 second(s);-;-;/work"
-    (st8,) = LsfCommand._parse_bjobs(line8 + "\n")
-    assert st8.source_cluster is None and st8.run_time_s == 120
+    line7 = "1000;RUN;-;120 second(s);-;-;/work"
+    (st7,) = LsfCommand._parse_bjobs(line7 + "\n")
+    assert st7.source_cluster is None and st7.run_time_s == 120
 
-    line4 = "1000;RUN;-;js_0"
-    (st4,) = LsfCommand._parse_bjobs(line4 + "\n")
-    assert st4.source_cluster is None and st4.run_time_s is None
+    line3 = "1000;RUN;-"
+    (st3,) = LsfCommand._parse_bjobs(line3 + "\n")
+    assert st3.source_cluster is None and st3.run_time_s is None
+
+    # 필드 수가 포맷과 안 맞으면(구형 열 누락/값에 ';' 혼입) 확장 필드는
+    # 버리되 상태는 살린다 — 행 자체를 버리면 그 job이 '미발견'이 된다
+    (st_odd,) = LsfCommand._parse_bjobs("1000;RUN;-;가;나\n")
+    assert st_odd.state.name == "RUN" and st_odd.run_time_s is None
 
 
 # ----------------------------------------------------------------------

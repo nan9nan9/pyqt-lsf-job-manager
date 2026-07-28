@@ -210,7 +210,7 @@ class FakeLsf:
             return CommandResult(
                 255, "", "bad field name: source_cluster\n")
         fields = [f.split(":", 1)[0] for f in fmt.split() if "=" not in f] \
-            or ["jobid", "stat", "exit_code", "job_name"]
+            or ["jobid", "stat", "exit_code"]
         # v10.2: -noheader + delimiter=';' 방식 (실제 LSF는 빈 값을 "-"로 출력)
         lines = []
         for j in matched:
@@ -229,7 +229,6 @@ class FakeLsf:
             "jobid": jid,
             "stat": j.stat,
             "exit_code": "" if j.exit_code is None else str(j.exit_code),
-            "job_name": j.name,
             "run_time": ("" if j.run_time_s is None
                          else f"{j.run_time_s} second(s)"),
             "start_time": j.start_time or "",

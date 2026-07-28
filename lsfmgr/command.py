@@ -72,9 +72,7 @@ def _adapt_runner(runner: Runner) -> Runner:
 
 @dataclass(frozen=True)
 class JobStatus:
-    """bjobs 1행 파싱 결과. (v10.1: job_name 필드 삭제 — name 매칭이
-    사라져 write-only 데이터였다. -o 포맷의 job_name 요청은 사람이 raw
-    출력을 볼 때의 식별용으로만 유지하고 파서는 읽지 않는다.)"""
+    """bjobs 1행 파싱 결과."""
     job_id: int
     array_index: Optional[int]
     state: JobState
@@ -366,9 +364,7 @@ class LsfCommand:
     # ------------------------------------------------------------------
     # bjobs — 조회 (FR-4.1 전략별 변형)
     # ------------------------------------------------------------------
-    # 필드명은 LSF -o 공식 명칭 사용 — job_name (jobname 은 실제 LSF 미지원).
-    #
-    # CORE: 상태 추적의 최소 단위 필수 4필드.
+    # CORE: 상태 추적의 최소 단위 필수 3필드.
     # FULL: CORE + 실행시간/위치 확장 필드. 사이트가 확장 필드를 거부하면
     #       bjobs 전체가 rc≠0로 죽는다 — 그러면 폴링이 아무 상태도 못 걷어
     #       job이 PEND(제출 직후 상태)에 고착된다. 그래서 필드 오류로 실패하면
@@ -379,7 +375,9 @@ class LsfCommand:
     # 두지 않는다 — LSF는 폭 미지정 시 필드별 **기본 폭으로 truncation**할 수
     # 있으므로(특히 exec_cwd 긴 경로), 잘림이 관측되면 그 필드에만 폭을 준다.
     _DELIM = "delimiter=';'"
-    _CORE_FIELDS = "jobid stat exit_code job_name"
+    # job_name은 요청하지 않는다 — 파서가 쓰지 않고, 이 필드를 넣으면 조회
+    # 결과가 통째로 비는 사이트가 있다(실환경 관측). 되살리지 말 것.
+    _CORE_FIELDS = "jobid stat exit_code"
     _FULL_FIELDS = _CORE_FIELDS + " run_time start_time finish_time exec_cwd"
     _BJOBS_CORE_FMT = f"{_CORE_FIELDS} {_DELIM}"
     _BJOBS_FULL_FMT = f"{_FULL_FIELDS} {_DELIM}"
@@ -503,7 +501,7 @@ class LsfCommand:
         """bjobs delimiter(';') 출력 파싱 (v10.2: -json에서 복귀).
 
         필드 순서는 _BJOBS_*_FMT 정의 순서 그대로다. 확장 필드는 **필드 수가
-        정확히 포맷과 맞을 때만** 신뢰한다 — 8=FULL, 10=FULL+MC. 그 외
+        정확히 포맷과 맞을 때만** 신뢰한다 — 3=CORE, 7=FULL, 9=FULL+MC. 그 외
         (구형 열 누락, 값에 ';' 혼입으로 필드 밀림)는 오염을 피해 확장
         필드를 버린다. 파싱 불가 행은 그 행만 버린다 — 부재 확정은
         호출자(monitor의 LOST 판정)의 몫이다."""
@@ -513,7 +511,7 @@ class LsfCommand:
             if not line:
                 continue
             parts = [p.strip() for p in line.split(";")]
-            if len(parts) < 4:
+            if len(parts) < 3:
                 log.debug("bjobs 파싱 불가 행 무시: %r", line)
                 continue
             m = _ARRAY_ID_RE.match(parts[0])
@@ -530,21 +528,20 @@ class LsfCommand:
                     exit_code = int(parts[2])
                 except ValueError:
                     pass
-            # parts[3] = job_name — 요청은 유지(사람 디버깅용)하되 사용 안 함
             run_time_s = start_time = finish_time = working_dir = None
             source_cluster = forward_cluster = None
-            if len(parts) in (8, 10):
-                run_time_s = _parse_run_time(parts[4])
-                start_time = _parse_lsf_time(parts[5])
+            if len(parts) in (7, 9):
+                run_time_s = _parse_run_time(parts[3])
+                start_time = _parse_lsf_time(parts[4])
                 # RUN 중 finish_time은 예상치(estimated)일 수 있다 —
                 # 실측만 저장하도록 종료 상태에서만 채운다
                 if state in (JobState.DONE, JobState.EXIT):
-                    finish_time = _parse_lsf_time(parts[6])
-                working_dir = _clean_field(parts[7])
-                if len(parts) == 10:      # MultiCluster forwarding
-                    source_cluster = _clean_field(parts[8])
-                    forward_cluster = _clean_field(parts[9])
-            elif len(parts) != 4:
+                    finish_time = _parse_lsf_time(parts[5])
+                working_dir = _clean_field(parts[6])
+                if len(parts) == 9:       # MultiCluster forwarding
+                    source_cluster = _clean_field(parts[7])
+                    forward_cluster = _clean_field(parts[8])
+            elif len(parts) != 3:
                 log.debug("bjobs 필드 수 이상(%d) — 확장 필드 무시: %r",
                           len(parts), line)
             out.append(JobStatus(
