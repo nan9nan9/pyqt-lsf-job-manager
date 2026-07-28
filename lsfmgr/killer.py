@@ -255,8 +255,12 @@ class _KillTask(QRunnable):
         # 경로마다 다른 것은 (대상 레코드 풀, target 문자열, rec→target 매핑,
         # 전략 라벨)뿐이고 실행·부기(장부)는 아래 공유 꼬리 한 벌이다 (v10.1).
         if self.job_ids is not None:
-            # 개별 ID kill (FR-3.4) — 원시 id/"id[idx]" 문자열 그대로
-            recs = self._record_pool()
+            # 개별 ID kill (FR-3.4) — 원시 id/"id[idx]" 문자열 그대로.
+            # 레코드 풀은 여기서 조회하지 않는다(recs=None → 공유 꼬리에서
+            # confirm **이후** 지연 조회) — 먼저 조회하면 jobset 소실 경합/
+            # 비수치 id의 예외가 bkill 자체를 무산시킨다 (리팩토링 회귀 F1:
+            # 구버전은 kill 완료 후 마킹 단계에서만 풀을 읽었다).
+            recs = None
             targets = [str(i) for i in self.job_ids]
             requested = len(targets)
             rec_target = self._id_str
@@ -297,8 +301,18 @@ class _KillTask(QRunnable):
             strategies.append(label)
         # optimistic 대상 — per-id 확인이 있으므로 errors 유무와 무관하게
         # **확인된 target만** 마킹한다(미확인분은 on-LSF로 남아 폴링/재kill).
+        # 개별 id 경로(recs=None)는 풀을 여기서야 조회한다 — kill은 이미
+        # 끝났으므로 조회 실패(jobset 소실/비수치 id)는 마킹만 포기하고
+        # 삼킨다(LSF job은 죽었다 — 레코드 정리는 폴링이 수렴시킨다).
         killed_recs: List = []
-        if optimistic:
+        if optimistic and resolved:
+            if recs is None:
+                try:
+                    recs = self._record_pool()
+                except Exception as e:       # noqa: BLE001 — 마킹만 포기
+                    log.warning("optimistic 마킹용 레코드 조회 실패(무시): %r",
+                                e)
+                    recs = []
             killed_recs = [r for r in recs
                            if r.job_id is not None
                            and rec_target(r) in resolved]

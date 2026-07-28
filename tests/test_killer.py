@@ -18,6 +18,28 @@ def submitted(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 # 전략 ① group 1회 호출 (수용 기준 2)
 # ----------------------------------------------------------------------
+def test_kill_jobs_survives_pool_lookup_failure(qtbot, manager, fake_lsf):
+    """리팩토링 회귀 F1: 개별 id kill 도중 jobset이 소실(close/merge 경합)
+    되거나 비수치 id가 와도 **bkill 자체는 실행**돼야 한다 — 레코드 풀
+    조회는 kill 이후의 마킹 단계에서만 쓰이고, 실패하면 마킹만 포기한다."""
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        js = submit_cmds(manager, ["g 0", "g 1"], auto_poll=False)
+    fake_lsf.set_all("RUN")
+    ids = [r.job_id for r in js.jobs()]
+    manager.store.store_delete_jobset(js.id)     # jobset 소실 경합 재현
+    with qtbot.waitSignal(manager.killer.finished, timeout=10000) as blk:
+        manager.killer.kill_jobs(ids, jobset_id=js.id)
+    report = blk.args[1]
+    assert not any("internal" in e for e in report.errors), report.errors
+    assert report.unconfirmed == 0               # bkill은 정상 수행됨
+    assert fake_lsf.alive_jobs() == []           # LSF job은 죽었다
+
+    # 비수치 id (jobset 컨텍스트 없음) — bkill 전달은 되고 예외는 없어야
+    with qtbot.waitSignal(manager.killer.finished, timeout=10000) as blk:
+        manager.killer.kill_jobs(["weird-id"])
+    assert not any("internal" in e for e in blk.args[1].errors)
+
+
 def test_whole_kill_survives_chunk_failure_with_retry(qtbot, fake_lsf):
     """v10.1: 전체 kill도 confirm 경로 — 첫 bkill chunk가 순단(rc=255)이어도
     나머지 chunk를 계속 시도하고, 미확인분은 재시도로 살려낸다 (이전에는
