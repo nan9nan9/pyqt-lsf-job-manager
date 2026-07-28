@@ -419,14 +419,9 @@ class BulkSubmitter(QObject):
     # ------------------------------------------------------------------
     def _task_succeeded(self, ctx: _SubmitContext, job_key: str,
                         job_id: int) -> None:
-        # source_cluster를 제출 시점에 즉시 스탬프한다 — manager 초기화가
-        # lsid로 1회 채운 캐시(command.cluster_name). 폴링(collect_clusters)이
-        # 관측값을 얻기 전의 공백을 없애고, 관측값이 오면 그 값이 덮는다.
-        # 캐시가 None(조회 실패)이면 None 그대로 — 제출 흐름과 무관.
         rec = self.store.transition(ctx.jobset_id, job_key, JobState.PEND,
                                     job_id=job_id, submit_time=datetime.now(),
-                                    fail_reason=None, fail_message=None,
-                                    source_cluster=self.command.cluster_name)
+                                    fail_reason=None, fail_message=None)
         self._count(ctx, succeeded=True, changed=rec)
 
     def _task_failed(self, ctx: _SubmitContext, job_key: str, attempt: int,

@@ -68,9 +68,7 @@ def test_default_off_no_cluster_fields(qtbot, manager, fake_lsf):
     fj.stat = "RUN"; fj.source_cluster = "seoul"
     fake_lsf.calls.clear()
     manager.querier.query(js.id)
-    # collect_clusters=False — 폴링은 cluster를 관측하지 않으므로 제출 시점
-    # lsid 스탬프("fake_cluster")가 그대로 유지된다 (seoul로 안 덮임)
-    assert js.jobs()[0].source_cluster == "fake_cluster"
+    assert js.jobs()[0].source_cluster is None
     # bjobs -o 포맷에 cluster 필드가 없어야
     for call in fake_lsf.calls_of("bjobs"):
         assert "source_cluster" not in " ".join(call)
@@ -92,8 +90,7 @@ def test_cluster_field_unsupported_degrades_to_full(qtbot, fake_lsf, config):
         mgr.querier.query(js.id)
         rec = js.jobs()[0]
         assert rec.run_time_s == 42          # FULL 확장 필드는 유지
-        # MC 필드 미지원 — 폴링 관측은 포기되고 제출 시점 lsid 스탬프만 남는다
-        assert rec.source_cluster == "fake_cluster"
+        assert rec.source_cluster is None    # MC 필드만 포기
         # 포맷이 FULL(인덱스 1)로 강등됐고 MC 필드는 빠졌다
         assert "source_cluster" not in mgr.command._bjobs_fmt
     finally:
@@ -118,59 +115,24 @@ def test_cluster_degradation_is_permanent(qtbot, fake_lsf, config):
         mgr.shutdown()
 
 
-def test_submit_stamps_source_cluster(qtbot, manager, fake_lsf):
-    """제출 성공 시점에 source_cluster가 즉시 스탬프된다 (lsid 1회 캐시) —
-    폴링(collect_clusters) 전 공백 제거. mgr.cluster_name으로도 노출."""
-    assert manager.cluster_name == "fake_cluster"      # 초기화 시 lsid 1회
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = submit_cmds(manager, ["echo a"], auto_poll=False)
-    rec = js.jobs()[0]
-    assert rec.state is JobState.PEND
-    assert rec.source_cluster == "fake_cluster"        # 폴링 전인데 이미 존재
-    assert rec.forward_cluster is None
-
-
-def test_lsid_failure_leaves_cluster_none(qtbot, fake_lsf, config):
-    """lsid 실패(LSF 순단 등)여도 기동은 정상 — cluster_name/스탬프만 None."""
-    fake_lsf.fail_all_queries = True                   # lsid rc=255
-    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf)
-    try:
-        assert mgr.cluster_name is None
-        fake_lsf.fail_all_queries = False
-        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            js = submit_cmds(mgr, ["echo a"], auto_poll=False)
-        assert js.jobs()[0].source_cluster is None     # 스탬프도 None 그대로
-    finally:
-        mgr.shutdown()
-
-
 # ----------------------------------------------------------------------
 # sqlite 영속 — 클러스터 필드 저장/복원
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
-# 파서 단위 — -json 레코드: FULL+MC / FULL / CORE (없는 키는 None)
+# 파서 단위 — delimiter 행: 10필드(FULL+MC) / 8필드(FULL) / 4필드(CORE)
 # ----------------------------------------------------------------------
-def _json_payload(*recs):
-    import json
-    return json.dumps({"COMMAND": "bjobs", "JOBS": len(recs),
-                       "RECORDS": list(recs)}) + "\n"
-
-
 def test_parse_bjobs_cluster_fields():
-    base = {"JOBID": "1000", "STAT": "RUN", "EXIT_CODE": "",
-            "JOB_NAME": "js_0", "RUN_TIME": "120 second(s)",
-            "START_TIME": "", "FINISH_TIME": "", "EXEC_CWD": "/work"}
-    mc = dict(base, SOURCE_CLUSTER="seoul", FORWARD_CLUSTER="busan")
-    (st,) = LsfCommand._parse_bjobs(_json_payload(mc))
+    line10 = "1000;RUN;-;js_0;120 second(s);-;-;/work;seoul;busan"
+    (st,) = LsfCommand._parse_bjobs(line10 + "\n")
     assert st.source_cluster == "seoul" and st.forward_cluster == "busan"
     assert st.run_time_s == 120 and st.working_dir == "/work"
 
-    (st8,) = LsfCommand._parse_bjobs(_json_payload(base))
+    line8 = "1000;RUN;-;js_0;120 second(s);-;-;/work"
+    (st8,) = LsfCommand._parse_bjobs(line8 + "\n")
     assert st8.source_cluster is None and st8.run_time_s == 120
 
-    core = {"JOBID": "1000", "STAT": "RUN", "EXIT_CODE": "",
-            "JOB_NAME": "js_0"}
-    (st4,) = LsfCommand._parse_bjobs(_json_payload(core))
+    line4 = "1000;RUN;-;js_0"
+    (st4,) = LsfCommand._parse_bjobs(line4 + "\n")
     assert st4.source_cluster is None and st4.run_time_s is None
 
 
@@ -190,9 +152,7 @@ def test_full_resubmit_clears_cluster(qtbot, mc_manager, fake_lsf):
         mc_manager.submit(js)
     rec = js.jobs()[0]
     assert rec.state is JobState.PEND
-    # 재제출 리셋이 이전 관측치(seoul/busan)를 지우고, 성공 시점에 현재
-    # 클러스터(lsid)가 새로 스탬프된다 — 이전 실행의 흔적만 사라지면 된다
-    assert rec.source_cluster == "fake_cluster"
+    assert rec.source_cluster is None
     assert rec.forward_cluster is None
 
 
@@ -208,9 +168,7 @@ def test_double_field_error_degrades_to_core():
             return CommandResult(255, "", "bad field name: source_cluster\n")
         if "exec_cwd" in fmt:
             return CommandResult(255, "", "Unknown field: exec_cwd\n")
-        return CommandResult(0, _json_payload(
-            {"JOBID": "111", "STAT": "RUN", "EXIT_CODE": "",
-             "JOB_NAME": "j0"}), "")
+        return CommandResult(0, "111;RUN;-;j0\n", "")
 
     cmd = LsfCommand(LsfConfig(collect_clusters=True), runner)
     out, failed = cmd.bjobs_by_ids([111])    # 한 호출에서 CORE까지 강등

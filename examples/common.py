@@ -40,11 +40,6 @@ WRAPPERS = ["customwrapper_sub"]
 
 _REAL = os.environ.get("LSFMGR_REAL") == "1"
 
-# mocklsf 모드: bare "lsid"(lsfmgr 기동 시 클러스터명 캐시)가 bin/의 mock을
-# 잡도록 PATH 선두에 추가한다 — 실제 LSF 모드는 PATH의 실명령 그대로.
-if not _REAL:
-    os.environ["PATH"] = BIN + os.pathsep + os.environ.get("PATH", "")
-
 
 def wrapper(tool: str, *args) -> list:
     """create_jobs 에 넘길 wrapper 커맨드(토큰 리스트)를 만든다.

@@ -66,12 +66,6 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)
 | `poll_runtime_updates` | True | 생성자 | RUN 중 `run_time_s`(경과시간) 변화도 `jobs_updated`로 live 발행. 수만 개 규모 부하 시 False로 끔 |
 | `submit_finished_on_gate_reject` | True | 생성자 | `pre_submit` 게이트가 False면 `submit_finished`(cancelled=N)도 발화. False면 종료는 `pre_submit_finished(False)`만 |
 | `collect_clusters` | False | 생성자 | LSF MultiCluster forwarding 정보 수집. 켜면 `JobRecord.source_cluster`/`forward_cluster`를 폴링으로 채움(MC 환경 opt-in) |
-
-> **현재 클러스터명 (v10.1)**: 매니저 초기화 시 `lsid`를 1회 실행해 현재
-> 프로세스 env의 클러스터명을 캐시합니다 — `mgr.cluster_name`으로 조회
-> (실패 시 None). 제출 성공 시점에 `JobRecord.source_cluster`로도 즉시
-> 스탬프되어 폴링 전 공백이 없고, `collect_clusters` 폴링 관측값이 오면
-> 그 값이 덮습니다.
 | `progress_min_interval_s` | 0.5 | 생성자 | progress/jobs_updated 최소 발화 간격(초). 키우면 부하↓·반응성↓ |
 | `progress_min_step_ratio` | 0.01 | 생성자 | progress 최소 진행 비율(0~1). 키우면 발화↓ |
 | `test_submit_wrapper_pattern_cmd` | 없음 | 생성자 | wrapper 제출의 실행 프로그램 치환 — `("*_sub", "/path/to/mock_sub")`. `argv[0]`의 basename이 glob에 맞으면 그 프로그램만 대체(mock 전환용, §2.1) |
@@ -313,29 +307,24 @@ mgr.close(js)                          # 종결 (전원 terminal일 때)
 > - **`"actual"`** — terminated만으론 상태를 안 바꾸고, **실제 LSF 상태**
 >   (`verify=True` 또는 폴링)로만 EXIT를 반영. 정확하지만 반영이 한 박자 늦습니다.
 
-> **MultiCluster forward job kill** (`envpath`): job이 다른 클러스터로
-> forward되어 로컬 `bkill`로 안 죽고 그 클러스터 LSF env를 source해야 죽는
-> 환경을 지원합니다. `mgr.kill(js)`/`mgr.kill_jobs(js, keys)`에 `envpath="<cshrc 경로>"`를
-> 주면 `tcsh -c "source <envpath> && exec bkill <ids>"` 로 실행됩니다.
-> job마다 forward된 클러스터가 다를 수 있으므로, `collect_clusters=True`로
-> 채워지는 `rec.forward_cluster`로 분류한 뒤 클러스터별로 나눠 각 `envpath`로
-> 호출하면 됩니다. **`forward_cluster`가 곧 판별자**입니다 — forward된 job만
-> 클러스터 이름이 들어가고, **forward 안 된 로컬 job은 `None`**이라 envpath
-> 없이 그냥 로컬 `bkill`로 죽여야 합니다 (`None` 버킷 별도 처리):
+> **MultiCluster kill — 자동 분류** (`cluster_envpaths`, v10.2 권장):
+> forward job은 로컬 `bkill`로 안 죽고 그 클러스터 env를 source해야 죽는
+> 환경에서, `{클러스터명: cshrc경로}` 매핑 하나만 넘기면 라이브러리가
+> 알아서 처리합니다:
 > ```python
-> by_cluster = {}
-> for r in js.failed_jobs:                       # 또는 죽일 대상 목록
->     by_cluster.setdefault(r.forward_cluster, []).append(r.job_key)
-> for cluster, keys in by_cluster.items():
->     if cluster is None:                        # forward 안 된 로컬 job
->         mgr.kill_jobs(js, keys)                # envpath 없이 (로컬 bkill)
->     else:                                      # forward된 job
->         mgr.kill_jobs(js, keys, envpath=CSHRC[cluster])
+> mgr.kill(js, cluster_envpaths={"cluster_a": "/env/a.cshrc",
+>                                "cluster_b": "/env/b.cshrc"})
 > ```
-> `None`을 안 걸러내면 `CSHRC[None]`에서 `KeyError`가 나거나 로컬 job에
-> 불필요하게 envpath를 씌우게 됩니다. (`source_cluster`는 LSF 버전에 따라 로컬
-> job도 자기 클러스터명이 나올 수 있어 판별 기준으로는 부적합 — `forward_cluster`
-> 로 판별하세요.)
+> 동작: ① 대상 중 cluster 미상(제출 직후 — 첫 폴링 전)이 있으면 **bkill
+> 전에 bjobs 1회를 강제 조회**해 채우고 ② 관측 cluster(forward 우선,
+> 없으면 source)별로 그 env를 `source`한 bkill(`tcsh -c "source ... &&
+> exec bkill ..."`)로 분류 실행 ③ 그래도 미상이면 기본 envpath(보통
+> 로컬 bkill)로 죽입니다. **제출 직후 즉시 kill해도 cluster를 알고
+> 죽는다**는 게 핵심입니다. cluster 관측은 `collect_clusters=True` 전제.
+>
+> 저수준 수동 제어가 필요하면 `envpath="<cshrc>"` 단일 지정도 그대로
+> 지원됩니다 (`mgr.kill_jobs(js, keys, envpath=...)` — 호출 전체가 그
+> env 하나로 실행).
 
 ### 3.3 조회 (동기 — 로컬 스냅샷, LSF 호출 없음)
 

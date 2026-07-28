@@ -337,7 +337,8 @@ JobSetStore(ABC) ── InMemoryStore
     barrier 확인과 submit 등록이 한 lock 아래 **원자적**이라 "kill의 취소를
     빠져나가는 늦은 제출"이 불가능(`lifecycle.py` SubmitGate/KillScope). `kill_started`
     는 접수 즉시(동기) 발화 — 정지 대기로 완료가 늦어도 UI가 바로 표시.
-- **FR-4 Monitoring**: 조회는 explicit job id chunked `bjobs -json`뿐(v10에서
+- **FR-4 Monitoring**: 조회는 explicit job id chunked `bjobs -noheader
+  -o "... delimiter=';'"`뿐(v10.2에서 -json 복귀, 폭 미지정; v10에서
   group/name 조회 제거 — wrapper job과 경로 통일), `is_on_lsf`만 조회,
   못 찾은 id → bhist chunk fallback → 그래도 없으면 `LOST`. polling은 batch 반영 후
   Signal(**FR-4.1** 요약+변경분, **FR-4.2** LOST 확정).

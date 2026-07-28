@@ -150,6 +150,63 @@ def test_whole_kill_envpath(qtbot, fake_lsf, config):
 # ----------------------------------------------------------------------
 # envpath 없으면 기존 group 전략 그대로 (회귀)
 # ----------------------------------------------------------------------
+def test_cluster_envpaths_kill_right_after_submit(qtbot, fake_lsf, config):
+    """사용자 시나리오(MC): 제출 직후 폴링 전이라 레코드에 cluster가 없다 —
+    cluster_envpaths kill은 bkill **전에** bjobs 1회를 강제 조회해 cluster를
+    채우고, forward job은 그 클러스터 env를 source한 bkill로 죽인다."""
+    from lsfmgr import InMemoryStore, LsfJobManager
+    fake_lsf.forward_needs_env = True        # forward job은 sourced bkill만 유효
+    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
+                        collect_clusters=True)
+    try:
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            js = submit_cmds(mgr, [f"m {i}" for i in range(4)],
+                             auto_poll=False)
+        # LSF상 전원 RUN + 일부 forward — 아직 **폴링 전**이라 레코드는 미상
+        for i, r in enumerate(js.jobs()):
+            fj = fake_lsf.jobs[str(r.job_id)]
+            fj.stat = "RUN"
+            if i < 2:
+                fj.forward_cluster = "cluster_busan"
+        assert all(r.forward_cluster is None for r in js.jobs())
+
+        envs = {"cluster_busan": CSHRC}
+        with qtbot.waitSignal(mgr.kill_finished, timeout=10000) as blk:
+            mgr.kill(js, cluster_envpaths=envs)
+        report = blk.args[1]
+        assert report.unconfirmed == 0, report.errors
+        assert fake_lsf.alive_jobs() == []          # forward 포함 전원 사망
+        # forward 2건은 tcsh(source) 경유, 로컬 2건은 plain bkill
+        assert len(fake_lsf.calls_of("tcsh")) == 1
+        assert any(c[0].endswith("bkill") for c in fake_lsf.calls)
+        # 강제 조회(bjobs)가 bkill보다 먼저 나갔다
+        order = [c[0].rsplit("/", 1)[-1] for c in fake_lsf.calls]
+        assert order.index("bjobs") < min(
+            i for i, p_ in enumerate(order) if p_ in ("bkill", "tcsh"))
+    finally:
+        mgr.shutdown()
+
+
+def test_cluster_envpaths_unknown_falls_back_to_default(qtbot, fake_lsf,
+                                                        config):
+    """조회 후에도 cluster 미상(관측 실패)이면 기본 envpath로 kill —
+    kill 자체는 반드시 나간다."""
+    from lsfmgr import InMemoryStore, LsfJobManager
+    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
+                        collect_clusters=True)
+    try:
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            js = submit_cmds(mgr, ["u 0"], auto_poll=False)
+        fake_lsf.set_all("RUN")                  # cluster 없음(로컬)
+        with qtbot.waitSignal(mgr.kill_finished, timeout=10000) as blk:
+            mgr.kill(js, cluster_envpaths={"cluster_x": CSHRC})
+        assert blk.args[1].unconfirmed == 0
+        assert fake_lsf.alive_jobs() == []
+        assert not fake_lsf.calls_of("tcsh")     # 미상 → 기본(plain) bkill
+    finally:
+        mgr.shutdown()
+
+
 def test_no_envpath_uses_plain_bkill(qtbot, manager, fake_lsf):
     """envpath 미지정이면 tcsh source 없이 plain bkill chunk로 죽인다."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):

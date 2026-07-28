@@ -20,7 +20,6 @@ python examples/gui_demo.py   # 통합 GUI 데모
 | 진행률 바 / Cancel | progress throttle(QT-5), `cancel_submit` 안전 중단(QT-6) |
 | JobSet 트리 | 다중 JobSet 요약 실시간 갱신, Facade Signal 스트림 (README §8) |
 | job 테이블 | 변경분 배치 **증분 upsert**(QT-4, 전체 재그리기 금지), 상태별 색, cluster 열 |
-| 클러스터 배지 | 기동 시 `lsid` 1회 조회(`mgr.cluster_name`) — 제출 시 `source_cluster` 스탬프 |
 | job 추가 / 재실행 | **merge** 로만 추가(v9), 실패분 같은 `merge_id` 교체 후 전체 재제출 |
 | Kill 제어 | 전체 kill(verify, **MC-aware** — forward job 은 `envpath` 분류 kill), `PEND만`, 선택 행만(`kill_jobs`) |
 | handler (FR-7) | 체크 시 `add_handler` — RUN 중 폴링마다 job 출력 파싱 + 종료 시 최종 1회 → `handler_finished` 로그 |
@@ -57,7 +56,7 @@ forward 합니다(`collect_clusters=True` 폴링이 `forward_cluster` 를 채움
 ## 실제 LSF 에서 실행
 
 ```bash
-LSFMGR_REAL=1 python examples/gui_demo.py   # mocklsf 대신 PATH 의 bjobs/bkill/lsid
+LSFMGR_REAL=1 python examples/gui_demo.py   # mocklsf 대신 PATH 의 bjobs/bkill
 ```
 
 ## 스모크 테스트 (headless)

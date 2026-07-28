@@ -13,7 +13,6 @@
   - JobSet handler: RUN 중 폴링마다 job 출력 파싱 + 종료 시 최종 1회 (FR-7)
   - post_process: 전원 terminal 도달 시 worker 에서 1회 종합 집계 (FR-10)
   - job 더블클릭 → fetch_job_detail (bhist -l 온디맨드) → 로그로 표시
-  - 기동 시 lsid 로 현재 클러스터명 캐시 → 창 상단 표시 + source_cluster 스탬프
 
 테스트 환경은 저장소 동봉 mocklsf(가상 LSF)이며, 실제 LSF 는 LSFMGR_REAL=1.
 
@@ -215,8 +214,7 @@ class Dashboard(QWidget):
         # --- 좌: 옵션 폼 ---
         self.form = SubmitForm(self.submit, self.add_to_selected)
 
-        # --- 우상: 클러스터 배지 + JobSet 트리 + 제어 ---
-        self.cluster_badge = QLabel("클러스터: (조회 중)")   # ← mgr.cluster_name
+        # --- 우상: JobSet 트리 + 제어 ---
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(self.COLS)
         self.tree.setRootIsDecorated(False)
@@ -248,7 +246,6 @@ class Dashboard(QWidget):
         right = QWidget()
         rlay = QVBoxLayout(right)
         rlay.setContentsMargins(0, 0, 0, 0)
-        rlay.addWidget(self.cluster_badge)
         rlay.addWidget(QLabel("JobSet 목록 (선택 후 아래 제어):"))
         rlay.addWidget(self.tree, stretch=1)
         rlay.addLayout(ctrl)
@@ -278,9 +275,6 @@ class Dashboard(QWidget):
     # ------------------------------------------------------------------
     def bind_manager(self, mgr):
         self.mgr = mgr
-        self.cluster_badge.setText(
-            f"클러스터: {mgr.cluster_name or '(lsid 조회 실패)'} — "
-            f"제출 시 source_cluster 로 스탬프됨")
         mgr.submit_started.connect(lambda j: self._log(j, "submit_started"))
         mgr.submit_progress.connect(self._on_progress)
         mgr.kill_progress.connect(self._on_progress)
@@ -370,26 +364,16 @@ class Dashboard(QWidget):
     # kill / 제어
     # ------------------------------------------------------------------
     def kill(self):
-        """전체 kill (verify) — MC-aware: forward job 은 그 클러스터 env 를
-        source 한 bkill(envpath)로, 로컬 job 은 일반 kill 로 분류 실행."""
+        """전체 kill (verify) — cluster_envpaths 로 MC 자동 분류 kill.
+        제출 직후처럼 cluster 미상이어도 라이브러리가 bkill 전에 bjobs 를
+        강제 조회해 채운 뒤, forward job 은 그 클러스터 env 를 source 한
+        bkill 로, 로컬 job 은 일반 bkill 로 나눠 죽인다 (v10.2)."""
         js = self._handle()
         if js is None:
             return
-        alive = [r for r in js.jobs() if r.state.is_on_lsf]
-        fwd = [r for r in alive if r.forward_cluster]
-        if not fwd:
-            self.mgr.kill(js, verify=True)
-            return
-        by_cluster = {}
-        for r in fwd:
-            by_cluster.setdefault(r.forward_cluster, []).append(r.job_key)
-        for cluster, keys in by_cluster.items():
-            self._log(js.id, f"MC kill: {cluster} {len(keys)}건 → "
-                             f"envpath source 후 bkill")
-            self.mgr.kill_jobs(js, keys, envpath=cluster_env_path(cluster))
-        local = [r.job_key for r in alive if not r.forward_cluster]
-        if local:
-            self.mgr.kill_jobs(js, local, verify=True)
+        self.mgr.kill(js, verify=True,
+                      cluster_envpaths={c: cluster_env_path(c)
+                                        for c in FORWARD_CLUSTERS})
 
     def kill_pend(self):
         js = self._handle()

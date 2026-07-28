@@ -7,36 +7,11 @@ from lsfmgr.command import CommandResult, LsfCommand, chunk_args
 from lsfmgr.config import LsfConfig
 from lsfmgr.errors import ArgMaxExceededError, SubmitError
 from lsfmgr.states import JobState
-from tests.fake_lsf import FakeLsf
 
 
 @pytest.fixture
 def cmd(fake_lsf):
     return LsfCommand(LsfConfig(), fake_lsf)
-
-
-# ----------------------------------------------------------------------
-# lsid 클러스터명 조회 (fetch_cluster_name — manager 초기화가 1회 호출)
-# ----------------------------------------------------------------------
-def test_fetch_cluster_name_parses_and_caches(fake_lsf):
-    cmd = LsfCommand(LsfConfig(), fake_lsf)
-    assert fake_lsf.calls_of("lsid") == []         # 생성만으론 실행 안 함
-    assert cmd.fetch_cluster_name() == "fake_cluster"
-    # bare "lsid" — 경로 고정 없이 프로세스 PATH가 잡는 클러스터 진단
-    assert fake_lsf.calls_of("lsid") == [["lsid"]]
-    assert cmd.cluster_name == "fake_cluster"      # 캐시됨
-
-
-def test_fetch_cluster_name_failure_swallowed(caplog):
-    import logging
-    caplog.set_level(logging.WARNING, logger="lsfmgr.command")
-
-    def runner(argv, timeout, cwd=None):
-        raise OSError("lsid: command not found")
-
-    cmd = LsfCommand(LsfConfig(), runner)
-    assert cmd.fetch_cluster_name() is None        # 예외 삼킴 — None
-    assert "lsid 클러스터 조회 실패" in caplog.text
 
 
 # ----------------------------------------------------------------------
@@ -90,14 +65,17 @@ def test_run_submit_timeout():
 # ----------------------------------------------------------------------
 # bjobs
 # ----------------------------------------------------------------------
-def test_bjobs_uses_json_output(cmd, fake_lsf):
-    """모든 bjobs 호출은 -json으로 나간다 (v10 — delimiter 파싱 제거)."""
+def test_bjobs_uses_noheader_delimiter(cmd, fake_lsf):
+    """v10.2: bjobs는 -noheader + delimiter=';' (폭 지정 없음, -json 아님)."""
     jid = _submit(cmd, name="t_0")
     out, _failed = cmd.bjobs_by_ids([jid])
     assert [s.job_id for s in out] == [jid]
     for call in fake_lsf.calls_of("bjobs"):
-        assert "-json" in call
+        assert "-noheader" in call and "-json" not in call
         assert "-g" not in call and "-J" not in call
+        fmt = call[call.index("-o") + 1]
+        assert "delimiter=';'" in fmt
+        assert ":" not in fmt                    # 필드 폭 지정 없음
 
 
 def test_bjobs_by_ids_chunked(fake_lsf):
@@ -150,15 +128,13 @@ def test_bjobs_exit_code_parsing(cmd, fake_lsf):
 def test_bjobs_downgrades_on_unsupported_field():
     """확장 -o 필드를 거부하는 LSF에서 CORE 포맷으로 강등해 폴링을 살린다
     (강등 안 하면 bjobs가 매번 죽어 job이 PEND에 고착)."""
-    core = ('{"COMMAND":"bjobs","JOBS":2,"RECORDS":['
-            '{"JOBID":"111","STAT":"PEND","EXIT_CODE":"","JOB_NAME":"j0"},'
-            '{"JOBID":"222","STAT":"RUN","EXIT_CODE":"","JOB_NAME":"j1"}]}')
+    core = "111;PEND;-;j0\n222;RUN;-;j1\n"
 
     def runner(argv, timeout, cwd=None):
         fmt = argv[argv.index("-o") + 1]
         if "exec_cwd" in fmt:            # 확장 포맷 거부
             return CommandResult(255, "", "bjobs: Unknown field: exec_cwd\n")
-        return CommandResult(0, core + "\n", "")
+        return CommandResult(0, core, "")
 
     cmd = LsfCommand(LsfConfig(), runner)
     assert cmd._bjobs_fmt is cmd._BJOBS_FULL_FMT

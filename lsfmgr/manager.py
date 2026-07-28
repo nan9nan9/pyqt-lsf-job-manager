@@ -138,9 +138,6 @@ class LsfJobManager(QObject):
 
         # --- 컴포넌트 조립 ---
         self.command = LsfCommand(self.config, runner)
-        # 현재 클러스터명(lsid) 1회 조회 — 이후 mgr.cluster_name으로 노출되고
-        # 제출 성공 레코드의 source_cluster에 스탬프된다. 실패는 None(경고만).
-        self.command.fetch_cluster_name()
         self.jobsets = JobSetManager(self.store)
         self.querier = JobsetQuerier(self.store, self.command)
 
@@ -457,10 +454,18 @@ class LsfJobManager(QObject):
     # ------------------------------------------------------------------
     def kill(self, jobset_id, *,
                     only_state: Optional[JobState] = None,
-                    verify: Optional[bool] = None, envpath: str = "") -> None:
+                    verify: Optional[bool] = None, envpath: str = "",
+                    cluster_envpaths: Optional[Dict[str, str]] = None) -> None:
         """[async→Signal] JobSet kill — 결과는 kill_finished.
         verify 미지정 시 verify_kill 옵션(②) 적용.
-        envpath 지정 시 그 LSF env를 source한 bkill (MC forward job)."""
+        envpath 지정 시 그 LSF env를 source한 bkill (MC forward job).
+
+        cluster_envpaths: {클러스터명: cshrc경로} — MC 자동 분류 kill.
+        지정 시 ① 대상 중 cluster 미상(source/forward_cluster None)이 있으면
+        **bkill 전에 bjobs 1회를 강제 조회**해 채우고(제출 직후 즉시 kill해도
+        cluster를 알고 죽인다), ② 관측 cluster(forward 우선)별로 그 env를
+        source한 bkill로 분류 실행, ③ 그래도 미상이면 기본 envpath로 kill.
+        cluster 관측은 collect_clusters=True 전제."""
         jobset_id = self._jsid(jobset_id)
         if self._shutdown_done:
             # shutdown 후 kill은 join되지 않는 worker를 만들고 kill_started만
@@ -486,6 +491,7 @@ class LsfJobManager(QObject):
             scope = self._gate.kill_scope(jobset_id)
         queued = self.killer.kill_jobset(jobset_id, only_state=only_state,
                                          verify=verify, envpath=envpath,
+                                         cluster_envpaths=cluster_envpaths,
                                          scope=scope)
         # 접수 즉시(동기) 착수 통지 — quiesce(진행 중 bsub 완료 대기)로
         # kill_finished가 수십 초 늦어지는 케이스에서도 UI가 '접수됨'을
@@ -499,7 +505,8 @@ class LsfJobManager(QObject):
 
     def kill_jobs(self, job_ids_or_jobset, job_keys: Optional[Sequence[str]] = None, *,
                   jobset_id: Optional[str] = None,
-                  verify: Optional[bool] = None, envpath: str = "") -> None:
+                  verify: Optional[bool] = None, envpath: str = "",
+                  cluster_envpaths: Optional[Dict[str, str]] = None) -> None:
         """[async→Signal] 개별 job kill (chunking 자동).
 
         두 형태를 받는다:
@@ -537,7 +544,8 @@ class LsfJobManager(QObject):
             jsid = (self._jsid(jobset_id)
                     if jobset_id is not None else "")
         queued = self.killer.kill_jobs(ids, verify=verify,
-                                       jobset_id=jsid or "", envpath=envpath)
+                                       jobset_id=jsid or "", envpath=envpath,
+                                       cluster_envpaths=cluster_envpaths)
         if jsid and queued:              # jobset 컨텍스트 + 실제 큐잉일 때만
             self.kill_started.emit(jsid)   # killer 등록 후 (pull 일치)
 
@@ -955,13 +963,6 @@ class LsfJobManager(QObject):
         self._post_process.pop(jobset_id, None)
         self._pending_arm.pop(jobset_id, None)
         self._invalidate_handle(jobset_id)
-
-    @property
-    def cluster_name(self) -> Optional[str]:
-        """[sync] 이 프로세스 env가 가리키는 LSF 클러스터명 (초기화 시 lsid
-        1회 조회 결과 — 조회 실패면 None). 제출 성공 레코드의
-        source_cluster에도 이 값이 스탬프된다."""
-        return self.command.cluster_name
 
     def list_jobsets(self) -> List[JobSetRecord]:
         """[sync, snapshot] 현재 세션의 JobSet 목록."""

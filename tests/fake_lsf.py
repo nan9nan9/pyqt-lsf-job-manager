@@ -6,7 +6,6 @@ subprocess 없이 bsub/bjobs/bkill/bhist/bmod/bgdel 동작을 시뮬레이션한
 from __future__ import annotations
 
 import fnmatch
-import json
 import re
 import threading
 from dataclasses import dataclass
@@ -205,8 +204,12 @@ class FakeLsf:
                 255, "", "bad field name: source_cluster\n")
         fields = [f.split(":", 1)[0] for f in fmt.split() if "=" not in f] \
             or ["jobid", "stat", "exit_code", "job_name"]
-        # v10.1: 프로덕션 bjobs는 항상 -json — delimiter 직렬화기는 삭제됨
-        return self._bjobs_json(matched, fields)
+        # v10.2: -noheader + delimiter=';' 방식 (실제 LSF는 빈 값을 "-"로 출력)
+        lines = []
+        for j in matched:
+            row = self._row_values(j)          # job당 1회 계산
+            lines.append(";".join(row.get(f) or "-" for f in fields))
+        return CommandResult(0, "\n".join(lines) + "\n", "")
 
     @staticmethod
     def _row_values(j: FakeJob) -> dict:
@@ -227,17 +230,6 @@ class FakeLsf:
             "source_cluster": j.source_cluster or "",
             "forward_cluster": j.forward_cluster or "",
         }
-
-    def _bjobs_json(self, matched: List[FakeJob],
-                    fields: List[str]) -> CommandResult:
-        # 실제 LSF -json: -o 필드명의 대문자 키, 빈 값은 "" (padding/폭 무시)
-        recs = []
-        for j in matched:
-            row = self._row_values(j)          # job당 1회 계산
-            recs.append({f.upper(): row.get(f, "") for f in fields})
-        payload = json.dumps({"COMMAND": "bjobs", "JOBS": len(recs),
-                              "RECORDS": recs})
-        return CommandResult(0, payload + "\n", "")
 
     def _select(self, opts, id_args: List[str],
                 include_done: bool = True) -> List[FakeJob]:

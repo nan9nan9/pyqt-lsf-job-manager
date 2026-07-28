@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import fnmatch
 import inspect
-import json
 from functools import lru_cache
 import logging
 import re
@@ -75,7 +74,7 @@ def _adapt_runner(runner: Runner) -> Runner:
 class JobStatus:
     """bjobs 1행 파싱 결과. (v10.1: job_name 필드 삭제 — name 매칭이
     사라져 write-only 데이터였다. -o 포맷의 job_name 요청은 사람이 raw
-    JSON을 볼 때의 식별용으로만 유지하고 파서는 읽지 않는다.)"""
+    출력을 볼 때의 식별용으로만 유지하고 파서는 읽지 않는다.)"""
     job_id: int
     array_index: Optional[int]
     state: JobState
@@ -89,8 +88,6 @@ class JobStatus:
 
 
 _JOB_ID_RE = re.compile(r"Job <(\d+)>")
-# lsid 출력의 클러스터명 행: "My cluster name is <name>"
-_LSID_CLUSTER_RE = re.compile(r"My cluster name is (\S+)")
 _ARRAY_ID_RE = re.compile(r"^(\d+)(?:\[(\d+)\])?$")
 # bjobs가 매칭 결과 없음을 알릴 때의 메시지들
 _NO_JOB_PATTERNS = ("no unfinished job", "no matching job", "is not found",
@@ -118,13 +115,6 @@ def _clean_field(s: str) -> Optional[str]:
     """bjobs -o 문자열 필드 정규화 — 빈값/'-'는 None (미해당)."""
     s = (s or "").strip()
     return s if s and s != "-" else None
-
-
-def _jfield(rec: dict, key: str) -> str:
-    """bjobs -json 레코드 값 → 문자열. None/부재만 "" — `v or ""` 패턴은
-    JSON 숫자 0(RUN_TIME=0, EXIT_CODE=0)을 ""로 삼켜 값이 소실된다."""
-    v = rec.get(key)
-    return "" if v is None else str(v)
 
 
 def _looks_like_field_error(err_text: str) -> bool:
@@ -257,34 +247,10 @@ class LsfCommand:
             if self.config.collect_clusters
             else [self._BJOBS_FULL_FMT, self._BJOBS_CORE_FMT])
         self._bjobs_fmt_idx = 0
-        # 현재 프로세스 env의 LSF 클러스터명 — manager 초기화가
-        # fetch_cluster_name()을 1회 호출해 채운다 (실패 시 None 유지)
-        self.cluster_name: Optional[str] = None
         # 강등은 폴링 스레드·killer verify 워커·detect_lost 호출 스레드가
         # 동시에 시도할 수 있다 — 무락 증가면 같은 필드 오류에 이중 강등돼
         # FULL을 건너뛰고 CORE로 떨어진다. 사용한 인덱스 기준 CAS로 1단만.
         self._bjobs_fmt_lock = threading.Lock()
-
-    def fetch_cluster_name(self) -> Optional[str]:
-        """현재 프로세스 env가 가리키는 LSF 클러스터명(lsid) 조회 — 캐시에
-        저장. **의도적으로 경로 설정 없이** bare "lsid"를 실행한다 — 경로를
-        고정하면 그 경로의 클러스터가 나올 뿐, '지금 이 프로세스 env(PATH)가
-        잡는 클러스터'라는 진단 의미가 사라진다. _run funnel 경유라 DEBUG
-        레벨이면 원문(rc/stdout/소요시간)이 NFR-6 로그로 남는다(별도 진단
-        불필요). LsfJobManager 초기화가 1회 호출 — 실패는 None으로 삼킨다
-        (클러스터명은 부가 정보, 기동을 막으면 안 된다)."""
-        try:
-            res = self._run(["lsid"], 10.0)
-            m = _LSID_CLUSTER_RE.search(res.stdout)
-            if m:
-                self.cluster_name = m.group(1)
-                log.info("현재 LSF 클러스터: %s", self.cluster_name)
-            else:
-                log.warning("lsid 출력에서 클러스터명 파싱 실패 (rc=%d): %r",
-                            res.returncode, res.stdout[:200])
-        except Exception as e:               # noqa: BLE001 — 부가 정보
-            log.warning("lsid 클러스터 조회 실패 (무시): %r", e)
-        return self.cluster_name
 
     @property
     def _bjobs_fmt(self) -> str:
@@ -395,11 +361,7 @@ class LsfCommand:
     # ------------------------------------------------------------------
     # bjobs — 조회 (FR-4.1 전략별 변형)
     # ------------------------------------------------------------------
-    # 필드 폭 명시 필수 — LSF -o는 폭 미지정 시 기본 폭(JOBID 7자 등)으로
-    # 잘라내므로("js_2026*") 긴 job name/array id의 파싱·매칭이 전멸한다
     # 필드명은 LSF -o 공식 명칭 사용 — job_name (jobname 은 실제 LSF 미지원).
-    # -json 모드(LSF 10.1+)라 폭/구분자 지정이 없다 — 값이 escape되어 통째로
-    # 오므로 truncation 상한 추측·구분자 충돌·필드 수 가드가 모두 불필요하다.
     #
     # CORE: 상태 추적의 최소 단위 필수 4필드.
     # FULL: CORE + 실행시간/위치 확장 필드. 사이트가 확장 필드를 거부하면
@@ -408,10 +370,16 @@ class LsfCommand:
     #       한 단계씩 자동 강등한다(그 필드만 포기).
     # FULL_MC: FULL + MultiCluster forwarding 필드. collect_clusters=True일 때만
     #       맨 앞 단계로 쓰고, 미지원 사이트면 FULL로 강등돼 run_time 등은 유지된다.
-    _BJOBS_CORE_FMT = "jobid stat exit_code job_name"
-    _BJOBS_FULL_FMT = (_BJOBS_CORE_FMT
-                       + " run_time start_time finish_time exec_cwd")
-    _BJOBS_FULL_MC_FMT = _BJOBS_FULL_FMT + " source_cluster forward_cluster"
+    # v10.2: -json → -noheader + delimiter=';' 복귀 (사용자 결정). 폭 지정은
+    # 두지 않는다 — LSF는 폭 미지정 시 필드별 **기본 폭으로 truncation**할 수
+    # 있으므로(특히 exec_cwd 긴 경로), 잘림이 관측되면 그 필드에만 폭을 준다.
+    _DELIM = "delimiter=';'"
+    _CORE_FIELDS = "jobid stat exit_code job_name"
+    _FULL_FIELDS = _CORE_FIELDS + " run_time start_time finish_time exec_cwd"
+    _BJOBS_CORE_FMT = f"{_CORE_FIELDS} {_DELIM}"
+    _BJOBS_FULL_FMT = f"{_FULL_FIELDS} {_DELIM}"
+    _BJOBS_FULL_MC_FMT = (f"{_FULL_FIELDS} source_cluster forward_cluster "
+                          f"{_DELIM}")
 
     def _bjobs(self, selector: List[str]) -> List[JobStatus]:
         # -a를 붙이지 않는다 — explicit job id를 주면 LSF는 -a 없이도
@@ -420,7 +388,7 @@ class LsfCommand:
         # 조회는 제거됐다. 되살릴 때는 -a 오염 문제를 다시 고려할 것.)
         def run(fmt: str) -> Optional[CommandResult]:
             argv = cmd_tokens(self.config.bjobs_path) + [
-                "-o", fmt, "-json"] + selector
+                "-noheader", "-o", fmt] + selector
             return self._run_query(argv)
 
         # 확장 필드/옵션 오류로 보이면 다음 포맷 단계로 영구 강등 후 재시도한다.
@@ -435,10 +403,9 @@ class LsfCommand:
             except LsfCommandError as e:
                 if (used_idx < len(self._bjobs_formats) - 1
                         and _looks_like_field_error(e.stderr or "")):
-                    # e.stderr만 본다 — JSON 파싱 실패 등 stderr 없는 예외의
-                    # str(e)에 stdout 발췌가 실려 필드 오류로 오판되면
-                    # 불필요한 영구 강등이 된다 (리뷰 B2). 필드 오류는 항상
-                    # LSF stderr로 온다(_run_or_nomatch가 실어줌).
+                    # e.stderr만 본다 — 필드 오류는 항상 LSF stderr로 온다
+                    # (_run_or_nomatch가 실어줌). str(e) 폴백은 stderr 없는
+                    # 예외 메시지의 우연한 단어로 오판 강등할 수 있어 금지.
                     with self._bjobs_fmt_lock:      # CAS — 동시 강등 1단만
                         if self._bjobs_fmt_idx == used_idx:
                             self._bjobs_fmt_idx = used_idx + 1
@@ -524,60 +491,61 @@ class LsfCommand:
 
     @staticmethod
     def _parse_bjobs(stdout: str) -> List[JobStatus]:
-        """bjobs -json 출력 파싱.
+        """bjobs delimiter(';') 출력 파싱 (v10.2: -json에서 복귀).
 
-        -o 필드명의 대문자 키(JOBID/STAT/...)로 값이 온다. 요청 안 한 필드는
-        키 자체가 없어 None으로 남는다(포맷 강등과 자연 호환). 개별 레코드
-        오류(ERROR 키 — 'Job <x> is not found' 등)는 그 레코드만 버린다 —
-        부재 확정은 호출자(bhist fallback → LOST)의 몫이다. stdout이 JSON이
-        아니면 LsfCommandError — '없음'이 아닌 '장애'로 취급해 LOST 오확정을
-        막는다."""
-        try:
-            data = json.loads(stdout or "{}")
-        except ValueError as e:
-            raise LsfCommandError(
-                f"bjobs -json 파싱 실패: {e} — {stdout[:200]!r}")
+        필드 순서는 _BJOBS_*_FMT 정의 순서 그대로다. 확장 필드는 **필드 수가
+        정확히 포맷과 맞을 때만** 신뢰한다 — 8=FULL, 10=FULL+MC. 그 외
+        (구형 열 누락, 값에 ';' 혼입으로 필드 밀림)는 오염을 피해 확장
+        필드를 버린다. 파싱 불가 행은 그 행만 버린다 — 부재 확정은
+        호출자(bhist fallback → LOST)의 몫이다."""
         out: List[JobStatus] = []
-        records = data.get("RECORDS") if isinstance(data, dict) else None
-        for rec in records or []:
-            if not isinstance(rec, dict):
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
                 continue
-            if rec.get("ERROR"):
-                log.debug("bjobs 오류 레코드 무시: %s", rec["ERROR"])
+            parts = [p.strip() for p in line.split(";")]
+            if len(parts) < 4:
+                log.debug("bjobs 파싱 불가 행 무시: %r", line)
                 continue
-            m = _ARRAY_ID_RE.match(str(rec.get("JOBID", "")))
+            m = _ARRAY_ID_RE.match(parts[0])
             if not m:
-                log.debug("bjobs job id 파싱 불가: %r", rec.get("JOBID"))
+                log.debug("bjobs job id 파싱 불가: %r", parts[0])
                 continue
-            stat_s = str(rec.get("STAT", ""))
-            state = LSF_STAT_MAP.get(stat_s)
+            state = LSF_STAT_MAP.get(parts[1])
             if state is None:
-                log.debug("알 수 없는 LSF 상태 %r → UNKWN", stat_s)
+                log.debug("알 수 없는 LSF 상태 %r → UNKWN", parts[1])
                 state = JobState.UNKWN
-            exit_s = _jfield(rec, "EXIT_CODE").strip()
             exit_code = None
-            if exit_s not in ("", "-"):
+            if parts[2] not in ("", "-"):
                 try:
-                    exit_code = int(exit_s)
+                    exit_code = int(parts[2])
                 except ValueError:
                     pass
-            # RUN 중 finish_time은 예상치(estimated)일 수 있다 —
-            # 실측만 저장하도록 종료 상태에서만 채운다
-            finish_time = None
-            if state in (JobState.DONE, JobState.EXIT):
-                finish_time = _parse_lsf_time(_jfield(rec, "FINISH_TIME"))
+            # parts[3] = job_name — 요청은 유지(사람 디버깅용)하되 사용 안 함
+            run_time_s = start_time = finish_time = working_dir = None
+            source_cluster = forward_cluster = None
+            if len(parts) in (8, 10):
+                run_time_s = _parse_run_time(parts[4])
+                start_time = _parse_lsf_time(parts[5])
+                # RUN 중 finish_time은 예상치(estimated)일 수 있다 —
+                # 실측만 저장하도록 종료 상태에서만 채운다
+                if state in (JobState.DONE, JobState.EXIT):
+                    finish_time = _parse_lsf_time(parts[6])
+                working_dir = _clean_field(parts[7])
+                if len(parts) == 10:      # MultiCluster forwarding
+                    source_cluster = _clean_field(parts[8])
+                    forward_cluster = _clean_field(parts[9])
+            elif len(parts) != 4:
+                log.debug("bjobs 필드 수 이상(%d) — 확장 필드 무시: %r",
+                          len(parts), line)
             out.append(JobStatus(
                 job_id=int(m.group(1)),
                 array_index=int(m.group(2)) if m.group(2) else None,
                 state=state, exit_code=exit_code,
-                run_time_s=_parse_run_time(_jfield(rec, "RUN_TIME")),
-                start_time=_parse_lsf_time(_jfield(rec, "START_TIME")),
-                finish_time=finish_time,
-                working_dir=_clean_field(_jfield(rec, "EXEC_CWD")),
-                source_cluster=_clean_field(
-                    _jfield(rec, "SOURCE_CLUSTER")),
-                forward_cluster=_clean_field(
-                    _jfield(rec, "FORWARD_CLUSTER"))))
+                run_time_s=run_time_s, start_time=start_time,
+                finish_time=finish_time, working_dir=working_dir,
+                source_cluster=source_cluster,
+                forward_cluster=forward_cluster))
         return out
 
     # ------------------------------------------------------------------
