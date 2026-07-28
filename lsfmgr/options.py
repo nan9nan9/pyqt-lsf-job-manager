@@ -31,17 +31,19 @@ CALL_ONLY_KEYS = frozenset({"label", "tags", "description"})
 #: queue/resource_req/output_dir/default_queue/lsf_group_root/bsub_path/
 #: bgdel_path: bsub 인자 조립 제출·group 부착물 제거(v10)로 무용 —
 #: 제출 옵션은 wrapper 커맨드 문자열에 직접 쓴다.
+#: bhist_path: bhist 조회(LOST 판정 fallback·상세 원문) 제거(v10.3)로 무용.
 DEPRECATED_KEYS = frozenset({
     "script_dir",
     "queue", "resource_req", "output_dir",
     "default_queue", "lsf_group_root", "bsub_path", "bgdel_path",
+    "bhist_path",
 })
 
 #: ②(manager) 전용 — Options에 포함되지 않고 config/store 구성에 쓰이는 키
 MANAGER_ONLY_KEYS = frozenset({
     "chunk_size",
     "arg_max",
-    "bjobs_path", "bkill_path", "bhist_path",
+    "bjobs_path", "bkill_path",
     "kill_status_policy", "kill_max_retry", "kill_retry_delay_s",
     "progress_min_interval_s", "progress_min_step_ratio",
     "poll_runtime_updates", "submit_finished_on_gate_reject",
@@ -195,7 +197,7 @@ def _validate(key: str, value: Any) -> Any:
         if v < 4096:
             raise ValueError(f"arg_max는 4096 이상 (got {value})")
         return v
-    if key in ("bjobs_path", "bkill_path", "bhist_path"):
+    if key in ("bjobs_path", "bkill_path"):
         validate_cmd_path(value, key)
         return value
     # test_submit_wrapper_pattern_cmd는 LsfConfig.__post_init__가 구조 검증한다

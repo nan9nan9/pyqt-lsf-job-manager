@@ -42,7 +42,7 @@ def test_real_loss_still_detected_after_recovery(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     rec = js.jobs()[0]
-    fake_lsf.vanish_job(rec.job_id, in_bhist=False)
+    fake_lsf.vanish_job(rec.job_id)
     with qtbot.waitSignal(manager.job_lost, timeout=10000):
         manager.query_once(js)
     assert js.summary["LOST"] == 1
@@ -156,32 +156,6 @@ def test_add_jobs_atomic_on_failure(store):
 # ----------------------------------------------------------------------
 # R3-12: bhist가 array element를 구분 못해 전 element에 동일 상태 오기록
 # ----------------------------------------------------------------------
-def test_array_bhist_fallback_per_element(qtbot, manager, fake_lsf):
-    """array element별 bhist fallback — element 단위 (id,idx) 키로 최종
-    상태가 구분돼야 한다 (v9: 레코드/LSF 수동 구성)."""
-    from tests.fake_lsf import FakeJob
-
-    js = manager.create_jobset(intended_count=3)
-    jsid, parent = js.id, 9100
-    manager.store.store_add_jobs([JobRecord(
-        job_id=parent, array_index=i, jobset_id=jsid,
-        job_key=f"{jsid}[{i}]", state=JobState.RUN, command="r")
-        for i in (1, 2, 3)])
-    stats = {1: ("DONE", 0), 2: ("EXIT", 9), 3: ("DONE", 0)}
-    for i, (st, ec) in stats.items():
-        fake_lsf.jobs[f"{parent}[{i}]"] = FakeJob(
-            job_id=parent, array_index=i, name=f"{jsid}[{i}]", group=None,
-            queue="q", command="r", stat=st, exit_code=ec,
-            vanished=True, in_bhist=True)      # bjobs 소실 → bhist fallback
-
-    manager.querier.query(jsid)
-
-    got = {r.array_index: (r.state, r.exit_code)
-           for r in manager.get_jobs(jsid)}
-    assert got[1] == (JobState.DONE, 0)
-    assert got[2] == (JobState.EXIT, 9)
-    assert got[3] == (JobState.DONE, 0)
-
 # ----------------------------------------------------------------------
 # R3-13: SQLite commit 실패 시 pending 잔존 → 다음 commit에 유령 반영
 # ----------------------------------------------------------------------

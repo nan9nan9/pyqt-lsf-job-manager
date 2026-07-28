@@ -133,17 +133,3 @@ def test_find_jobs_skips_deleted_jobset(store):
 #          죽인/실패 job이 성공으로 감춰진다(사이클 9에서 EXIT로 되돌림·동결).
 #          정상 완료는 "Done successfully"로 온다.
 # ----------------------------------------------------------------------
-def test_bhist_exited_stays_exit_regardless_of_code():
-    from lsfmgr.command import LsfCommand
-    out = (
-        "Job <100>, User <u>, ...\n"
-        "  ... Done successfully. The CPU time used is 1.0 seconds.\n"
-        "Job <101>, User <u>, ...\n"
-        "  ... Exited with exit code 0. The CPU time used is 1.0 seconds.\n"
-        "Job <102>, User <u>, ...\n"
-        "  ... Exited with exit code 7. The CPU time used is 1.0 seconds.\n"
-    )
-    res = LsfCommand._parse_bhist(out)
-    assert res[(100, None)] == (JobState.DONE, 0)   # 정상 완료만 DONE
-    assert res[(101, None)] == (JobState.EXIT, 0)   # "Exited" → EXIT (code 0도)
-    assert res[(102, None)] == (JobState.EXIT, 7)

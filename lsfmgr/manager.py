@@ -42,7 +42,8 @@ from .options import (
     validate_options,
 )
 from .pacer import StatePacer
-from .qt import CallTask, QCoreApplication, QObject, QRunnable, QThreadPool, QTimer, Signal
+from .qt import (QCoreApplication, QObject, QRunnable, QThreadPool,
+                 QTimer, Signal)
 from .reports import KillProgress, SubmitProgress
 from .states import JobRecord, JobSetRecord, JobState
 from .store.base import JobSetStore
@@ -86,7 +87,6 @@ class LsfJobManager(QObject):
     kill_progress = Signal(str, int, int)      # jobset_id, done, total (chunk kill)
     error_occurred = Signal(str, str)          # jobset_id, message
     handler_finished = Signal(str, str, object)  # jobset_id, handler_name, HandlerResult
-    job_detail_ready = Signal(str, str, str)   # jobset_id, job_key, 상세 텍스트
 
     def __init__(self, store: Optional[JobSetStore] = None,
                  config: Optional[LsfConfig] = None,
@@ -181,8 +181,6 @@ class LsfJobManager(QObject):
         # jobset별 마지막 polling interval — merge 시 폴링 설정 이관에 사용
         self._poll_intervals: Dict[str, float] = {}
 
-        self._misc_pool = QThreadPool(self)     # 단발 작업 (detail 조회 등)
-        self._misc_pool.setMaxThreadCount(2)
         self._shutdown_done = False
 
         # post_process — jobset이 전원 terminal에 도달하면 1회 실행되는 후처리
@@ -222,7 +220,6 @@ class LsfJobManager(QObject):
         self.kill_progress.connect(self._handle_relay("kill_progress"))
         self.error_occurred.connect(self._handle_relay("error_occurred"))
         self.handler_finished.connect(self._handle_relay("handler_finished"))
-        self.job_detail_ready.connect(self._handle_relay("job_detail_ready"))
         self.pre_submit_started.connect(self._handle_relay("pre_submit_started"))
         self.pre_submit_finished.connect(self._handle_relay("pre_submit_finished"))
         self.post_processing_started.connect(self._handle_relay("post_processing_started"))
@@ -406,49 +403,6 @@ class LsfJobManager(QObject):
         jobset_id = self._jsid(jobset_id)
         return self.store.get_jobs(jobset_id, states)
 
-    def fetch_job_detail(self, jobset_id: str, job_key: str) -> None:
-        """[async→Signal] job 1건의 실패/종료 상세 텍스트 조회 — 결과는
-        job_detail_ready(jobset_id, job_key, text).
-
-        UI에서 상태 셀 클릭 시 온디맨드로 호출한다 (폴링과 무관 — 자동 수집
-        오버헤드 없음). LSF에 제출됐던 job(job_id 확보)은 `bhist -l` 원문,
-        제출 실패 job(job_id 없음)은 저장된 fail_message(터미널 stderr/stdout).
-        blocking(bhist)은 worker 스레드에서 수행되므로 GUI가 멎지 않는다."""
-        if self._shutdown_done:
-            # shutdown 후 drain된 _misc_pool에 새 worker를 띄우면 아무도
-            # join하지 않는 좀비가 된다 (CS-8) — kill/submit 경로와 동일 가드
-            log.warning("shutdown 후 fetch_job_detail 무시: %s", jobset_id)
-            return
-        jobset_id = self._jsid(jobset_id)
-        rec = self.store.get_job(jobset_id, job_key)   # 존재 검증 (동기)
-
-        def work():
-            try:
-                text = self._job_detail_text(rec)
-            except Exception as e:               # noqa: BLE001 — CS-5
-                # LsfmgrError 외의 예외(bhist_path 오설정 FileNotFoundError 등)
-                # 도 반드시 signal로 응답한다 — 여기서 전파되면 _CallTask가
-                # 삼켜 job_detail_ready가 영영 안 오고 UI가 무응답이 된다
-                text = f"(조회 실패) {e}"
-            self.job_detail_ready.emit(jobset_id, job_key, text)
-
-        self._misc_pool.start(CallTask(work))
-
-    def job_detail(self, jobset_id: str, job_key: str) -> str:
-        """[sync, LSF 조회 포함] fetch_job_detail의 동기 버전 — blocking 주의
-        (GUI main 스레드에서는 fetch_job_detail 권장)."""
-        jobset_id = self._jsid(jobset_id)
-        return self._job_detail_text(self.store.get_job(jobset_id, job_key))
-
-    def _job_detail_text(self, rec: JobRecord) -> str:
-        """상세 텍스트 결정 — bhist -l 원문 우선, 없으면 fail_message."""
-        if rec.job_id is None:                # 제출 실패 — LSF에 이력 없음
-            return rec.fail_message or ""
-        text = self.command.bhist_detail(rec.job_id, rec.array_index)
-        if not text.strip():                  # bhist 이력 만료 등
-            return rec.fail_message or ""
-        return text
-
     # ------------------------------------------------------------------
     # Kill (FR-3)
     # ------------------------------------------------------------------
@@ -511,17 +465,21 @@ class LsfJobManager(QObject):
         if queued:
             self.kill_started.emit(jobset_id)
 
-    def kill_jobs(self, job_ids_or_jobset, job_keys: Optional[Sequence[str]] = None, *,
+    def kill_jobs(self, job_ids_or_jobset=None,
+                  job_keys: Optional[Sequence[str]] = None, *,
                   jobset_id: Optional[str] = None,
                   verify: Optional[bool] = None,
                   cluster_envpaths: Optional[Dict[str, str]] = None,
                   cancel_submit: bool = False) -> None:
         """[async→Signal] 개별 job kill (chunking 자동).
 
-        두 형태를 받는다:
+        세 형태를 받는다:
           - kill_jobs(js, [job_key, ...]) — jobset의 선택 job만 kill (GUI
             테이블 선택 행). array element는 "id[idx]"로 변환돼 그 element만
             죽는다(parent id로 죽이면 나머지 element까지 전부 kill됨).
+          - kill_jobs(job_keys=[...]) — **jobset 핸들 없이** key만으로 kill.
+            key로 레코드를 전역 검색하고, 전부 한 jobset 소속이면 그 jobset을
+            컨텍스트로 자동 채택한다(verify·신호·우선권이 그대로 동작).
           - kill_jobs([id 또는 "id[idx]", ...], jobset_id=...) — 원시 id 기반.
         jobset 컨텍스트가 있으면 optimistic EXIT 전이·verify가 켜지고 결과가
         핸들 kill_finished로도 중계된다.
@@ -543,11 +501,23 @@ class LsfJobManager(QObject):
             verify = bool(self._defaults.get("verify_kill", False))
         ids: Optional[List[object]] = None
         keys: Optional[Sequence[str]] = None
-        if isinstance(job_ids_or_jobset, JobSet) or job_keys is not None:
+        if job_ids_or_jobset is None and job_keys is None:
+            raise TypeError("kill_jobs: job_ids 또는 job_keys 중 하나는 필요")
+        if job_ids_or_jobset is None or isinstance(job_ids_or_jobset, JobSet):
             # key→id 해석은 killer worker에서 한다 (barrier 이후 — 제출 중이던
             # job의 id까지 잡는다). 여기서 미리 풀면 그 job이 kill을 빠져나간다.
-            jsid = self._jsid(job_ids_or_jobset)
             keys = list(job_keys or ())
+            if job_ids_or_jobset is not None:
+                jsid = self._jsid(job_ids_or_jobset)
+            elif jobset_id is not None:
+                jsid = self._jsid(jobset_id)
+            else:
+                # 핸들 없는 key 호출 — 소유 jobset을 역추적한다. 하나면 그걸
+                # 컨텍스트로 쓰고(verify/신호/우선권 유지), 여러 jobset에
+                # 걸치면 컨텍스트 없이(전역) 죽인다.
+                owners = {r.jobset_id
+                          for r in self.store.find_jobs_by_keys(set(keys))}
+                jsid = owners.pop() if len(owners) == 1 else ""
         else:
             # 원시 id 경로 — caller가 문자열을 그대로 넘긴다. array element를
             # "id[idx]"로 지정하는데 그 array를 monitor가 (id, None) 단일
@@ -573,7 +543,11 @@ class LsfJobManager(QObject):
                                        jobset_id=jsid or "",
                                        cluster_envpaths=cluster_envpaths,
                                        scope=scope)
-        if jsid and queued:              # jobset 컨텍스트 + 실제 큐잉일 때만
+        if queued:                       # 실제 큐잉일 때만 (shutdown 경합 제외)
+            # 전역 kill(jsid="")도 발화한다 — started/finished 짝 계약은
+            # jobset 유무와 무관하다(안 그러면 전역 kill을 건 UI가 완료만
+            # 받고 착수를 못 받아 진행 표시를 못 켠다). 핸들 중계는 jsid가
+            # 빈 값이면 자연히 no-op.
             self.kill_started.emit(jsid)   # killer 등록 후 (pull 일치)
 
     def create_jobset(self, commands: Sequence = (), *,
@@ -1034,14 +1008,11 @@ class LsfJobManager(QObject):
             pass
         # 각 컴포넌트를 best-effort로 종료 — 하나가 예외를 던져도 나머지 스레드는
         # 반드시 join해야 좀비/core dump가 안 남는다.
-        # misc_pool은 polling보다 먼저 drain — 단발 태스크가 폴링에 새
-        # 작업을 거는 것을 막고 종료한다.
         # pacer는 맨 먼저 — 이후엔 이벤트루프가 안 돌아 타이머가 안 뛰므로 밀린
         # 전이가 GUI에 영영 안 나간다. stop()은 보류분을 즉시 내보내고, 이후
         # 발화(submitter.shutdown의 취소 배치 등)를 지연 없이 통과시킨다.
         steps = [("handlers", self.handlers.shutdown),
                  ("submitter", self.submitter.shutdown),
-                 ("misc_pool", lambda: self._misc_pool.waitForDone(-1)),
                  ("post_pool", lambda: self._post_pool.waitForDone(-1)),
                  ("polling", self.polling.shutdown),
                  ("killer", self.killer.shutdown),

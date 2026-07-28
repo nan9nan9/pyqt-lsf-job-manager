@@ -394,7 +394,7 @@ class _KillTask(QRunnable):
         still_alive: Optional[int] = None
         alive_keys: set = set()
         verify_changed: List = []
-        if self.verify and self.jobset_id:
+        if self.verify:            # jobset 없어도 직접 조회로 검증 (v10.3)
             still_alive, alive_keys, verify_changed = \
                 self._verify(verify_targets)
 
@@ -419,9 +419,12 @@ class _KillTask(QRunnable):
             errors=errors)
 
     def _resolve_keys(self) -> List[str]:
-        """job_key → target 문자열. 미제출(job_id None)·소실 key는 제외."""
-        recs = {r.job_key: r
-                for r in self.killer.store.get_jobs(self.jobset_id)}
+        """job_key → target 문자열. 미제출(job_id None)·소실 key는 제외.
+        jobset 컨텍스트가 없으면 key로 전역 검색한다(GUI가 핸들 없이 행
+        선택만으로 kill하는 경로)."""
+        pool = (self.killer.store.get_jobs(self.jobset_id) if self.jobset_id
+                else self.killer.store.find_jobs_by_keys(set(self.job_keys or ())))
+        recs = {r.job_key: r for r in pool}
         out = []
         for key in (self.job_keys or ()):
             r = recs.get(key)
@@ -505,6 +508,25 @@ class _KillTask(QRunnable):
                 changed.append(new)
         return changed
 
+    def _verify_direct(self, whole: set, exact: set, ranges: List):
+        """jobset 없는 verify — 대상 parent id를 직접 chunked 조회한다.
+        반환: (JobStatus 목록, 전이 목록) / 조회 불완전이면 (None, []).
+        한 chunk라도 실패하면 '미검증'(None)으로 정직하게 보고한다 — 본 것만
+        세면 생존을 과소집계해 kill_finished가 '전부 정리됨'으로 오보된다."""
+        pids = sorted(whole | {p for p, _ in exact} | {p for p, _, _ in ranges})
+        if not pids:
+            return [], []
+        try:
+            sts, failed = self.killer.command.bjobs_by_ids(pids)
+        except LsfmgrError as e:
+            log.warning("kill verify 직접 조회 실패: %s", e)
+            return None, []
+        if failed:
+            log.warning("kill verify 직접 조회 일부 실패(미검증): %d건",
+                        len(failed))
+            return None, []
+        return sts, []
+
     def _kill_confirm(self, targets: List[str], errors: List[str],
                       envpath: str = ""
                       ) -> Tuple[int, int, int, set]:
@@ -576,13 +598,22 @@ class _KillTask(QRunnable):
                 exact.add((pid, int(m.group(2))))
             else:                                  # 범위 [m-n]
                 ranges.append((pid, int(m.group(2)), int(m.group(3))))
-        try:
-            qr = k.querier.query(self.jobset_id)   # Store 갱신 + 전이 수집
-        except LsfmgrError as e:
-            log.warning("kill verify 조회 실패: %s", e)
-            # 조회 실패는 '미확인'이다 — 수(-1 같은 센티넬)로 뭉개지 않는다.
-            # None을 caller가 KillReport.still_alive(None=미검증)로 그대로 전달.
-            return None, set(), []
+        if self.jobset_id:
+            try:
+                qr = k.querier.query(self.jobset_id)   # Store 갱신 + 전이 수집
+            except LsfmgrError as e:
+                log.warning("kill verify 조회 실패: %s", e)
+                # 조회 실패는 '미확인'이다 — 수(-1 같은 센티넬)로 뭉개지 않는다.
+                # None을 caller가 KillReport.still_alive(None=미검증)로 전달.
+                return None, set(), []
+            pool = k.store.get_jobs(self.jobset_id)
+            changed = list(qr.changed)
+        else:
+            # jobset 컨텍스트 없는 전역 kill — polling 파이프라인(jobset 단위)을
+            # 못 쓰므로 대상 id를 직접 조회해 잔존만 센다(store 갱신·전이 없음).
+            pool, changed = self._verify_direct(whole, exact, ranges)
+            if pool is None:
+                return None, set(), []
 
         # element/범위 target은 (job_id, array_index)로 정확 매칭한다.
         # array_index=None 레코드(비array job, 또는 monitor가 array를 접은
@@ -599,10 +630,23 @@ class _KillTask(QRunnable):
             return any(r.job_id == pid and lo <= r.array_index <= hi
                        for pid, lo, hi in ranges)
 
-        alive = [r for r in k.store.get_jobs(self.jobset_id)
+        alive = [r for r in pool
                  if _hit(r) and r.state.is_on_lsf
                  and r.state not in (JobState.UNKWN, JobState.ZOMBI)]
         # 생존 수 + 생존 레코드의 job_key 집합 + 조회 전이분을 함께 반환한다.
         # 생존분은 caller가 optimistic EXIT 마킹에서 제외해(EXIT로 덮어 숨기지
         # 않도록) 폴링/재kill에 남기고, 전이분은 report.changed로 합류시킨다.
-        return len(alive), {r.job_key for r in alive}, list(qr.changed)
+        if self.jobset_id:
+            return len(alive), {r.job_key for r in alive}, changed
+        # 전역 경로: pool이 JobStatus(=job_key 없음)라 생존 레코드의 key를
+        # 레코드 풀에서 역매핑한다 — caller가 생존분을 optimistic EXIT
+        # 마킹에서 제외하는 데 쓴다(생존 job을 죽은 것처럼 덮지 않기).
+        live = {(st.job_id, st.array_index) for st in alive}
+        keys = set()
+        if live:
+            try:
+                keys = {r.job_key for r in self._record_pool()
+                        if (r.job_id, r.array_index) in live}
+            except Exception as e:       # noqa: BLE001 — 집계 수치는 유효
+                log.warning("verify 생존 레코드 역매핑 실패(무시): %r", e)
+        return len(alive), keys, changed

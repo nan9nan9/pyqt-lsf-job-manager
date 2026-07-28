@@ -145,21 +145,6 @@ def test_wrapper_submitted_array_not_lost(qtbot, manager, fake_lsf):
     assert rec.state is JobState.EXIT and rec.exit_code == 7
 
 
-def test_wrapper_submitted_array_bhist_fallback(qtbot, manager, fake_lsf):
-    """bjobs에서 사라진 wrapper-array job도 bhist element 블록 집계로 종결."""
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js = submit_cmds(manager, 
-            [["customwrapper_sub", "-J", "arr[1-2]", "echo", "hi"]],
-            auto_poll=False, wrapper=True)
-    rec = js.jobs()[0]
-    fake_lsf.set_all("DONE")
-    fake_lsf.vanish_job(rec.job_id, in_bhist=True)
-
-    manager.querier.query(js.id)
-    rec = js.jobs()[0]
-    assert rec.state is JobState.DONE     # LOST가 아니라 bhist 집계로 DONE
-
-
 # ----------------------------------------------------------------------
 # 6. polling interval 검증
 # ----------------------------------------------------------------------

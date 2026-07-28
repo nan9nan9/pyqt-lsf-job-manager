@@ -1,7 +1,7 @@
 """FakeLsf — LSF cluster를 흉내내는 mock runner (NFR-8).
 
 LsfCommand의 runner 시그니처 (argv, timeout) -> CommandResult 를 구현하여
-subprocess 없이 bsub/bjobs/bkill/bhist/bmod/bgdel 동작을 시뮬레이션한다.
+subprocess 없이 제출(wrapper)/bjobs/bkill 동작을 시뮬레이션한다.
 """
 from __future__ import annotations
 
@@ -25,7 +25,6 @@ class FakeJob:
     stat: str = "PEND"           # PEND/RUN/DONE/EXIT
     exit_code: Optional[int] = None
     vanished: bool = False       # bjobs에서 사라짐 (LOST 시나리오)
-    in_bhist: bool = True        # vanished여도 bhist에는 남는지
     env: Optional[str] = None    # bsub -env 원문
     run_time_s: Optional[int] = None     # LSF run_time(초)
     start_time: Optional[str] = None     # bjobs -o 시각 원문
@@ -52,10 +51,7 @@ class FakeLsf:
         self.fail_next_bsub = 0              # 앞으로 N회 bsub rc=1
         self.no_jobid_next_bsub = 0          # 앞으로 N회 id 파싱 불가 출력
         self.reject_group = False            # -g 지정 시 거부
-        self.fail_all_queries = False        # bjobs/bhist 장애 (LSF down)
-        self.fail_bhist = False              # bhist만 exit 1 (working dir full 등 —
-                                             # bjobs는 정상, bhist 로그 기록 실패)
-        self.bhist_fail_ids: set = set()     # 이 job_id가 포함된 bhist 호출만 exit 1
+        self.fail_all_queries = False        # bjobs 장애 (LSF down)
                                              # (chunk 단위 부분 실패 재현용)
         self.bjobs_fail_ids: set = set()     # 이 job_id가 포함된 bjobs id 조회만
                                              # rc=255 (bjobs chunk 부분 실패 재현용)
@@ -127,13 +123,12 @@ class FakeLsf:
             self.jobs[key].stat = stat
             self.jobs[key].exit_code = exit_code
 
-    def vanish_job(self, job_id: int, in_bhist: bool = True) -> None:
-        """bjobs에서 사라지게 함 (LOST/bhist fallback 시나리오)."""
+    def vanish_job(self, job_id: int) -> None:
+        """bjobs에서 사라지게 함 (purge → LOST 시나리오)."""
         with self.lock:
             for j in self.jobs.values():
                 if j.job_id == job_id:
                     j.vanished = True
-                    j.in_bhist = in_bhist
 
     def alive_jobs(self) -> List[FakeJob]:
         with self.lock:
@@ -321,57 +316,15 @@ class FakeLsf:
                              if stderr_lines else "")
 
     # ------------------------------------------------------------------
-    # bhist
+    # bmod / bgdel / bhist
     # ------------------------------------------------------------------
+    # v10.1: bmod/bgdel, v10.3: bhist는 라이브러리가 더는 호출하지 않는다.
+    # 핸들러를 아예 지우면 미지-명령 폴백(_submit_generic)이 이를 '제출'로
+    # 오인해 가짜 job을 만들므로, 실수 호출이 rc=127로 즉시 드러나는
+    # 스텁만 남긴다.
     def _do_bhist(self, args: List[str]) -> CommandResult:
-        if self.fail_all_queries:
-            return CommandResult(255, "", "LSF is down. Please wait ...\n")
-        if self.fail_bhist:
-            # working dir/파티션 full → bhist가 자기 로그를 못 써 exit 1.
-            # 문구에 _NO_JOB_PATTERNS가 없어야 '장애'로 취급된다("없음" 아님).
-            return CommandResult(
-                1, "", "bhist: cannot write to log directory: No space left\n")
-        _, rest = _parse_opts(args, {"-n"}, flags={"-l"})
-        if self.bhist_fail_ids:
-            # 이 호출(chunk)에 실패 지정된 id가 하나라도 있으면 chunk 전체 exit 1
-            req = {int(m.group(1)) for a in rest
-                   if (m := re.match(r"^(\d+)", a))}
-            if req & self.bhist_fail_ids:
-                return CommandResult(
-                    1, "", "bhist: cannot write to log directory: No space left\n")
-        blocks = []
-        for a in rest:
-            m = re.match(r"^(\d+)(?:\[(\d+)\])?$", a)   # "id" 또는 "id[idx]"
-            if not m:
-                continue
-            jid = int(m.group(1))
-            idx = int(m.group(2)) if m.group(2) else None
-            # 실제 bhist처럼 array는 element별 블록("Job <id[idx]>") 출력
-            for j in self.jobs.values():
-                if j.job_id != jid or not j.in_bhist:
-                    continue
-                if idx is not None and j.array_index != idx:
-                    continue
-                if j.stat == "DONE":
-                    body = "Done successfully."
-                elif j.stat == "EXIT":
-                    body = f"Exited with exit code {j.exit_code or 1}."
-                else:
-                    body = "Job is still running."
-                jid_s = (f"{jid}[{j.array_index}]"
-                         if j.array_index is not None else str(jid))
-                blocks.append(
-                    f"Job <{jid_s}>, Job Name <{j.name}>\n  {body}\n")
-        if not blocks:
-            return CommandResult(255, "", "No matching job found\n")
-        return CommandResult(0, "\n".join(blocks), "")
+        return CommandResult(127, "", "bhist: command not found\n")
 
-    # ------------------------------------------------------------------
-    # bmod / bgdel
-    # ------------------------------------------------------------------
-    # v10.1: bmod/bgdel은 라이브러리가 더는 호출하지 않는다. 핸들러를 아예
-    # 지우면 미지-명령 폴백(_submit_generic)이 이를 '제출'로 오인해 가짜
-    # job을 만들므로, 실수 호출이 rc=127로 즉시 드러나는 스텁만 남긴다.
     def _do_bmod(self, args: List[str]) -> CommandResult:
         return CommandResult(127, "", "bmod: v10에서 미사용 (호출되면 회귀)")
 

@@ -12,7 +12,7 @@
     PEND만 / 선택 행만 (FR-3, job_id chunk 단일 경로)
   - JobSet handler: RUN 중 폴링마다 job 출력 파싱 + 종료 시 최종 1회 (FR-7)
   - post_process: 전원 terminal 도달 시 worker 에서 1회 종합 집계 (FR-10)
-  - job 더블클릭 → fetch_job_detail (bhist -l 온디맨드) → 로그로 표시
+  - job 더블클릭 → 로컬 레코드 상세 (LSF 호출 0)
 
 테스트 환경은 저장소 동봉 mocklsf(가상 LSF)이며, 실제 LSF 는 LSFMGR_REAL=1.
 
@@ -293,7 +293,6 @@ class Dashboard(QWidget):
         mgr.post_processing_started.connect(
             lambda j: self._log(j, "post_processing_started"))
         mgr.post_processing_finished.connect(self._on_post_process)
-        mgr.job_detail_ready.connect(self._on_detail)
         mgr.error_occurred.connect(lambda j, msg: self._log(j, f"ERROR {msg}"))
 
     def _add_row(self, jsid, label):
@@ -455,16 +454,22 @@ class Dashboard(QWidget):
                         f"경과={d['elapsed_s']}s '{d['last'][:40]}'")
 
     def _on_double_click(self, item):
+        """행 상세 — 로컬 스냅샷만 읽는다 (v10.3: bhist 온디맨드 조회 삭제)."""
         js = self._handle()
         if js is None:
             return
         key = self.jobtable.item(item.row(), 0).text()
-        self._log(js.id, f"상세 조회 요청: {key} (bhist -l 온디맨드)")
-        self.mgr.fetch_job_detail(js.id, key)     # 결과는 job_detail_ready
-
-    def _on_detail(self, jsid, key, text):
-        head = "\n".join(text.splitlines()[:6]) or "(내용 없음)"
-        self._log(jsid, f"상세 {key}:\n{head}")
+        rec = next((r for r in js.jobs() if r.job_key == key), None)
+        if rec is None:
+            return
+        fields = [("job_id", rec.job_id), ("state", rec.state.name),
+                  ("exit_code", rec.exit_code), ("run_time_s", rec.run_time_s),
+                  ("start", rec.start_time), ("finish", rec.finish_time),
+                  ("cluster", rec.forward_cluster or rec.source_cluster),
+                  ("cwd", rec.working_dir), ("command", rec.command),
+                  ("fail", rec.fail_message)]
+        body = "\n".join(f"  {k}={v}" for k, v in fields if v not in (None, ""))
+        self._log(js.id, f"상세 {key}:\n{body}")
 
     # ------------------------------------------------------------------
     # 요약/테이블 갱신

@@ -139,9 +139,8 @@ def test_bjobs_partial_failure_defers_then_recovers(qtbot, fake_lsf):
             js = submit_cmds(mgr, ["f 0", "f 1", "f 2"], auto_poll=False)
         recs = js.jobs()
         fake_lsf.set_all("RUN")
-        # 가운데 job의 chunk만 장애 + bhist도 장애 (이중 실패 → 보류)
+        # 가운데 job의 chunk만 장애 (조회 불가 → 보류)
         fake_lsf.bjobs_fail_ids = {recs[1].job_id}
-        fake_lsf.bhist_fail_ids = {recs[1].job_id}
         mgr.querier.query(js.id)
         after = {r.job_key: r.state for r in js.jobs()}
         assert after[recs[0].job_key] is JobState.RUN
@@ -149,7 +148,6 @@ def test_bjobs_partial_failure_defers_then_recovers(qtbot, fake_lsf):
         assert after[recs[1].job_key] is JobState.PEND  # 보류 (LOST 아님)
 
         fake_lsf.bjobs_fail_ids = set()                 # 장애 해소
-        fake_lsf.bhist_fail_ids = set()
         mgr.querier.query(js.id)
         assert js.jobs()[1].state is JobState.RUN       # 복구
     finally:

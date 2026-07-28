@@ -122,33 +122,8 @@ def test_core_downgrade_preserves_runtime_fields(qtbot, manager, fake_lsf,
 
 
 # ----------------------------------------------------------------------
-# bhist fallback → LOST (FR-4.3, 수용 기준 6)
+# bjobs 미발견 → LOST (FR-4.3, 수용 기준 6)
 # ----------------------------------------------------------------------
-def test_bhist_fallback(qtbot, manager, fake_lsf, submitted):
-    recs = manager.get_jobs(submitted)
-    fake_lsf.set_job(recs[0].job_id, "DONE", 0)
-    fake_lsf.vanish_job(recs[0].job_id, in_bhist=True)   # bjobs엔 없음
-    with qtbot.waitSignal(manager.jobset_updated, timeout=10000):
-        manager.query_once(submitted)
-    rec = manager.store.get_job(submitted, recs[0].job_key)
-    assert rec.state is JobState.DONE                    # bhist로 복구
-
-
-def test_lost_when_bjobs_and_bhist_both_miss(qtbot, manager, fake_lsf,
-                                             submitted):
-    recs = manager.get_jobs(submitted)
-    fake_lsf.vanish_job(recs[0].job_id, in_bhist=False)
-    with qtbot.waitSignal(manager.job_lost, timeout=10000) as blocker:
-        manager.query_once(submitted)
-    jsid, lost_rec = blocker.args
-    assert jsid == submitted
-    assert lost_rec.state is JobState.LOST
-    assert lost_rec.fail_reason == "NOT_FOUND_IN_LSF"
-    s = manager.summary(submitted)
-    assert s["LOST"] == 1
-    assert sum(v for k, v in s.items() if k != "total") == s["total"]
-
-
 # ----------------------------------------------------------------------
 # 주기 polling (FR-4.4)
 # ----------------------------------------------------------------------

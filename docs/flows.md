@@ -133,9 +133,9 @@ polling QThread (jobset당 QTimer, interval마다)
 ──────────────────────────────────────────────
 ① probe: bjobs -g(group) / -J(name) / array id       # 부착물 기반
 ② leftover: 못 찾은 job_id들 → bjobs <id...> chunk    # 종료 상태도 여기서 잡힘
-③ 여전히 missing → bhist chunk (이력 fallback)
+③ 여전히 missing → LOST 확정 (v10.3: bhist fallback 삭제)
 ④ 판정:
-     bjobs/bhist에서 발견     → 상태 반영 (guard CAS — 그새 바뀐 레코드 보호)
+     bjobs에서 발견           → 상태 반영 (guard CAS — 그새 바뀐 레코드 보호)
      미발견 + 조회 전부 성공  → LOST 확정 (NOT_FOUND_IN_LSF)
      미발견 + 조회 실패 섞임  → 판단 보류 (다음 사이클 재시도) ◀ 장애≠부재
 ⑤ 통지: jobset_updated(요약) + jobs_updated(변경분만) + job_lost

@@ -1,6 +1,6 @@
 """상태 조회/모니터링 (FR-4).
 
-- JobsetQuerier: job_id chunked bjobs 조회 + bhist fallback → LOST 전이.
+- JobsetQuerier: job_id chunked bjobs 조회 → 미발견은 LOST 전이.
   (v10: group/name 부착물 조회 제거 — id 기반 단일 경로.)
   blocking이므로 반드시 worker 스레드에서 호출.
 - PollingService: 전용 QThread + 그 스레드 소속 QTimer로 주기 polling (QT-1).
@@ -97,7 +97,7 @@ class JobsetQuerier:
                     return _aggregate_elements(rec, list(elems.values()))
             return None
 
-        # --- 3) 상태 반영 + bjobs 미발견분은 bhist fallback (FR-4.3) ---
+        # --- 3) 상태 반영 + bjobs 미발견분은 LOST 판정 (FR-4.3) ---
         # 이 사이클은 시작 시점 스냅샷(targets) 기반이고 bjobs 왕복 동안 수 초가
         # 흐른다 — 그 사이 레코드가 바뀌었으면(재제출(submit)의 리셋→재제출 등)
         # 스냅샷 기준 갱신이 새 job_id/상태를 옛 값으로 되돌린다. guard(CAS)로
@@ -109,7 +109,7 @@ class JobsetQuerier:
         # 전이는 개별 실행하지 않고 spec으로 모아 store.transition_many로
         # 한 번에 적용한다 — 수만 건이 한 사이클에 몰릴 때 건당 처리가
         # 폴링 스레드를 블로킹하지 않게 한다.
-        update_specs = []       # bjobs/bhist 기반 일반 전이 [(key,state,guard,fields)]
+        update_specs = []       # bjobs 기반 일반 전이 [(key,state,guard,fields)]
         lost_specs = []         # LOST 전이 (반환분을 lost로도 분류)
         missing: List[JobRecord] = []
         runtime_updates = self.command.config.poll_runtime_updates
@@ -145,44 +145,18 @@ class JobsetQuerier:
 
         deferred: List[str] = []             # 이번 사이클 판단 보류 job_key
         if missing:
-            hist: Dict = {}
-            bhist_failed: set = set()        # bhist 조회 실패한 job_id (chunk 격리)
-            ids = sorted({r.job_id for r in missing if r.job_id is not None})
-            if ids:
-                try:
-                    hist, bhist_failed = self.command.bhist_states(ids)
-                except LsfmgrError as e:
-                    # 예상 밖 전면 실패는 전원 보류로 폴백 (기존 안전망 유지)
-                    log.warning("조회 실패(bhist): %s", e)
-                    bhist_failed = set(ids)
+            # v10.3: bhist fallback 삭제 — 최종 상태 복원 수단은 bjobs뿐이다.
+            # explicit id 조회는 CLEAN_PERIOD 내 종료 job을 보여주므로 폴링
+            # 주기(수십 초) 안에 종료를 관측한다. 그래도 안 보이면 purge된
+            # 것이고, 그 job의 최종 상태는 어디서도 알 수 없다 = LOST.
             for rec in missing:
-                # bhist 키는 (job_id, array_index) — array element별 구분
-                found = None
-                if rec.job_id is not None:
-                    found = (hist.get((rec.job_id, rec.array_index))
-                             or hist.get((rec.job_id, None)))
-                    if found is None and rec.array_index is None:
-                        # wrapper가 제출한 array — element 블록들을 집계
-                        entries = [v for (jid, _i), v in hist.items()
-                                   if jid == rec.job_id]
-                        if entries:
-                            found = _aggregate_hist(entries)
-                if found is not None:
-                    state, exit_code = found
-                    update_specs.append((rec.job_key, state, unchanged(rec),
-                                         {"exit_code": exit_code}))
-                elif (rec.job_id in bhist_failed
-                      or rec.job_id in bjobs_failed
-                      or (rec.job_id is None
-                          and (bhist_failed or bjobs_failed))):
-                    # 마지막 조건: job_id 없는 레코드는 id 기반 조회(bjobs
-                    # chunk/bhist)로 확인 자체가 불가 — 그 수단들의 장애가
-                    # 섞인 사이클엔 보수적으로 보류한다 (FR-4.3).
-                    # 이 job이 속한 bjobs/bhist chunk가 실패한 사이클은 LOST
-                    # 확정을 보류한다 — LSF 순단이면 다음 사이클에서 정상
-                    # 복구되고, 진짜 소실이면 장애 해소 후 사이클에서 확정된다.
-                    # chunk 격리 덕에 다른 chunk에서 확인된 job은 여기서
-                    # 안 걸리고 정상 전이/LOST 확정된다.
+                if (rec.job_id in bjobs_failed
+                        or (rec.job_id is None and bjobs_failed)):
+                    # job_id 없는 레코드는 id 기반 조회로 확인 자체가 불가 —
+                    # bjobs chunk 장애가 섞인 사이클엔 보수적으로 보류한다
+                    # (FR-4.3). LSF 순단이면 다음 사이클에 정상 복구되고,
+                    # 진짜 소실이면 장애 해소 후 사이클에서 확정된다. chunk
+                    # 격리 덕에 다른 chunk에서 확인된 job은 정상 전이된다.
                     deferred.append(rec.job_key)
                 else:
                     lost_specs.append((rec.job_key, JobState.LOST,
@@ -251,17 +225,6 @@ def _aggregate_elements(rec: JobRecord,
         # MC — 한 array의 element들은 같은 클러스터로 forward된다(대표값)
         source_cluster=srcs[0] if srcs else None,
         forward_cluster=fwds[0] if fwds else None)
-
-
-def _aggregate_hist(entries: List[Tuple[JobState, Optional[int]]]
-                    ) -> Tuple[JobState, Optional[int]]:
-    """bhist element 블록들의 (state, exit_code) 집계 — bhist는 종료 상태만
-    기록하므로 하나라도 EXIT면 EXIT, 아니면 DONE."""
-    bad = [(s, c) for s, c in entries if s is JobState.EXIT]
-    if bad:
-        return (JobState.EXIT,
-                next((c for _s, c in bad if c is not None), None))
-    return (JobState.DONE, 0)
 
 
 class _PollWorker(QObject):

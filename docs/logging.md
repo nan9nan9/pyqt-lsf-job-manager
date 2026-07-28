@@ -16,7 +16,7 @@
 
 ### 1.1 실제 실행(subprocess) 추적
 
-submit(bsub/wrapper)·bjobs·bkill·bhist·bmod·bgdel **모든 LSF subprocess는 단일
+submit(wrapper)·bjobs·bkill **모든 LSF subprocess는 단일
 funnel `LsfCommand._run`을 지납니다.** 이 한 지점에서 DEBUG 로그를 찍으므로,
 "어떤 명령이 어느 스레드에서 어떤 cwd로 실행되고 얼마나 걸려 무슨 결과가
 나왔는지"를 빠짐없이 추적할 수 있습니다.

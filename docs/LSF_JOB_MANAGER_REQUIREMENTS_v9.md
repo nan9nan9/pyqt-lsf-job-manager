@@ -102,7 +102,7 @@ if mgr.can_submit(js):
 | `kill_status_policy` | "optimistic" | ② | kill 확인 시 즉시 EXIT / "actual"=폴링만 |
 | `kill_max_retry` | 2 | ② | kill 확인 실패 재시도 |
 | `collect_clusters` | False | ② | MC forward 정보 수집(opt-in) |
-| `bjobs_path` 등 명령 경로 | PATH 탐색 | ② | LSF 조회/kill 명령 위치 (bjobs/bkill/bhist) |
+| `bjobs_path` 등 명령 경로 | PATH 탐색 | ② | LSF 조회/kill 명령 위치 (bjobs/bkill) |
 
 > v7 대비 삭제된 옵션: `mode`(array 자동/강제), `persistent`/`db_path`(SQLite),
 > `bmod_path`(add_job 제거).
@@ -136,7 +136,6 @@ mgr.kill_jobs(js, job_keys, *, verify=None, cluster_envpaths=None, cancel_submit
 mgr.cancel_submit(js)                        # 진행 중 submit 중단
 mgr.start_polling(js, interval_s=None); mgr.stop_polling(js)
 mgr.query_once(js)                           # 1회 강제 조회
-mgr.fetch_job_detail(js, job_key)            # bhist -l 온디맨드 (async)
 
 # --- handler (FR-7) ---
 mgr.add_handler(js, name, fn, *, start_states=None, end_states=None)
@@ -144,7 +143,7 @@ mgr.remove_handler(js, name)
 
 # --- 조회/복원 ---
 mgr.jobset(jobset_id) -> JobSet              # ID로 핸들 재획득
-mgr.search_jobsets(...); mgr.detect_lost(js); mgr.job_detail(js, job_key)  # 동기
+mgr.search_jobsets(...); mgr.detect_lost(js)                 # 동기
 ```
 
 ### 1.4 JobSet 핸들 — 조회 + Signal 전용 뷰 (QObject)
@@ -161,7 +160,6 @@ class JobSet(QObject):
     kill_progress   = Signal(int, int) # (done, total)
     kill_finished   = Signal(object)   # KillReport
     handler_finished= Signal(str, object)      # name, HandlerResult
-    job_detail_ready= Signal(str, str)         # job_key, text
     pre_submit_started/pre_submit_finished        # pre_submit 게이트 (FR-9)
     post_processing_started/post_processing_finished      # post_process 후처리 (FR-10)
     error_occurred  = Signal(str)
@@ -342,7 +340,7 @@ JobSetStore(ABC) ── InMemoryStore
 - **FR-4 Monitoring**: 조회는 explicit job id chunked `bjobs -noheader
   -o "... delimiter=';'"`뿐(v10.2에서 -json 복귀, 폭 미지정; v10에서
   group/name 조회 제거 — wrapper job과 경로 통일), `is_on_lsf`만 조회,
-  못 찾은 id → bhist chunk fallback → 그래도 없으면 `LOST`. polling은 batch 반영 후
+  못 찾은 id → `LOST` 확정(v10.3: bhist fallback 삭제). polling은 batch 반영 후
   Signal(**FR-4.1** 요약+변경분, **FR-4.2** LOST 확정).
   - **FR-4.3 판단 보류**: 조회 실패(장애)와 부재(LOST)를 구분 — 미발견이라도
     조회에 **실패가 섞였으면 LOST 확정 안 함**(다음 사이클 재시도). chunk 단위
@@ -464,7 +462,7 @@ Qt 비의존 유지: options/config/states/command/store/jobset_core (Qt 없이 
 3. 부착물 전부 유실 시에도 JobSet만으로 조회/kill 동작
 4. 요약 합계 == intended_count (생성/merge/remove 후에도)
 5. polling 호출 횟수 ∝ JobSet 수 (job 수 아님)
-6. bjobs 소실 → bhist → LOST 누락 없음, 조회 실패 섞이면 보류(FR-4.3)
+6. bjobs 소실 → LOST 누락 없음, 조회 실패 섞이면 보류(FR-4.3)
 7. GUI 응답성 — main 스레드 100ms 이상 정지 없음
 8. PyQt5·PySide6 각각 전체 테스트 통과 (`QT_API` 전환만으로)
 9. 동시성 — submit+polling+kill 동시 수행 시 무결성, **kill 우선권**(진행 중 submit

@@ -91,6 +91,21 @@ class JobSetStore(ABC):
             out.extend(r for r in jobs if r.job_id in job_ids)
         return out
 
+    def find_jobs_by_keys(self, job_keys: Set[str]) -> List[JobRecord]:
+        """job_key 집합의 레코드를 jobset 무관 전역 검색 — GUI가 테이블 행의
+        job_key만 들고 jobset 핸들 없이 kill할 때 쓴다(find_jobs의 key판).
+        기본 구현은 jobset 순회, 백엔드가 최적화해도 된다."""
+        if not job_keys:
+            return []
+        out: List[JobRecord] = []
+        for js in self.list_jobsets():
+            try:                          # find_jobs와 같은 이유 — 소실 무시
+                jobs = self.get_jobs(js.jobset_id)
+            except JobSetNotFoundError:
+                continue
+            out.extend(r for r in jobs if r.job_key in job_keys)
+        return out
+
     @abstractmethod
     def transition(self, jobset_id: str, job_key: str, new_state: JobState,
                    guard: Optional[Callable[[JobRecord], bool]] = None,

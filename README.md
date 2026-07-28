@@ -77,7 +77,7 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)
 | `kill_max_retry` | 2 | 생성자 | kill 확인 실패 시 재시도 횟수 |
 | `label` / `tags` / `description` | 빈 값 | submit | JobSet 메타데이터 |
 | `chunk_size` | 500 | 생성자 | bjobs/bkill chunking 크기 (v10.1: 200→500 — 사이클당 호출 수 절감) |
-| `bjobs_path` 등 | PATH 탐색 | 생성자 | LSF 조회/kill 명령 경로 (bjobs/bkill/bhist) |
+| `bjobs_path` 등 | PATH 탐색 | 생성자 | LSF 조회/kill 명령 경로 (bjobs/bkill) |
 
 > **v10**: 제출은 wrapper 커맨드 실행 단일 경로입니다 — bsub 인자 조립
 > 경로와 그 옵션(`queue`/`resource_req`/`output_dir`/`default_queue`/
@@ -386,9 +386,9 @@ js.id                      # jobset_id 문자열 (로그/저장용)
 >   stderr/stdout(터미널에서 봤을 메시지)이 자동 저장됩니다. 재시도 성공/
 >   재제출(mgr.submit(js)) 시 자동으로 지워집니다.
 > - **EXIT**: 자동 수집하지 않습니다(폴링 오버헤드 0). 상태 셀 클릭 등
->   필요한 시점에 `mgr.fetch_job_detail(js, job_key)`를 호출하면 `bhist -l`
->   원문이 `js.job_detail_ready(job_key, text)` Signal로 옵니다(bhist는
->   worker 스레드 — GUI 안 멎음). 동기 버전은 `mgr.job_detail(js, job_key)`.
+>   EXIT 원인의 LSF 이력 조회(`bhist`)는 v10.3에서 삭제됐습니다 — 상세는
+>   레코드 필드(`exit_code`/`run_time_s`/`working_dir`/`fail_message`)로
+>   보여 주면 됩니다(로컬 스냅샷 — LSF 호출 0).
 >   제출 실패 job에 호출하면 저장된 fail_message를 돌려주므로, 클릭 핸들러
 >   하나로 모든 실패 상태를 처리할 수 있습니다.
 

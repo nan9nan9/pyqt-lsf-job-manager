@@ -18,7 +18,6 @@ class LsfConfig:
     #  제거됨. 제출은 wrapper 커맨드를 그대로 실행한다.)
     bjobs_path: CmdPath = "bjobs"
     bkill_path: CmdPath = "bkill"
-    bhist_path: CmdPath = "bhist"
 
     #: wrapper 제출의 **실행 프로그램 치환** — (glob 패턴, 대체 CmdPath).
     #: 제출 커맨드는 문자열에 프로그램명이 박혀 있어(lsfmgr가 조립하지 않는다)

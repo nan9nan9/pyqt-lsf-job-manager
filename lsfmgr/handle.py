@@ -34,7 +34,6 @@ class JobSet(QObject):
     kill_progress = Signal(int, int)   # chunk kill 진행 (done, total)
     error_occurred = Signal(str)       # worker 예외 등
     handler_finished = Signal(str, object)   # handler_name, HandlerResult
-    job_detail_ready = Signal(str, str)      # job_key, 상세 텍스트 (fetch_job_detail)
     pre_submit_started = Signal()           # pre_submit 게이트 시작
     pre_submit_finished = Signal(bool)      # 게이트 종료 (True=통과)
     post_processing_started = Signal()          # 전원 terminal 후처리 시작

@@ -91,7 +91,7 @@ def test_bjobs_by_ids_chunked(fake_lsf):
 
 def test_bjobs_by_ids_chunk_failure_isolated(fake_lsf):
     """chunk 하나의 실패는 그 chunk의 id만 실패 집합에 귀속 — 나머지 chunk는
-    정상 조회된다 (bhist_states와 동일한 격리)."""
+    정상 조회된다 (chunk 격리)."""
     cmd = LsfCommand(LsfConfig(chunk_size=1), fake_lsf)
     ids = [_submit(cmd, f"run {i}") for i in range(3)]
     fake_lsf.bjobs_fail_ids = {ids[1]}       # 가운데 id의 chunk만 rc=255
@@ -205,34 +205,6 @@ def test_bkill_confirm_array_parent_id(cmd, fake_lsf):
     resolved, calls = cmd.bkill_targets_confirm([str(jid)])
     assert calls == 1
     assert str(jid) in resolved                     # 부모 id 해소됨
-
-
-# ----------------------------------------------------------------------
-# bhist
-# ----------------------------------------------------------------------
-def test_bhist_states(cmd, fake_lsf):
-    j1 = _submit(cmd, "a")
-    j2 = _submit(cmd, "b")
-    fake_lsf.set_job(j1, "DONE", 0)
-    fake_lsf.set_job(j2, "EXIT", 7)
-    fake_lsf.vanish_job(j1)
-    fake_lsf.vanish_job(j2)
-    hist, failed = cmd.bhist_states([j1, j2])
-    assert hist[(j1, None)] == (JobState.DONE, 0)
-    assert hist[(j2, None)] == (JobState.EXIT, 7)
-    assert failed == set()
-
-
-def test_bhist_distinguishes_array_elements(cmd, fake_lsf):
-    """array element별 상태 구분 — id 단일 키면 마지막 블록이 덮어쓴다."""
-    jid = _submit(cmd, "run.sh", name="arr[1-3]")
-    fake_lsf.set_job(jid, "DONE", 0, array_index=1)
-    fake_lsf.set_job(jid, "EXIT", 9, array_index=2)
-    fake_lsf.set_job(jid, "DONE", 0, array_index=3)
-    hist, _failed = cmd.bhist_states([jid])
-    assert hist[(jid, 1)] == (JobState.DONE, 0)
-    assert hist[(jid, 2)] == (JobState.EXIT, 9)
-    assert hist[(jid, 3)] == (JobState.DONE, 0)
 
 
 # ----------------------------------------------------------------------

@@ -6,7 +6,7 @@ chunked 조회가 유일한 경로다. 계약:
   - 어떤 bjobs 호출에도 -a를 붙이지 않는다
   - 종료 상태(DONE/EXIT)는 explicit job id 조회로 잡는다 (LSF는 id 지정 시
     -a 없이도 CLEAN_PERIOD 내 종료 job을 보여줌)
-  - purge된(CLEAN_PERIOD 밖) job만 bhist fallback으로 넘어감
+  - purge된(CLEAN_PERIOD 밖) job은 LOST로 확정 (v10.3: bhist fallback 삭제)
 """
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def test_explicit_id_still_returns_done(fake_lsf):
 
 
 def test_done_detected_via_id_query(qtbot, manager, fake_lsf):
-    """job 종료는 explicit-id 조회로 잡힌다 — bhist 없이 (설계 무결성)."""
+    """job 종료는 explicit-id 조회로 잡힌다 — 추가 조회 없이 (설계 무결성)."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js = submit_cmds(manager, ["echo a"], auto_poll=False)
     jid = js.jobs()[0].job_id

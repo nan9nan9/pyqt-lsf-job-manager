@@ -1,4 +1,4 @@
-"""LsfCommand — 제출(wrapper)/bjobs/bkill/bhist subprocess 래퍼.
+"""LsfCommand — 제출(wrapper)/bjobs/bkill subprocess 래퍼.
 
 Qt 비의존 순수 Python (§8 원칙). shell 미경유, runner 주입으로 mock 테스트 가능
 (NFR-8). chunking + ARG_MAX 검사 내장 (NFR-5).
@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import (
-    Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple,
+    Callable, Iterator, List, Optional, Sequence, Set, Tuple,
 )
 
 from .config import LsfConfig, cmd_tokens
@@ -262,8 +262,8 @@ class LsfCommand:
         return sum(len(t) + 1 for t in cmd_tokens(path))
 
     def _run(self, argv: Sequence[str], timeout: float,
-             cwd: Optional[str] = None) -> CommandResult:
-        """**모든** LSF subprocess(wrapper 제출/bjobs/bkill/bhist)가
+             cwd: Optional[str] = None, envpath: str = "") -> CommandResult:
+        """**모든** LSF subprocess(wrapper 제출/bjobs/bkill)가
         지나는 단일 실행 funnel. 여기서 NFR-6 DEBUG 로깅을 한다 — 실제로 어떤
         명령이 어느 스레드에서 어떤 cwd로 실행되고 얼마나 걸려 무슨 결과가
         나왔는지 추적할 수 있다.
@@ -276,11 +276,17 @@ class LsfCommand:
 
         활성화: `logging.getLogger("lsfmgr.command").setLevel(logging.DEBUG)`
         (또는 상위 "lsfmgr")로 레벨을 낮추고 핸들러를 붙이면 이 로그가 나온다.
-        cwd는 제출 경로만 넘긴다(bjobs/bkill은 None → 부모 cwd)."""
+        cwd는 제출 경로만 넘긴다(bjobs/bkill은 None → 부모 cwd).
+        envpath는 MC 분류 kill에서 source한 cluster env 파일 — 어느 클러스터
+        env로 나간 bkill인지가 로그만 봐도 드러나야 오진을 막는다(빈 값이면
+        `env=-(local)` = env source 없이 로컬 bkill)."""
         tname = threading.current_thread().name
         prog = argv[0].rsplit("/", 1)[-1] if argv else "?"   # bsub/bjobs/bkill..
-        log.debug("[%s] exec %s: %s (cwd=%s, timeout=%.1fs)",
-                  tname, prog, " ".join(map(str, argv)), cwd, timeout)
+        if envpath:
+            prog = f"bkill@{envpath.rsplit('/', 1)[-1]}"     # tcsh 대신 실체
+        log.debug("[%s] exec %s: %s (env=%s, cwd=%s, timeout=%.1fs)",
+                  tname, prog, " ".join(map(str, argv)),
+                  envpath or "-(local)", cwd, timeout)
         t0 = time.monotonic()
         try:
             res = self.runner(argv, timeout, cwd)
@@ -384,7 +390,7 @@ class LsfCommand:
     def _bjobs(self, selector: List[str]) -> List[JobStatus]:
         # -a를 붙이지 않는다 — explicit job id를 주면 LSF는 -a 없이도
         # CLEAN_PERIOD 내 종료 job을 보여준다. CLEAN_PERIOD 밖(purge)만
-        # bhist fallback으로 넘어간다. (v10: 조회는 id 기반뿐 — group/name
+        # LOST 판정으로 넘어간다. (v10: 조회는 id 기반뿐 — group/name
         # 조회는 제거됐다. 되살릴 때는 -a 오염 문제를 다시 고려할 것.)
         def run(fmt: str) -> Optional[CommandResult]:
             argv = cmd_tokens(self.config.bjobs_path) + [
@@ -425,7 +431,7 @@ class LsfCommand:
         group/name 조회 제거 — wrapper 제출 job은 부착물로 커버되지 않아
         id chunk가 전 경로를 균일하게 덮는다).
 
-        반환: (조회 성공분, 조회 실패한 chunk의 job_id 집합) — bhist_states와
+        반환: (조회 성공분, 조회 실패한 chunk의 job_id 집합) — monitor와
         동일한 chunk 단위 실패 격리. caller는 실패 집합의 job만 판단을
         보류하고, 성공 chunk에서 미발견된 job은 부재로 확정할 수 있다."""
         out: List[JobStatus] = []
@@ -497,7 +503,7 @@ class LsfCommand:
         정확히 포맷과 맞을 때만** 신뢰한다 — 8=FULL, 10=FULL+MC. 그 외
         (구형 열 누락, 값에 ';' 혼입으로 필드 밀림)는 오염을 피해 확장
         필드를 버린다. 파싱 불가 행은 그 행만 버린다 — 부재 확정은
-        호출자(bhist fallback → LOST)의 몫이다."""
+        호출자(monitor의 LOST 판정)의 몫이다."""
         out: List[JobStatus] = []
         for line in stdout.splitlines():
             line = line.strip()
@@ -549,84 +555,6 @@ class LsfCommand:
         return out
 
     # ------------------------------------------------------------------
-    # bhist — fallback (FR-4.3)
-    # ------------------------------------------------------------------
-    #: bhist 결과 키 — (job_id, array_index). 비array job은 index None.
-    BhistKey = Tuple[int, Optional[int]]
-
-    def bhist_states(self, job_ids: Sequence[int]
-                     ) -> Tuple[Dict[BhistKey, Tuple[JobState, Optional[int]]],
-                                Set[int]]:
-        """bhist -l 파싱 — (job_id, array_index) → (최종 상태, exit_code).
-
-        array job은 element별 블록("Job <id[idx]>")이 나오므로 반드시
-        element 단위로 구분한다 — id 단일 키로 합치면 마지막 블록이
-        전 element를 덮어써 DONE/EXIT가 뒤섞인다. 미발견 job은 미포함.
-
-        반환: (조회 성공분 map, 조회 실패한 chunk의 job_id 집합). 실패는
-        chunk 단위로 격리하고 연속 실패엔 회로를 차단한다
-        (_query_chunks_isolated 참조). caller는 실패 집합의 job만 판단
-        보류하고, 성공 chunk에서 미발견된 job은 진짜 소실로 확정할 수 있다.
-        """
-        result: Dict[LsfCommand.BhistKey, Tuple[JobState, Optional[int]]] = {}
-        ids = [str(i) for i in job_ids]
-        base = self._prog_len(self.config.bhist_path) + 20
-
-        def run_chunk(chunk: List[str]) -> None:
-            argv = (cmd_tokens(self.config.bhist_path)
-                    + ["-l", "-n", "0"] + chunk)
-            res = self._run_query(argv)
-            if res is not None:
-                result.update(self._parse_bhist(res.stdout))
-
-        failed = self._query_chunks_isolated(ids, base, run_chunk, "bhist")
-        return result, failed
-
-    def bhist_detail(self, job_id: int,
-                     array_index: Optional[int] = None) -> str:
-        """job 1건의 bhist -l 원문 조회 — EXIT 원인 확인용 (blocking).
-
-        UI에서 상태 클릭 시 온디맨드로 호출한다(폴링과 무관 — 자동 수집
-        오버헤드 없음). array element는 array_index로 "id[idx]" 지정.
-        미발견이면 빈 문자열, 장애(timeout 등)는 LsfCommandError."""
-        target = (f"{job_id}[{array_index}]" if array_index is not None
-                  else str(job_id))
-        argv = cmd_tokens(self.config.bhist_path) + ["-l", "-n", "0", target]
-        res = self._run_query(argv)
-        return res.stdout if res is not None else ""
-
-    @staticmethod
-    def _parse_bhist(stdout: str
-                     ) -> Dict["LsfCommand.BhistKey",
-                               Tuple[JobState, Optional[int]]]:
-        result: Dict[LsfCommand.BhistKey, Tuple[JobState, Optional[int]]] = {}
-        cur: Optional[LsfCommand.BhistKey] = None
-        for line in stdout.splitlines():
-            m = re.search(r"Job <(\d+)(?:\[(\d+)\])?", line)
-            if m:
-                cur = (int(m.group(1)),
-                       int(m.group(2)) if m.group(2) else None)
-                continue
-            if cur is None:
-                continue
-            if "Done successfully" in line:
-                result[cur] = (JobState.DONE, 0)
-            elif "Exited with exit code" in line:
-                m2 = re.search(r"exit code (\d+)", line)
-                # LSF의 "Exited" 분류가 권위다 — 정상 완료는 "Done successfully"
-                # 로 온다(위 분기). "Exited with exit code 0"은 kill(SIGTERM 후
-                # exit 0)·requeue-exit 등 비정상 종료라, exit code가 0이어도
-                # EXIT로 둔다(숫자 코드로 LSF의 분류를 뒤집지 않는다). 코드 0을
-                # DONE으로 바꾸면 죽였거나 실패한 job이 '정상 완료'로 감춰진다
-                # ─ 실패를 성공으로 오분류하는 쪽이 더 위험하다.
-                # (사이클 8에서 DONE으로 바꿨다가 사이클 9에서 되돌림 — 동결)
-                result[cur] = (JobState.EXIT,
-                               int(m2.group(1)) if m2 else None)
-            elif "Exited" in line and cur not in result:
-                result[cur] = (JobState.EXIT, None)
-        return result
-
-    # ------------------------------------------------------------------
     # bkill — id chunk 단독 (v10: group/name/array tier 삭제 — 부착물이
     # 더 이상 생성되지 않으므로 전략 자체가 성립하지 않는다)
     # ------------------------------------------------------------------
@@ -668,7 +596,8 @@ class LsfCommand:
                                 self.config.arg_max, base):
             argv = self._bkill_argv(chunk, envpath)
             try:
-                res = self._run(argv, self.config.kill_timeout_s)
+                res = self._run(argv, self.config.kill_timeout_s,
+                                envpath=envpath)
             except subprocess.TimeoutExpired:
                 # 이 chunk 전부 미확인 — 재시도 대상으로 남긴다
                 log.warning("bkill timeout — 재시도 대상: %s", chunk)

@@ -274,11 +274,9 @@ mgr.remove_handler(js, "collect")        # 해제
 >   자동 저장된다 (예: `LSF error: queue unavailable`). 재시도 성공/재제출
 >   리셋 시 지워진다. `js.failed_jobs` 나 `jobs_failed` Signal 레코드에서
 >   바로 읽는다.
-> - **`mgr.fetch_job_detail(js, job_key)`** — `EXIT` 원인은 자동 수집하지
->   않는다(폴링 오버헤드 0). 상태 셀 클릭 등 필요한 시점에 호출하면
->   `bhist -l` 원문이 `js.job_detail_ready(job_key, text)` Signal 로 온다
->   (worker 스레드 수행 — GUI 안 멎음). 동기 버전 `mgr.job_detail(js, job_key)`
->   는 blocking 주의. 제출 실패 job 에 호출하면 저장된 fail_message 를
+> - **EXIT 원인** 은 자동 수집하지 않습니다. LSF 이력 조회(`bhist`)는
+>   v10.3에서 삭제됐고, 상세는 레코드 필드(`exit_code`/`run_time_s`/
+>   `working_dir`/`fail_message`)로 보여 주면 됩니다 (LSF 호출 0).
 >   돌려주므로 클릭 핸들러 하나로 모든 실패 상태를 처리할 수 있다.
 
 ### 2.6 완료 후처리 — `submit(post_process=fn)`
@@ -412,7 +410,6 @@ BIN = "/path/to/repo/bin"
 mgr = LsfJobManager(
     bjobs_path=os.path.join(BIN, "bjobs"),      # 모니터링
     bkill_path=os.path.join(BIN, "bkill"),      # kill
-    bhist_path=os.path.join(BIN, "bhist"),
 )
 js = mgr.create_jobset([
     f"{BIN}/customwrapper_sub -q normal run_0.sp",

@@ -370,3 +370,46 @@ def test_partial_kill_keeps_pending_retries(qtbot, manager, fake_lsf):
         pass
     # RETRY_WAIT였던 job은 재시도로 PEND 복귀
     assert any(r.state is JobState.PEND for r in js.jobs())
+
+
+# ----------------------------------------------------------------------
+# jobset 핸들 없이 kill (v10.3) — GUI가 행의 job_key만 들고 죽인다
+# ----------------------------------------------------------------------
+def test_kill_by_keys_without_handle_infers_jobset(qtbot, manager, fake_lsf):
+    """kill_jobs(job_keys=[...])는 핸들 없이도 소유 jobset을 역추적해
+    컨텍스트로 채택한다 — verify·kill_started가 그대로 동작."""
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        js = submit_cmds(manager, ["k 0", "k 1", "k 2"], auto_poll=False)
+    fake_lsf.set_all("RUN")
+    keys = [r.job_key for r in js.jobs()][:2]
+    started = []
+    manager.kill_started.connect(lambda jsid: started.append(jsid))
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blk:
+        manager.kill_jobs(job_keys=keys, verify=True)      # js 없이
+    jsid, report = blk.args
+    assert jsid == js.id and started == [js.id]     # jobset 자동 채택
+    assert report.still_alive == 0                  # verify 동작
+    assert len(fake_lsf.alive_jobs()) == 1          # 선택한 2건만 죽음
+    states = sorted(r.state.name for r in js.jobs())
+    assert states == ["EXIT", "EXIT", "RUN"], states
+
+
+def test_global_kill_verify_without_jobset(qtbot, manager, fake_lsf):
+    """jobset 컨텍스트가 없어도 verify는 대상 id 직접 조회로 수행된다
+    (예전에는 조용히 무시돼 still_alive=None이었다)."""
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        js = submit_cmds(manager, ["v 0", "v 1"], auto_poll=False)
+    fake_lsf.set_all("RUN")
+    ids = [r.job_id for r in js.jobs()]
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blk:
+        manager.kill_jobs(ids, verify=True)         # jobset_id 없음
+    jsid, report = blk.args
+    assert jsid == ""                               # 전역 kill
+    assert report.still_alive == 0                  # 미검증(None)이 아니다
+    assert fake_lsf.alive_jobs() == []
+
+
+def test_kill_jobs_requires_target(manager):
+    """대상 없이 호출하면 조용한 no-op 대신 TypeError."""
+    with pytest.raises(TypeError):
+        manager.kill_jobs()

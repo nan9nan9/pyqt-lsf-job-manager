@@ -24,7 +24,7 @@ python examples/gui_demo.py   # 통합 GUI 데모
 | Kill 제어 | 전체 kill(verify, **MC-aware** — forward job 은 `envpath` 분류 kill), `PEND만`, 선택 행만(`kill_jobs`) |
 | handler (FR-7) | 체크 시 `add_handler` — RUN 중 폴링마다 job 출력 파싱 + 종료 시 최종 1회 → `handler_finished` 로그 |
 | post_process (FR-10) | 전원 terminal 도달 시 worker 에서 1회 종합 집계 → `post_processing_finished` |
-| job 상세 | 테이블 더블클릭 → `fetch_job_detail`(bhist -l 온디맨드) → `job_detail_ready` |
+| job 상세 | 테이블 더블클릭 → 로컬 레코드 상세 (LSF 호출 0) |
 | 실패 처리 | retry(비정상 종료만), `SUBMIT_FAILED`/`EXIT`, `detect_lost()` |
 
 기본으로 제출 실패율(0.12)·EXIT 확률(0.12)을 주입해 retry/EXIT 상태가 자연스럽게

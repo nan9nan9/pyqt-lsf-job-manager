@@ -105,7 +105,7 @@ bjobs -a -json -o "jobid stat exec_host"
 | `MOCKLSF_EXIT_RATE` | 0.08 | 비정상 종료(EXIT) 확률 |
 | `MOCKLSF_SUSPEND_RATE` | 0.05 | 실행 중 시스템 suspend 확률 |
 | `MOCKLSF_SCHED_INTERVAL` | 0.5 | 스케줄러 tick 주기(초) |
-| `MOCKLSF_CLEAN_PERIOD` | 3600 | 완료 job 보존 기간(초). 초과 시 bjobs 에서 purge(→bhist 로만 조회). 작게 주면 bhist fallback 재현 |
+| `MOCKLSF_CLEAN_PERIOD` | 3600 | 완료 job 보존 기간(초). 초과 시 bjobs 에서 purge. 작게 주면 lsfmgr 의 LOST 확정 경로 재현 |
 | `MOCKLSF_FORWARD_CLUSTERS` | (없음) | MultiCluster forward 대상 원격 클러스터(콤마 구분). 설정 시 MC 켜짐 |
 | `MOCKLSF_FORWARD_RATE` | 0.5 | job 하나가 forward 될 확률(0~1). MC 켜졌을 때만 |
 
@@ -144,8 +144,9 @@ export MOCKLSF_FORWARD_RATE=1.0          # 전부 forward (데모용)
 보이고, 그 후엔 **bjobs 에서 purge** 되어 `bjobs <id>` 가 `No matching job found`
 (exit 255)를 낸다. `bhist <id>` 는 계속 이력을 조회할 수 있다.
 
-lsfmgr 는 이 상황을 bhist fallback(FR-4.3)으로 처리한다 — bjobs 에서 사라진 job 을
-bhist 로 조회해 DONE/EXIT 를 확정한다. `MOCKLSF_CLEAN_PERIOD` 를 작게 주면 실제
+lsfmgr 는 이 상황을 **LOST 확정**(FR-4.3)으로 처리한다 — v10.3에서 bhist 조회를
+삭제해, bjobs 에서 사라진 job 의 최종 상태는 복원하지 않는다(`bhist` CLI 는 mocklsf
+쪽에만 남아 있고 lsfmgr 는 호출하지 않는다). `MOCKLSF_CLEAN_PERIOD` 를 작게 주면 실제
 LSF 없이 이 경로를 재현·검증할 수 있다.
 
 ## 테스트

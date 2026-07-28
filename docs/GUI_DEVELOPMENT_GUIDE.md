@@ -114,7 +114,6 @@ js.submit_finished.connect(lambda rep: print(rep.succeeded, rep.failed))
 | `kill_progress` | `(done, total)` | chunk kill 진행 |
 | `error_occurred` | `str` | worker 예외 등 |
 | `handler_finished` | `(handler_name, HandlerResult)` | 핸들러 완료 |
-| `job_detail_ready` | `(job_key, text)` | `fetch_job_detail` 결과 |
 
 manager 계층은 같은 Signal에 `jobset_id`가 앞에 하나 더 붙는다(예:
 `mgr.submit_finished(jobset_id, report)`).
