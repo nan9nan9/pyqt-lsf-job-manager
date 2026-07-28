@@ -26,7 +26,7 @@ PyQt 앱을 실제 LSF 없이 테스트하기 위한 용도. **이 저장소에 
 ```
 
 > 실제 환경처럼 job 마다 wrapper(`customwrapper_sub` 등)로 제출하는 방법은
-> [`lsfmgr.md`](lsfmgr.md) 참고 (lsfmgr wrapper 제출).
+> [`submit.md`](submit.md) 참고.
 
 ## 동작 방식
 
@@ -67,9 +67,9 @@ bjobs
 | `mocklsfd` | 데몬 제어: `start` `stop` `restart` `status` `reset` |
 
 **Job group** — `bsub -g <path>` 로 지정한 group 을 job 별로 추적한다. `bjobs -g`
-로 group 조회, `bkill -g <path> 0` 로 group 단위 종료가 가능하다. lsfmgr 가
-jobset 을 `/lsfmgr/<user>/<jobset_id>` group 으로 격리·kill·모니터링하는 구조를
-그대로 지원한다.
+로 group 조회, `bkill -g <path> 0` 로 group 단위 종료가 가능하다. lsfmgr 자체는
+job group 을 쓰지 않지만(조회·kill 이 job_id chunk 단일 경로), wrapper 가 자체
+목적으로 `-g` 를 붙이는 환경을 재현할 수 있다.
 
 ### bsub 옵션
 
@@ -145,10 +145,11 @@ export MOCKLSF_FORWARD_RATE=1.0          # 전부 forward (데모용)
 보이고, 그 후엔 **bjobs 에서 purge** 되어 `bjobs <id>` 가 `No matching job found`
 (exit 255)를 낸다. `bhist <id>` 는 계속 이력을 조회할 수 있다.
 
-lsfmgr 는 이 상황을 **LOST 확정**(FR-4.3)으로 처리한다 — v10.3에서 bhist 조회를
-삭제해, bjobs 에서 사라진 job 의 최종 상태는 복원하지 않는다(`bhist` CLI 는 mocklsf
-쪽에만 남아 있고 lsfmgr 는 호출하지 않는다). `MOCKLSF_CLEAN_PERIOD` 를 작게 주면 실제
-LSF 없이 이 경로를 재현·검증할 수 있다.
+lsfmgr 는 이 상황을 **LOST 확정**(FR-4.3)으로 처리한다 — bjobs 에서 사라진 job 의
+최종 상태는 복원하지 않는다(`bhist` CLI 는 mocklsf 쪽에만 있고 lsfmgr 는 호출하지
+않는다). 단 **연속 `lost_after_missing_polls`회**(기본 3) 미발견이어야 확정되므로,
+`MOCKLSF_CLEAN_PERIOD` 를 작게 주고 몇 사이클 기다리면 실제 LSF 없이 이 경로를
+재현·검증할 수 있다.
 
 ## 테스트
 

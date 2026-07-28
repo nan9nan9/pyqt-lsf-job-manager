@@ -8,10 +8,10 @@
 |---|---|
 | `lsfmgr.command` | **모든 LSF subprocess 실행**(DEBUG: 스레드·명령종류·argv·cwd·소요시간·rc·stdout/stderr) — [§1.1](#11-실제-실행subprocess-추적) |
 | `lsfmgr.submit` | submit 시작/성공/실패/재시도/취소 |
-| `lsfmgr.monitor` | polling 시작/중지, 조회 실패, LOST 확정 |
-| `lsfmgr.kill` | kill 전략 선택/실패 |
-| `lsfmgr.jobset` | JobSet 생성/merge/close/손실 복구 |
-| `lsfmgr.handler` | job별 handler(FR-7) 실행/예외 |
+| `lsfmgr.monitor` | polling 시작/중지, 조회 실패, 판단 보류, LOST 확정 |
+| `lsfmgr.kill` | kill 착수/완료, env 분류, 확인 재시도, 실패 |
+| `lsfmgr.jobset` | JobSet 생성/merge/close/손실 감지 |
+| `lsfmgr.handler` | job별 handler 실행/예외 |
 | `lsfmgr.manager` | shutdown 등 수명 이벤트 |
 
 ### 1.1 실제 실행(subprocess) 추적
@@ -36,7 +36,7 @@ logging.getLogger("lsfmgr").setLevel(logging.DEBUG)
 DEBUG lsfmgr.command: [Dummy-1] exec customwrapper_sub: customwrapper_sub a.sp (cwd=/scratch/run, timeout=30.0s)
 DEBUG lsfmgr.command: [Dummy-1] exec customwrapper_sub → rc=0 (0.012s) stdout='Job <1000> is submitted ...' stderr=''
 DEBUG lsfmgr.command: [Dummy-2] exec customwrapper_sub: customwrapper_sub b.sp (cwd=/scratch/run, timeout=30.0s)
-DEBUG lsfmgr.command: [MainThread] exec bjobs: bjobs -noheader -o ... -g /lsfmgr/u/<jsid> (cwd=None, timeout=120.0s)
+DEBUG lsfmgr.command: [MainThread] exec bjobs: bjobs -noheader -o "jobid stat exit_code ... delimiter=';'" 1000 1001 (cwd=None, timeout=120.0s)
 DEBUG lsfmgr.command: [MainThread] exec bjobs → rc=0 (0.031s) stdout='1000;RUN;...' stderr=''
 DEBUG lsfmgr.command: [Dummy-3] exec bkill: bkill 1000 1001 (cwd=None, timeout=120.0s)
 DEBUG lsfmgr.command: [Dummy-3] exec bkill → rc=0 (0.008s) stdout='Job <1000> is being terminated ...' stderr=''
@@ -65,7 +65,7 @@ DEBUG lsfmgr.command: [Dummy-3] exec bkill → rc=0 (0.008s) stdout='Job <1000> 
 |---|---|
 | `DEBUG` | LSF subprocess 실행 추적 — 스레드·명령종류·argv·cwd·timeout·소요시간·rc·stdout/stderr ([§1.1](#11-실제-실행subprocess-추적)) |
 | `INFO` | submit/kill 시작·완료, 상태 전이, polling 자동 중지, shutdown |
-| `WARNING` | submit 재시도, 부착물(-g/-J) 지정 실패 후 진행, 조회 수단 실패, NFS 경고 |
+| `WARNING` | submit 재시도, 조회 chunk 실패·포맷 강등, LOST 판단 보류, kill 확인 재시도 |
 | `ERROR` | `SUBMIT_FAILED`/`LOST` 최종 확정, worker 예외 (traceback 포함) |
 
 ## 3. 앱 연계 (SimManager 중앙 로깅 등)

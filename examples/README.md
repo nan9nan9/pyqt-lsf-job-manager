@@ -1,7 +1,6 @@
 # lsfmgr 통합 예제
 
-lsfmgr 의 주요 기능을 **하나의 GUI 대시보드**(`gui_demo.py`)에서 모두 다룹니다
-(v10.1: basic/handler/mc 예제를 이 파일 하나로 통합).
+lsfmgr 의 주요 기능을 **하나의 GUI 대시보드**(`gui_demo.py`)에서 모두 다룹니다.
 실제 LSF cluster 없이 실행되도록 저장소 동봉 **mocklsf**(가상 LSF)를 테스트
 환경으로 쓰며, job 제출은 **`create_jobset([...])` → `submit`** 단일 경로 —
 job 마다 `customwrapper_sub` 같은 wrapper 커맨드(혼합 가능)를 그대로 실행하고
@@ -17,13 +16,13 @@ python examples/gui_demo.py   # 통합 GUI 데모
 | 영역 | 데모하는 기능 |
 |---|---|
 | Submit 옵션 폼 | `create_jobset`+`submit`, wrapper 선택/혼합, `workers`/`max_retry`/`rate_limit_per_s`, queue |
-| 진행률 바 / Cancel | progress throttle(QT-5), `cancel_submit` 안전 중단(QT-6) |
-| JobSet 트리 | 다중 JobSet 요약 실시간 갱신, Facade Signal 스트림 (README §8) |
-| job 테이블 | 변경분 배치 **증분 upsert**(QT-4, 전체 재그리기 금지), 상태별 색, cluster 열 |
-| job 추가 / 재실행 | **merge** 로만 추가(v9), 실패분 같은 `merge_id` 교체 후 전체 재제출 |
+| 진행률 바 / Cancel | progress throttle, `cancel_submit` 안전 중단 |
+| JobSet 트리 | 다중 JobSet 요약 실시간 갱신, `mgr.*` 전역 Signal 스트림 |
+| job 테이블 | 변경분 배치 **증분 upsert**(전체 재그리기 금지), 상태별 색, cluster 열 |
+| job 추가 / 재실행 | **merge** 로만 추가, 실패분 같은 `merge_id` 교체 후 전체 재제출 |
 | Kill 제어 | 전체 kill(verify, **MC-aware** — 생성자 `cluster_envpaths` 로 클러스터별 분류 kill), `PEND만`(제출 우선권 opt-in), 선택 행만(`kill_jobs`) |
-| handler (FR-7) | 체크 시 `add_handler` — RUN 중 폴링마다 job 출력 파싱 + 종료 시 최종 1회 → `handler_finished` 로그 |
-| post_process (FR-10) | 전원 terminal 도달 시 worker 에서 1회 종합 집계 → `post_processing_finished` |
+| handler | 체크 시 `add_handler` — RUN 중 폴링마다 job 출력 파싱 + 종료 시 최종 1회 → `handler_finished` 로그 |
+| post_process | 전원 terminal 도달 시 worker 에서 1회 종합 집계 → `post_processing_finished` |
 | job 상세 | 테이블 더블클릭 → 로컬 레코드 상세 (LSF 호출 0) |
 | 실패 처리 | retry(비정상 종료만), `SUBMIT_FAILED`/`EXIT`, `detect_lost()` |
 
