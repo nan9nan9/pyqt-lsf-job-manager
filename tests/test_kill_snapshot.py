@@ -78,7 +78,7 @@ def test_kill_snapshot_progresses(qtbot, tmp_path):
         mgr.querier.query(js.id)
         seen = []
         with qtbot.waitSignal(mgr.kill_finished, timeout=10000):
-            mgr.kill(js, envpath="/lsf/busan/cshrc.lsf")   # id-chunk sourced
+            mgr.kill(js, cluster_envpaths={"*": "/lsf/busan/cshrc.lsf"})   # id-chunk sourced
             for _ in range(50):
                 s = js.kill_state
                 if s is not None:

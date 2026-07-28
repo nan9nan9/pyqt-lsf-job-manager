@@ -131,8 +131,8 @@ mgr.close(js)                                # 종결 (전원 terminal일 때)
 
 # --- 실행 (async→Signal) ---
 mgr.submit(js, *, pre_submit=None, post_process=None, **opts) -> JobSet  # 전 job (재)제출 (유일 경로)
-mgr.kill(js, *, only_state=None, verify=None, envpath="")
-mgr.kill_jobs(js, job_keys, *, verify=None, envpath="")  # 선택 job만
+mgr.kill(js, *, only_state=None, verify=None, cluster_envpaths=None, cancel_submit=False)
+mgr.kill_jobs(js, job_keys, *, verify=None, cluster_envpaths=None, cancel_submit=False)  # 선택 job만
 mgr.cancel_submit(js)                        # 진행 중 submit 중단
 mgr.start_polling(js, interval_s=None); mgr.stop_polling(js)
 mgr.query_once(js)                           # 1회 강제 조회
@@ -328,8 +328,10 @@ JobSetStore(ABC) ── InMemoryStore
   재시도는 QTimer 스케줄(sleep 없음). 재제출 리셋 시 이전 실행 흔적 소거.
 - **FR-3 Kill**: job_id chunked `bkill` 단일 경로(v10: group/array/name
   전략 tier 삭제),
-  부분 kill(`only_state`)·선택 kill(`kill_jobs`). MC forward는 `envpath`로 그
-  클러스터 env를 source한 bkill.
+  부분 kill(`only_state`)·선택 kill(`kill_jobs`). MC forward는
+  `cluster_envpaths`(v10.3 — 단일 `envpath` 옵션 흡수, `"*"`가 기본 env)로
+  클러스터별 env를 source한 bkill. 제출 우선권(아래)은 전체 kill 기본 적용,
+  부분·선택 kill은 `cancel_submit=True` opt-in.
   - **FR-3.1~3.3** (v10: 전략 순회 삭제 — chunk 단일), **FR-3.4** 확인 문구 파싱 +
     미확인분 재시도(`kill_max_retry`), `KillReport.unconfirmed`/`kill_retries`,
     **FR-3.5** `kill_status_policy`("optimistic"=확인 즉시 EXIT / "actual"=폴링만).

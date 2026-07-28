@@ -290,7 +290,8 @@ mgr.kill(js)                           # 전체 kill (명령 1회, ARG_MAX 안�
 mgr.kill(js, only_state=JobState.PEND) # PEND만
 mgr.kill(js, verify=True)              # 실제 종료까지 확인
 mgr.kill_jobs(js, [job_key, ...])      # 선택 job만 kill (테이블 선택 행)
-mgr.kill_jobs(js, keys, envpath="/lsf/busan/conf/cshrc.lsf")  # MC forward — env source 후 bkill
+mgr.kill_jobs(js, keys, cluster_envpaths={"cluster_b": "/lsf/b/cshrc.lsf"})  # MC 분류 kill
+mgr.kill(js, only_state=JobState.PEND, cancel_submit=True)  # 부분 kill에도 제출 우선권
 mgr.cancel_submit(js)                  # 진행 중 submit 중단 (된 것은 유지)
 mgr.query_once(js)                     # 지금 즉시 1회 조회 요청
 mgr.stop_polling(js); mgr.start_polling(js, 30)
@@ -319,13 +320,13 @@ mgr.close(js)                          # 종결 (전원 terminal일 때)
 > 전에 bjobs 1회를 강제 조회**해 채우고(jobset 컨텍스트 없는 원시 id
 > `kill_jobs`도 대상 id 직접 조회로 동일 보장) ② 관측 cluster(forward 우선,
 > 없으면 source)별로 그 env를 `source`한 bkill(`tcsh -c "source ... &&
-> exec bkill ..."`)로 분류 실행 ③ 그래도 미상이면 기본 envpath(보통
-> 로컬 bkill)로 죽입니다. **제출 직후 즉시 kill해도 cluster를 알고
+> exec bkill ..."`)로 분류 실행 ③ 그래도 미상이면 **기본 env**로 죽입니다 —
+> 기본 env는 매핑의 와일드카드 키 `"*"`이고, 없으면 plain bkill(로컬)입니다. **제출 직후 즉시 kill해도 cluster를 알고
 > 죽는다**는 게 핵심입니다. cluster 관측은 `collect_clusters=True` 전제.
 >
-> 저수준 수동 제어가 필요하면 `envpath="<cshrc>"` 단일 지정도 그대로
-> 지원됩니다 (`mgr.kill_jobs(js, keys, envpath=...)` — 호출 전체가 그
-> env 하나로 실행).
+> 분류 없이 **호출 전체를 한 env로** 돌리려면 `cluster_envpaths={"*":
+> "<cshrc>"}` 하나만 주면 됩니다 (구 `envpath=` 옵션의 대체 — v10.3에서
+> 옵션이 하나로 합쳐졌습니다. 옛 `envpath=`는 TypeError).
 
 ### 3.3 조회 (동기 — 로컬 스냅샷, LSF 호출 없음)
 
@@ -373,7 +374,7 @@ js.id                      # jobset_id 문자열 (로그/저장용)
 > `submit_finished(SubmitReport)` 또는 `js.summary`로 봅니다.
 > `is_submitting`은 제출이 도는 동안 True입니다(`jobs`의 PEND/RUN이
 > 아니라 **제출 작업 자체**의 진행 여부).
-> **kill도 대칭**입니다 — 대량 chunked kill(특히 MC `envpath`는 chunk마다 env
+> **kill도 대칭**입니다 — 대량 chunked kill(특히 MC 분류 kill은 chunk마다 env
 > source, `verify`는 재조회 루프)도 오래 걸릴 수 있어 `js.is_killing` /
 > `js.kill_state`(`KillProgress(done/total)` + `.remaining`/`.fraction`)로 같은
 > 방식으로 조회합니다. 완료 후 최종은 `kill_finished(KillReport)`.

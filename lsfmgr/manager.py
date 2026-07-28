@@ -454,18 +454,24 @@ class LsfJobManager(QObject):
     # ------------------------------------------------------------------
     def kill(self, jobset_id, *,
                     only_state: Optional[JobState] = None,
-                    verify: Optional[bool] = None, envpath: str = "",
-                    cluster_envpaths: Optional[Dict[str, str]] = None) -> None:
+                    verify: Optional[bool] = None,
+                    cluster_envpaths: Optional[Dict[str, str]] = None,
+                    cancel_submit: bool = False) -> None:
         """[async→Signal] JobSet kill — 결과는 kill_finished.
         verify 미지정 시 verify_kill 옵션(②) 적용.
-        envpath 지정 시 그 LSF env를 source한 bkill (MC forward job).
 
-        cluster_envpaths: {클러스터명: cshrc경로} — MC 자동 분류 kill.
+        cluster_envpaths: {클러스터명: cshrc경로} — MC 분류 kill (env source).
         지정 시 ① 대상 중 cluster 미상(source/forward_cluster None)이 있으면
         **bkill 전에 bjobs 1회를 강제 조회**해 채우고(제출 직후 즉시 kill해도
         cluster를 알고 죽인다), ② 관측 cluster(forward 우선)별로 그 env를
-        source한 bkill로 분류 실행, ③ 그래도 미상이면 기본 envpath로 kill.
-        cluster 관측은 collect_clusters=True 전제."""
+        source한 bkill로 분류 실행, ③ 그래도 미상이면 기본 env로 kill.
+        와일드카드 키 `"*"`가 그 기본 env — {"*": cshrc} 하나만 주면 전 대상을
+        그 env로 죽인다(구 envpath= 옵션의 대체). 없으면 plain bkill.
+        cluster 관측은 collect_clusters=True 전제.
+
+        cancel_submit: 부분 kill(only_state)에 제출 우선권을 건다 — 진행 중
+        제출 취소·재시도 포기·barrier(quiesce)까지. **전체 kill은 항상 적용**
+        되므로 이 옵션이 필요 없다(FR-3)."""
         jobset_id = self._jsid(jobset_id)
         if self._shutdown_done:
             # shutdown 후 kill은 join되지 않는 worker를 만들고 kill_started만
@@ -475,7 +481,7 @@ class LsfJobManager(QObject):
         if verify is None:
             verify = bool(self._defaults.get("verify_kill", False))
         scope = None
-        if only_state is None:
+        if only_state is None or cancel_submit:
             # 전체 kill은 진행 중 submit에 대해 우선권을 갖는다 (FR-3):
             # ① 진행 중 submit 즉시 취소(응답성 — 빨리 멈출수록 kill 대상↓),
             #    kill-phase 대기 중 재제출 plan 취소(kill 후 발화 부활 방지).
@@ -485,12 +491,14 @@ class LsfJobManager(QObject):
             #    보장한다: barrier와 등록이 한 lock 아래 원자적이라, ①이 못
             #    잡은 늦은 사이클은 barrier가 넘겨받아 취소하거나(먼저 등록)
             #    등록 자체가 거부된다(나중). 재취소 루프가 필요 없다.
-            # (부분 kill(only_state)은 살아있는 특정 상태만 겨냥하므로 유지)
+            # 부분 kill(only_state)은 살아있는 특정 상태만 겨냥하므로 기본은
+            # 제출을 건드리지 않는다 — cancel_submit=True로 opt-in할 때만
+            # 전체 kill과 같은 우선권을 건다(제출 폭주 중 PEND 정리 등).
             self.submitter.cancel_submit(jobset_id)
             self.submitter.abort_retries(jobset_id)
             scope = self._gate.kill_scope(jobset_id)
         queued = self.killer.kill_jobset(jobset_id, only_state=only_state,
-                                         verify=verify, envpath=envpath,
+                                         verify=verify,
                                          cluster_envpaths=cluster_envpaths,
                                          scope=scope)
         # 접수 즉시(동기) 착수 통지 — quiesce(진행 중 bsub 완료 대기)로
@@ -505,8 +513,9 @@ class LsfJobManager(QObject):
 
     def kill_jobs(self, job_ids_or_jobset, job_keys: Optional[Sequence[str]] = None, *,
                   jobset_id: Optional[str] = None,
-                  verify: Optional[bool] = None, envpath: str = "",
-                  cluster_envpaths: Optional[Dict[str, str]] = None) -> None:
+                  verify: Optional[bool] = None,
+                  cluster_envpaths: Optional[Dict[str, str]] = None,
+                  cancel_submit: bool = False) -> None:
         """[async→Signal] 개별 job kill (chunking 자동).
 
         두 형태를 받는다:
@@ -515,28 +524,30 @@ class LsfJobManager(QObject):
             죽는다(parent id로 죽이면 나머지 element까지 전부 kill됨).
           - kill_jobs([id 또는 "id[idx]", ...], jobset_id=...) — 원시 id 기반.
         jobset 컨텍스트가 있으면 optimistic EXIT 전이·verify가 켜지고 결과가
-        핸들 kill_finished로도 중계된다. envpath 지정 시 그 LSF env를
-        source한 bkill (MC forward job).
+        핸들 kill_finished로도 중계된다.
 
-        cluster_envpaths: {클러스터명: cshrc경로} — MC 자동 분류 kill
-        (mgr.kill과 동일). jobset 컨텍스트가 있으면 jobset 조회로, 없는
+        cluster_envpaths: {클러스터명: cshrc경로} — MC 분류 kill (mgr.kill과
+        동일, `"*"`는 기본 env). jobset 컨텍스트가 있으면 jobset 조회로, 없는
         원시 id 호출이면 **대상 id 직접 bjobs 조회**로 cluster를 채운 뒤
-        분류한다 — 어느 경로든 bkill 전에 cluster를 알고 죽는다."""
+        분류한다 — 어느 경로든 bkill 전에 cluster를 알고 죽는다.
+
+        cancel_submit: 선택 kill에 제출 우선권을 건다(jobset 컨텍스트 필수).
+        진행 중 제출 취소·재시도 포기·barrier(quiesce) — 취소는 jobset 전체
+        제출에 걸리고, kill 대상은 선택분 그대로다. 이때 job_key→id 해석은
+        barrier 뒤로 미뤄져, 호출 순간 제출 중이던 선택 job도 id를 확보한 뒤
+        확실히 죽는다(안 그러면 그 job이 kill을 빠져나가 LSF에 살아남는다)."""
         if self._shutdown_done:
             log.warning("shutdown 후 kill_jobs 요청 무시")
             return
         if verify is None:
             verify = bool(self._defaults.get("verify_kill", False))
+        ids: Optional[List[object]] = None
+        keys: Optional[Sequence[str]] = None
         if isinstance(job_ids_or_jobset, JobSet) or job_keys is not None:
+            # key→id 해석은 killer worker에서 한다 (barrier 이후 — 제출 중이던
+            # job의 id까지 잡는다). 여기서 미리 풀면 그 job이 kill을 빠져나간다.
             jsid = self._jsid(job_ids_or_jobset)
-            recs = {r.job_key: r for r in self.get_jobs(jsid)}
-            ids: List[object] = []
-            for k in (job_keys or ()):
-                r = recs.get(k)
-                if r is None or r.job_id is None:
-                    continue
-                ids.append(f"{r.job_id}[{r.array_index}]"
-                           if r.array_index is not None else r.job_id)
+            keys = list(job_keys or ())
         else:
             # 원시 id 경로 — caller가 문자열을 그대로 넘긴다. array element를
             # "id[idx]"로 지정하는데 그 array를 monitor가 (id, None) 단일
@@ -548,9 +559,20 @@ class LsfJobManager(QObject):
             ids = list(job_ids_or_jobset)
             jsid = (self._jsid(jobset_id)
                     if jobset_id is not None else "")
-        queued = self.killer.kill_jobs(ids, verify=verify,
-                                       jobset_id=jsid or "", envpath=envpath,
-                                       cluster_envpaths=cluster_envpaths)
+        scope = None
+        if cancel_submit:
+            if not jsid:
+                # 조용히 무시하면 '제출도 멈춘다'고 믿은 caller가 유출을 본다
+                raise ValueError(
+                    "cancel_submit=True는 jobset 컨텍스트가 필요하다 — "
+                    "kill_jobs(js, keys, ...) 또는 jobset_id=로 호출")
+            self.submitter.cancel_submit(jsid)
+            self.submitter.abort_retries(jsid)
+            scope = self._gate.kill_scope(jsid)
+        queued = self.killer.kill_jobs(ids, job_keys=keys, verify=verify,
+                                       jobset_id=jsid or "",
+                                       cluster_envpaths=cluster_envpaths,
+                                       scope=scope)
         if jsid and queued:              # jobset 컨텍스트 + 실제 큐잉일 때만
             self.kill_started.emit(jsid)   # killer 등록 후 (pull 일치)
 

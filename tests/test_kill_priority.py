@@ -309,3 +309,77 @@ def test_submit_during_kill_barrier_is_born_cancelled(qtbot, manager,
         assert after.job_id == rec.job_id
     finally:
         scope.release()
+
+
+# ---------------------------------------------------------------------------
+# 부분/선택 kill의 우선권 opt-in (cancel_submit=True)
+# ---------------------------------------------------------------------------
+
+def test_partial_kill_cancel_submit_opt_in(qtbot, config, fake_lsf):
+    """부분 kill(only_state)도 cancel_submit=True면 전체 kill과 같은 우선권:
+    진행 중 제출 1건은 완주 후 kill 대상이 되고, 미착수분은 CREATED 복귀."""
+    runner = GatedBsub(fake_lsf)
+    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=runner)
+    try:
+        js = submit_cmds(mgr, ["echo 1", "echo 2", "echo 3"],
+                         workers=1, auto_poll=False)
+        assert runner.entered.wait(5)
+        with qtbot.waitSignals([mgr.submit_finished, mgr.kill_finished],
+                               timeout=15000):
+            mgr.kill(js.id, only_state=JobState.PEND, cancel_submit=True)
+            runner.gate.set()
+        states = sorted(r.state.name for r in js.jobs())
+        assert states == ["CREATED", "CREATED", "EXIT"], states
+        assert fake_lsf.alive_jobs() == []          # 유출 0
+    finally:
+        mgr.shutdown()
+
+
+def test_partial_kill_default_does_not_cancel_submit(qtbot, config, fake_lsf):
+    """기본값(cancel_submit=False)은 제출을 건드리지 않는다 — 부분 kill은
+    '지금 그 상태인 job만' 겨냥한다는 계약 유지."""
+    runner = GatedBsub(fake_lsf)
+    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=runner)
+    try:
+        js = submit_cmds(mgr, ["echo 1", "echo 2", "echo 3"],
+                         workers=1, auto_poll=False)
+        assert runner.entered.wait(5)
+        with qtbot.waitSignal(mgr.kill_finished, timeout=15000):
+            mgr.kill(js.id, only_state=JobState.PEND)   # 취소 없음
+        with qtbot.waitSignal(mgr.submit_finished, timeout=15000):
+            runner.gate.set()
+        # 제출은 계속 진행돼 3건 모두 LSF에 들어갔다 (CREATED 복귀 없음)
+        assert len(fake_lsf.jobs) == 3
+        assert not any(r.state is JobState.CREATED for r in js.jobs())
+    finally:
+        mgr.shutdown()
+
+
+def test_selected_kill_cancel_submit_catches_inflight_job(qtbot, config,
+                                                          fake_lsf):
+    """선택 kill + cancel_submit: 호출 순간 '제출 중'이라 job_id가 없던 선택
+    job도, barrier 뒤 key→id 재해석으로 확실히 죽는다(유출 방지 핵심)."""
+    runner = GatedBsub(fake_lsf)
+    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=runner)
+    try:
+        js = submit_cmds(mgr, ["echo 1", "echo 2"], workers=1,
+                         auto_poll=False)
+        assert runner.entered.wait(5)
+        keys = [r.job_key for r in js.jobs()]
+        assert all(r.job_id is None for r in js.jobs())   # 아직 id 없음
+        with qtbot.waitSignals([mgr.submit_finished, mgr.kill_finished],
+                               timeout=15000):
+            mgr.kill_jobs(js, keys, cancel_submit=True)
+            runner.gate.set()                # 진행 중이던 제출 완주 허용
+        assert fake_lsf.alive_jobs() == []   # 제출된 그 job도 죽었다
+        assert any(r.state is JobState.EXIT for r in js.jobs())
+    finally:
+        mgr.shutdown()
+
+
+def test_selected_kill_cancel_submit_requires_jobset(manager):
+    """jobset 컨텍스트 없는 원시 id + cancel_submit → 조용히 무시하지 않고
+    ValueError (제출도 멈춘다고 믿은 caller가 유출을 보게 두지 않는다)."""
+    import pytest
+    with pytest.raises(ValueError):
+        manager.kill_jobs([1, 2, 3], cancel_submit=True)

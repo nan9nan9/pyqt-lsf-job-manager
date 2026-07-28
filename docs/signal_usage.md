@@ -80,7 +80,7 @@ poll_interval_s         = 10    # ② 폴링 주기(5~60)
 - `js.jobs_failed`는 `jobs_updated`에서 실패분(SUBMIT_FAILED/EXIT/LOST)만 걸러
   발화하므로 `jobs_updated`와 **같은 주기**다.
 - **전체 JobSet kill**(`mgr.kill(js)`)은 `bkill -g` 1회라 증분 없이 바로 완료 —
-  `kill_progress`가 유의미한 건 **대량 chunk/부분 kill, MC `envpath`(chunk마다
+  `kill_progress`가 유의미한 건 **대량 chunk/부분 kill, MC 분류 kill(chunk마다
   env source), `verify`(재조회 루프)** 일 때.
 - 폴링 주기는 생성 시 `poll_interval_s=` 또는 `mgr.start_polling(js, …)`로,
   throttle은 `progress_min_interval_s`/`progress_min_step_ratio`로 조절(§8).

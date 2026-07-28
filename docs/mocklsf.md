@@ -113,7 +113,7 @@ bjobs -a -json -o "jobid stat exec_host"
 
 `MOCKLSF_FORWARD_CLUSTERS`를 주면 제출된 job 중 일부(`MOCKLSF_FORWARD_RATE`)가
 그 원격 클러스터로 **forward**된 것처럼 동작한다. 실제 LSF MC 환경과 lsfmgr 의
-`envpath` kill 을 실제 LSF 없이 재현·검증할 수 있다.
+MC 분류 kill(`cluster_envpaths`)을 실제 LSF 없이 재현·검증할 수 있다.
 
 ```bash
 export MOCKLSF_FORWARD_CLUSTERS="cluster_b,cluster_c"
@@ -128,18 +128,12 @@ export MOCKLSF_FORWARD_RATE=1.0          # 전부 forward (데모용)
   (`... forwarded to cluster <X> — source its cluster env to kill`, exit 255).
   그 클러스터의 env(cshrc)를 source 해야 죽는다 — 실제 MC 의 문제 그대로다.
   각 클러스터 cshrc 는 `$MOCKLSF_HOME/clusterenv/<cluster>.cshrc` 에 자동
-  생성되며(`setenv MOCKLSF_CLUSTER <cluster>`), lsfmgr 의 `envpath` 로 넘긴다:
+  생성되며(`setenv MOCKLSF_CLUSTER <cluster>`), lsfmgr 의 `cluster_envpaths`
+  매핑으로 넘긴다 — 분류는 라이브러리가 한다:
   ```python
-  # forward_cluster 별로 분류해 각 cshrc 를 source 한 bkill
   from mocklsf import config as mockcfg
-  by_cluster = {}
-  for r in js.jobs():
-      by_cluster.setdefault(r.forward_cluster, []).append(r.job_key)
-  for cluster, keys in by_cluster.items():
-      if cluster:                                  # forward 된 job
-          mgr.kill_jobs(js, keys, envpath=mockcfg.cluster_env_path(cluster))
-      else:                                        # 로컬 job
-          mgr.kill_jobs(js, keys)
+  mgr.kill(js, cluster_envpaths={c: mockcfg.cluster_env_path(c)
+                                 for c in ("cluster_b", "cluster_c")})
   ```
   lsfmgr 는 이때 `tcsh -c "source <cshrc> && set noglob && exec bkill <ids>"`
   를 실행하고, 그 컨텍스트에서 mocklsf bkill 이 forward job 에 닿아 죽인다.
