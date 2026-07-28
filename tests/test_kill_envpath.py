@@ -187,6 +187,34 @@ def test_cluster_envpaths_kill_right_after_submit(qtbot, fake_lsf, config):
         mgr.shutdown()
 
 
+def test_cluster_envpaths_raw_ids_without_jobset(qtbot, fake_lsf, config):
+    """jobset 컨텍스트 없는 원시 id kill도 대상 id를 **직접 bjobs 조회**해
+    cluster를 알아내 분류 kill한다 (store 레코드 불요)."""
+    from lsfmgr import InMemoryStore, LsfJobManager
+    fake_lsf.forward_needs_env = True
+    mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
+                        collect_clusters=True)
+    try:
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            js = submit_cmds(mgr, ["w 0", "w 1"], auto_poll=False)
+        ids = [r.job_id for r in js.jobs()]
+        for jid in ids:                          # LSF상 forward된 RUN
+            fake_lsf.jobs[str(jid)].stat = "RUN"
+            fake_lsf.jobs[str(jid)].forward_cluster = "cluster_busan"
+        fake_lsf.calls.clear()
+        with qtbot.waitSignal(mgr.killer.finished, timeout=10000) as blk:
+            # jobset_id 없이 — 레코드 매핑이 아닌 직접 관측으로 분류돼야 함
+            mgr.killer.kill_jobs(ids,
+                                 cluster_envpaths={"cluster_busan": CSHRC})
+        assert blk.args[1].unconfirmed == 0
+        assert fake_lsf.alive_jobs() == []
+        order = [c[0].rsplit("/", 1)[-1] for c in fake_lsf.calls]
+        assert "bjobs" in order and "tcsh" in order
+        assert order.index("bjobs") < order.index("tcsh")   # 조회가 kill 선행
+    finally:
+        mgr.shutdown()
+
+
 def test_cluster_envpaths_unknown_falls_back_to_default(qtbot, fake_lsf,
                                                         config):
     """조회 후에도 cluster 미상(관측 실패)이면 기본 envpath로 kill —

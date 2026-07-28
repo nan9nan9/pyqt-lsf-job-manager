@@ -316,7 +316,8 @@ mgr.close(js)                          # 종결 (전원 terminal일 때)
 >                                "cluster_b": "/env/b.cshrc"})
 > ```
 > 동작: ① 대상 중 cluster 미상(제출 직후 — 첫 폴링 전)이 있으면 **bkill
-> 전에 bjobs 1회를 강제 조회**해 채우고 ② 관측 cluster(forward 우선,
+> 전에 bjobs 1회를 강제 조회**해 채우고(jobset 컨텍스트 없는 원시 id
+> `kill_jobs`도 대상 id 직접 조회로 동일 보장) ② 관측 cluster(forward 우선,
 > 없으면 source)별로 그 env를 `source`한 bkill(`tcsh -c "source ... &&
 > exec bkill ..."`)로 분류 실행 ③ 그래도 미상이면 기본 envpath(보통
 > 로컬 bkill)로 죽입니다. **제출 직후 즉시 kill해도 cluster를 알고

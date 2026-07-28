@@ -516,7 +516,12 @@ class LsfJobManager(QObject):
           - kill_jobs([id 또는 "id[idx]", ...], jobset_id=...) — 원시 id 기반.
         jobset 컨텍스트가 있으면 optimistic EXIT 전이·verify가 켜지고 결과가
         핸들 kill_finished로도 중계된다. envpath 지정 시 그 LSF env를
-        source한 bkill (MC forward job)."""
+        source한 bkill (MC forward job).
+
+        cluster_envpaths: {클러스터명: cshrc경로} — MC 자동 분류 kill
+        (mgr.kill과 동일). jobset 컨텍스트가 있으면 jobset 조회로, 없는
+        원시 id 호출이면 **대상 id 직접 bjobs 조회**로 cluster를 채운 뒤
+        분류한다 — 어느 경로든 bkill 전에 cluster를 알고 죽는다."""
         if self._shutdown_done:
             log.warning("shutdown 후 kill_jobs 요청 무시")
             return
