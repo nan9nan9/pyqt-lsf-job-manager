@@ -413,3 +413,77 @@ def test_kill_jobs_requires_target(manager):
     """대상 없이 호출하면 조용한 no-op 대신 TypeError."""
     with pytest.raises(TypeError):
         manager.kill_jobs()
+
+
+def test_kill_by_keys_spanning_jobsets_splits_per_jobset(qtbot, manager,
+                                                         fake_lsf):
+    """여러 jobset에 걸친 key를 핸들 없이 넘기면 jobset별로 나눠 각각 정식
+    kill을 건다 — 컨텍스트를 잃고 전역으로 뭉개지 않는다(신호도 jobset별)."""
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        a = submit_cmds(manager, ["a 0", "a 1"], auto_poll=False)
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        b = submit_cmds(manager, ["b 0", "b 1"], auto_poll=False)
+    fake_lsf.set_all("RUN")
+    keys = [a.jobs()[0].job_key, b.jobs()[0].job_key]
+    seen = []
+    manager.kill_finished.connect(lambda jsid, rep: seen.append(jsid))
+    with qtbot.waitSignals([manager.kill_finished, manager.kill_finished],
+                           timeout=10000):
+        manager.kill_jobs(job_keys=keys, verify=True)
+    assert sorted(seen) == sorted([a.id, b.id])     # jobset별 kill_finished
+    assert "" not in seen                           # 전역으로 뭉개지 않음
+    assert len(fake_lsf.alive_jobs()) == 2          # 선택한 2건만 죽음
+
+
+def test_kill_jobs_rejects_jobset_without_keys(manager):
+    """선택 kill인데 선택이 없으면 조용한 no-op 대신 TypeError — 특히
+    cancel_submit=True면 kill 0건인데 제출만 전부 취소돼 위험하다."""
+    js = manager.create_jobset(["x"])
+    with pytest.raises(TypeError):
+        manager.kill_jobs(js)
+    with pytest.raises(TypeError):
+        manager.kill_jobs(js.id, cancel_submit=True)
+    manager.kill_jobs(js, [])            # 빈 선택은 명시하면 정상 no-op
+
+
+def test_kill_jobs_accepts_jobset_id_string_with_keys(qtbot, manager,
+                                                      fake_lsf):
+    """핸들 대신 jobset_id 문자열 + keys 조합(mgr.kill(js.id)과 같은 관용).
+    회귀: 원시 id 경로로 새면 jsid 문자열이 한 글자씩 bkill 대상이 된다."""
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        js = submit_cmds(manager, ["s 0", "s 1"], auto_poll=False)
+    fake_lsf.set_all("RUN")
+    key = js.jobs()[0].job_key
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blk:
+        manager.kill_jobs(js.id, [key])
+    jsid, report = blk.args
+    assert jsid == js.id and report.requested == 1
+    assert len(fake_lsf.alive_jobs()) == 1
+    # jsid 문자 분해가 일어나면 무관한 한 자리 id가 bkill로 나간다
+    for call in fake_lsf.calls_of("bkill"):
+        assert all(len(t) > 1 for t in call[1:]), call
+
+
+def test_global_verify_does_not_mark_surviving_array_exited(qtbot, manager,
+                                                            fake_lsf):
+    """전역 verify가 실측한 생존 array를 optimistic EXIT가 덮으면 안 된다 —
+    접힌 array 레코드(job_id, None)는 parent id로 역매핑해야 한다."""
+    from tests.fake_lsf import FakeJob
+    from lsfmgr import JobRecord
+
+    js = manager.create_jobset(intended_count=1)
+    aid = 7700
+    manager.store.store_add_job(JobRecord(
+        job_id=aid, array_index=None, jobset_id=js.id,
+        job_key=f"{js.id}_arr", state=JobState.RUN, command="r"))
+    fake_lsf.forward_needs_env = True
+    for i in (1, 2):
+        fake_lsf.jobs[f"{aid}[{i}]"] = FakeJob(
+            job_id=aid, array_index=i, name=f"n{i}", group=None, queue="q",
+            command="r", stat="RUN",
+            forward_cluster="busan" if i == 1 else None)
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blk:
+        manager.kill_jobs([aid], verify=True)        # jobset 컨텍스트 없음
+    report = blk.args[1]
+    assert report.still_alive == 1                   # element 1이 살아남음
+    assert manager.get_jobs(js.id)[0].state is JobState.RUN   # EXIT 금지

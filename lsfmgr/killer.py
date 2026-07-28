@@ -12,7 +12,7 @@ import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .command import LsfCommand
-from .errors import LsfmgrError
+from .errors import JobNotFoundError, JobSetNotFoundError, LsfmgrError
 from .monitor import JobsetQuerier
 from .qt import QObject, QRunnable, QThreadPool, Signal
 from .reports import KillProgress, KillReport
@@ -70,9 +70,11 @@ class Killer(QObject):
                                 total=sum(s[1] for s in slots))
 
     def _reg(self, jobset_id: str) -> Optional[List[int]]:
-        """kill 1건 등록 — 반환 slot으로만 갱신/해제한다."""
-        if not jobset_id:                # 전역 kill(jsid 없음)은 스냅샷 대상 아님
-            return None
+        """kill 1건 등록 — 반환 slot으로만 갱신/해제한다.
+        전역 kill(jsid="")도 빈 키로 등록한다 — kill_started 직후
+        is_killing()/kill_snapshot()이 True/값을 준다는 pull 계약이 전역
+        경로에서만 깨지지 않게 한다(jobset 가드는 실제 jsid로만 조회하므로
+        빈 키 항목의 영향이 없다)."""
         slot = [0, 0]
         with self._active_lock:
             ledger_add(self._active, jobset_id, slot)
@@ -358,9 +360,12 @@ class _KillTask(QRunnable):
         if targets:
             groups = self._split_by_envpath(recs, targets, rec_target,
                                             direct_sts)
+            done_base = 0            # env 그룹이 여러 개여도 진행률은 누적
             for envpath, group in groups.items():
-                c, u, rt, res = self._kill_confirm(group, errors,
-                                                   envpath=envpath)
+                c, u, rt, res = self._kill_confirm(
+                    group, errors, envpath=envpath,
+                    total=len(targets), done_base=done_base)
+                done_base += len(group)
                 calls += c
                 unconfirmed += u
                 retries = max(retries, rt)
@@ -422,15 +427,13 @@ class _KillTask(QRunnable):
         """job_key → target 문자열. 미제출(job_id None)·소실 key는 제외.
         jobset 컨텍스트가 없으면 key로 전역 검색한다(GUI가 핸들 없이 행
         선택만으로 kill하는 경로)."""
+        wanted = set(self.job_keys or ())
         pool = (self.killer.store.get_jobs(self.jobset_id) if self.jobset_id
-                else self.killer.store.find_jobs_by_keys(set(self.job_keys or ())))
-        recs = {r.job_key: r for r in pool}
-        out = []
-        for key in (self.job_keys or ()):
-            r = recs.get(key)
-            if r is not None and r.job_id is not None:
-                out.append(self._id_str(r))
-        return out
+                else self.killer.store.find_jobs_by_keys(wanted))
+        # dict으로 접지 않는다 — job_key는 jobset 안에서만 유일해서 전역
+        # 검색은 같은 key를 여럿 돌려줄 수 있다(접으면 조용히 하나만 죽는다).
+        return [self._id_str(r) for r in pool
+                if r.job_key in wanted and r.job_id is not None]
 
     @staticmethod
     def _id_str(rec) -> str:
@@ -499,11 +502,17 @@ class _KillTask(QRunnable):
         changed = []
         for r in recs:
             # r.jobset_id 사용 — kill_jobs 전역 검색은 대상이 여러 JobSet에
-            # 걸칠 수 있어 self.jobset_id(빈 값)로는 안 된다
-            new = self.killer.store.transition(
-                r.jobset_id, r.job_key, JobState.EXIT,
-                fail_reason="KILLED",
-                guard=lambda cur: cur.state.is_on_lsf)
+            # 걸칠 수 있어 self.jobset_id(빈 값)로는 안 된다.
+            # 마킹은 bkill **이후**의 부기다 — 그 사이 main 스레드가 레코드/
+            # jobset을 지웠다고 이미 성공한 kill이 internal 오류로 오보되면
+            # 안 된다(find_jobs와 같은 소실 방어).
+            try:
+                new = self.killer.store.transition(
+                    r.jobset_id, r.job_key, JobState.EXIT,
+                    fail_reason="KILLED",
+                    guard=lambda cur: cur.state.is_on_lsf)
+            except (JobNotFoundError, JobSetNotFoundError):
+                continue
             if new is not None:
                 changed.append(new)
         return changed
@@ -528,16 +537,18 @@ class _KillTask(QRunnable):
         return sts, []
 
     def _kill_confirm(self, targets: List[str], errors: List[str],
-                      envpath: str = ""
-                      ) -> Tuple[int, int, int, set]:
+                      envpath: str = "", total: Optional[int] = None,
+                      done_base: int = 0) -> Tuple[int, int, int, set]:
         """concrete-id kill — bkill 출력의 확인('is being terminated' 등)을
         보고 미확인분을 재시도한다 (submit retry와 대칭, FR-3.4).
         envpath 미지정(빈 문자열)이면 env source 없는 plain bkill — MC 분류
         kill(_split_by_envpath)은 그룹별 envpath를 명시 전달한다.
+        total/done_base는 진행률 통지용 — env 그룹으로 나눠 여러 번 부를 때
+        그룹 크기로 통지하면 UI 진행바가 그룹마다 0부터 다시 찬다.
         반환: (LSF 호출 횟수, 최종 미확인 수, 재시도 라운드 수, 해소된 id 집합)."""
         k = self.killer
         cfg = k.command.config
-        total = len(targets)
+        total = len(targets) if total is None else total
         pending = set(targets)
         resolved_all: set = set()
         calls = 0
@@ -546,7 +557,8 @@ class _KillTask(QRunnable):
             base = len(resolved_all)         # 이번 라운드 시작 시 확인분
             resolved, c = k.command.bkill_targets_confirm(
                 sorted(pending), envpath=envpath,
-                on_progress=lambda done: self._emit_progress(base + done, total))
+                on_progress=lambda done: self._emit_progress(
+                    done_base + base + done, total))
             calls += c
             resolved_all |= resolved
             pending -= resolved
@@ -638,15 +650,26 @@ class _KillTask(QRunnable):
         # 않도록) 폴링/재kill에 남기고, 전이분은 report.changed로 합류시킨다.
         if self.jobset_id:
             return len(alive), {r.job_key for r in alive}, changed
-        # 전역 경로: pool이 JobStatus(=job_key 없음)라 생존 레코드의 key를
-        # 레코드 풀에서 역매핑한다 — caller가 생존분을 optimistic EXIT
-        # 마킹에서 제외하는 데 쓴다(생존 job을 죽은 것처럼 덮지 않기).
-        live = {(st.job_id, st.array_index) for st in alive}
-        keys = set()
-        if live:
-            try:
-                keys = {r.job_key for r in self._record_pool()
-                        if (r.job_id, r.array_index) in live}
-            except Exception as e:       # noqa: BLE001 — 집계 수치는 유효
-                log.warning("verify 생존 레코드 역매핑 실패(무시): %r", e)
-        return len(alive), keys, changed
+        # 전역 경로: pool이 JobStatus(=job_key 없음)라 생존 레코드를 풀에서
+        # 역매핑한다 — caller가 생존분을 optimistic EXIT 마킹에서 제외하는 데
+        # 쓴다(생존 job을 죽은 것처럼 덮지 않기).
+        # array 레코드는 monitor가 element들을 (job_id, None) 하나로 접으므로
+        # (job_id, array_index) 동일성만으로는 **절대** 매칭되지 않는다 —
+        # 접힌 레코드는 parent id로 매칭해야 한다(안 그러면 alive_keys가 늘
+        # 비어 살아있는 array가 EXIT로 덮인다).
+        if not alive:
+            return 0, set(), changed
+        live_pairs = {(st.job_id, st.array_index) for st in alive}
+        live_pids = {st.job_id for st in alive}
+        try:
+            recs = [r for r in self._record_pool()
+                    if (r.job_id in live_pids if r.array_index is None
+                        else (r.job_id, r.array_index) in live_pairs)]
+        except Exception as e:           # noqa: BLE001 — 집계 수치는 유효
+            log.warning("verify 생존 레코드 역매핑 실패(무시): %r", e)
+            recs = []
+        if not recs:                     # 레코드를 못 찾음 — 수치만 보고
+            return len(alive), set(), changed
+        # 잔존 수 단위를 jobset 경로(레코드 수)와 맞춘다 — element 수로 세면
+        # 같은 array가 요청 1건에 잔존 3건으로 보고된다.
+        return len(recs), {r.job_key for r in recs}, changed

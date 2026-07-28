@@ -27,6 +27,12 @@ log = logging.getLogger("lsfmgr.monitor")
 _PRESERVE_ON_NONE = ("run_time_s", "start_time", "finish_time", "working_dir")
 
 
+def _brief(items: List[str], head: int = 5) -> str:
+    """로그용 축약 — 앞 몇 건 + 나머지 개수."""
+    shown = ", ".join(items[:head])
+    return shown + (f" 외 {len(items) - head}건" if len(items) > head else "")
+
+
 def _keep(new, old):
     """관측값 병합 — None(판정 불가)은 저장값 보존."""
     return new if new is not None else old
@@ -47,6 +53,21 @@ class JobsetQuerier:
     def __init__(self, store: JobSetStore, command: LsfCommand):
         self.store = store
         self.command = command
+        # jobset → {job_key: 연속 미발견 횟수}. 사이클마다 통째로 갈아끼워
+        # (발견되면 자연히 사라짐) 누수·정리 로직이 없다.
+        self._missing_streak: Dict[str, Dict[str, int]] = {}
+        self._streak_lock = threading.Lock()
+
+    def _pop_streaks(self, jobset_id: str) -> Dict[str, int]:
+        with self._streak_lock:
+            return self._missing_streak.pop(jobset_id, {})
+
+    def _set_streaks(self, jobset_id: str, streaks: Dict[str, int]) -> None:
+        with self._streak_lock:
+            if streaks:
+                self._missing_streak[jobset_id] = streaks
+            else:
+                self._missing_streak.pop(jobset_id, None)
 
     def query(self, jobset_id: str) -> QueryResult:
         self.store.get_jobset(jobset_id)     # 존재 검증 (없으면 예외)
@@ -143,32 +164,52 @@ class JobsetQuerier:
                 update_specs.append(
                     (rec.job_key, st.state, unchanged(rec), fields))
 
-        deferred: List[str] = []             # 이번 사이클 판단 보류 job_key
+        # --- 미발견 처리: 보류(조회 불가) / 유예(연속 미발견) / LOST 확정 ---
+        # LOST는 "id로 조회했는데 LSF가 모른다"는 뜻이라 **되돌릴 수 없는**
+        # terminal이다. 그래서 확정 전에 두 겹의 안전장치를 둔다:
+        #   ① 조회 자체가 불가/실패한 job은 보류 (판단 근거가 없음)
+        #   ② 근거가 있어도 **연속 N회**(lost_after_missing_polls) 미발견일
+        #      때만 확정 — 제출 직후 등록 지연, 앱 환경이 가리키는 클러스터와
+        #      wrapper가 실제 제출한 클러스터가 다른 경우처럼 '한 사이클만
+        #      안 보이는' 상황에서 멀쩡한 job을 죽은 것으로 만들지 않는다.
+        deferred: List[str] = []             # ① 조회 불가 — 스트릭도 안 올림
+        waiting: List[str] = []              # ② 유예 중 (미발견이지만 미확정)
+        prev = self._pop_streaks(jobset_id)
+        cur: Dict[str, int] = {}
         if missing:
-            # v10.3: bhist fallback 삭제 — 최종 상태 복원 수단은 bjobs뿐이다.
-            # explicit id 조회는 CLEAN_PERIOD 내 종료 job을 보여주므로 폴링
-            # 주기(수십 초) 안에 종료를 관측한다. 그래도 안 보이면 purge된
-            # 것이고, 그 job의 최종 상태는 어디서도 알 수 없다 = LOST.
+            grace = max(1, self.command.config.lost_after_missing_polls)
             for rec in missing:
-                if (rec.job_id in bjobs_failed
-                        or (rec.job_id is None and bjobs_failed)):
-                    # job_id 없는 레코드는 id 기반 조회로 확인 자체가 불가 —
-                    # bjobs chunk 장애가 섞인 사이클엔 보수적으로 보류한다
-                    # (FR-4.3). LSF 순단이면 다음 사이클에 정상 복구되고,
-                    # 진짜 소실이면 장애 해소 후 사이클에서 확정된다. chunk
-                    # 격리 덕에 다른 chunk에서 확인된 job은 정상 전이된다.
+                if rec.job_id is None or rec.job_id in bjobs_failed:
+                    # job_id 없는 레코드는 id 조회로 확인 자체가 불가하고,
+                    # bjobs chunk가 실패한 사이클도 근거가 없다 (FR-4.3).
+                    # LSF 순단이면 다음 사이클에 복구되고, 진짜 소실이면
+                    # 장애 해소 후 사이클에서 확정된다.
                     deferred.append(rec.job_key)
-                else:
-                    lost_specs.append((rec.job_key, JobState.LOST,
-                                       unchanged(rec),
-                                       {"fail_reason": "NOT_FOUND_IN_LSF"}))
-            if deferred:
-                # 사이클당 1줄로 집계 — job당 경고면 대형 jobset의 장애
-                # 사이클마다 수백 줄이 반복돼 로그가 잠긴다 (NFR-6)
-                log.warning("조회 실패로 %d건 판단 보류 (LOST 확정 안 함): "
-                            "%s%s", len(deferred), ", ".join(deferred[:5]),
-                            f" 외 {len(deferred) - 5}건"
-                            if len(deferred) > 5 else "")
+                    continue
+                n = prev.get(rec.job_key, 0) + 1
+                cur[rec.job_key] = n
+                if n < grace:
+                    waiting.append(rec.job_key)
+                    continue
+                lost_specs.append((rec.job_key, JobState.LOST,
+                                   unchanged(rec),
+                                   {"fail_reason": "NOT_FOUND_IN_LSF"}))
+        self._set_streaks(jobset_id, cur)
+        # 사이클당 1줄로 집계 — job당 경고면 대형 jobset의 장애 사이클마다
+        # 수백 줄이 반복돼 로그가 잠긴다 (NFR-6)
+        if deferred:
+            log.warning("조회 불가로 %d건 판단 보류 (LOST 확정 안 함): %s",
+                        len(deferred), _brief(deferred))
+        if waiting:
+            log.warning("bjobs 미발견 %d건 — LOST 유예 중(연속 %d회 필요): "
+                        "id=%s", len(waiting),
+                        max(1, self.command.config.lost_after_missing_polls),
+                        _brief([f"{k}({cur[k]}회)" for k in waiting]))
+        if lost_specs:
+            log.warning("LOST 확정 %d건 — 연속 %d회 bjobs 미발견: %s",
+                        len(lost_specs),
+                        max(1, self.command.config.lost_after_missing_polls),
+                        _brief([spec[0] for spec in lost_specs]))
 
         # 전이 대상 소실(사이클 도중 remove_job)·guard 거부는 transition_many가
         # 조용히 건너뛰고 반환 목록에서 제외한다 (safe_transition과 동일 계약).

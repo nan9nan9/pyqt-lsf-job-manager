@@ -73,6 +73,11 @@ class LsfConfig:
     kill_status_policy: str = "optimistic"
 
     poll_interval_s: float = 10.0        # FR-4.4 기본 polling 주기
+    #: bjobs에서 안 보이는 job을 LOST로 확정하기까지 필요한 **연속** 미발견
+    #: 폴링 횟수. 1이면 즉시 확정. 제출 직후 등록 지연이나, 앱 환경이 가리키는
+    #: 클러스터와 wrapper가 실제 제출한 클러스터가 달라 한두 사이클 안 보이는
+    #: 경우에 멀쩡한 job을 LOST로 만들지 않기 위한 유예다.
+    lost_after_missing_polls: int = 3
 
     #: LSF MultiCluster(job forwarding) 정보 수집 — bjobs -o 에 source_cluster·
     #: forward_cluster 필드를 추가해 JobRecord.source_cluster/forward_cluster 로

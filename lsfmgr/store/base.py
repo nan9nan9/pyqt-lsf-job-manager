@@ -94,6 +94,9 @@ class JobSetStore(ABC):
     def find_jobs_by_keys(self, job_keys: Set[str]) -> List[JobRecord]:
         """job_key 집합의 레코드를 jobset 무관 전역 검색 — GUI가 테이블 행의
         job_key만 들고 jobset 핸들 없이 kill할 때 쓴다(find_jobs의 key판).
+        job_key는 **jobset 안에서만** 유일하므로 같은 key가 여러 jobset에
+        존재할 수 있다 — 반환은 jobset별 다건일 수 있고, 소비자가 key로
+        dict을 만들면 조용히 하나를 잃는다(레코드 목록 그대로 다뤄라).
         기본 구현은 jobset 순회, 백엔드가 최적화해도 된다."""
         if not job_keys:
             return []

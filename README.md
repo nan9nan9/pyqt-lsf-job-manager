@@ -63,6 +63,7 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)
 | `retry_backoff` | `"fixed:2"` | 생성자, submit | `"fixed:N"`(N초 고정) / `"expo:N"`(지수) |
 | `rate_limit_per_s` | 없음 | 생성자, submit | 초당 제출 상한 (LSF 부하 보호) |
 | `poll_interval_s` | 10 | 생성자, submit | polling 주기 (5~60) |
+| `lost_after_missing_polls` | 3 | 생성자 | bjobs에서 안 보이는 job을 **LOST로 확정하기까지** 필요한 연속 미발견 폴링 횟수. 1이면 즉시. 제출 직후 등록 지연이나 조회 클러스터 불일치로 한두 사이클 안 보이는 job을 죽은 것으로 만들지 않기 위한 유예 |
 | `poll_runtime_updates` | True | 생성자 | RUN 중 `run_time_s`(경과시간) 변화도 `jobs_updated`로 live 발행. 수만 개 규모 부하 시 False로 끔 |
 | `submit_finished_on_gate_reject` | True | 생성자 | `pre_submit` 게이트가 False면 `submit_finished`(cancelled=N)도 발화. False면 종료는 `pre_submit_finished(False)`만 |
 | `collect_clusters` | False | 생성자 | LSF MultiCluster forwarding 정보 수집. 켜면 `JobRecord.source_cluster`/`forward_cluster`를 폴링으로 채움(MC 환경 opt-in) |

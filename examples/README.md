@@ -21,7 +21,7 @@ python examples/gui_demo.py   # 통합 GUI 데모
 | JobSet 트리 | 다중 JobSet 요약 실시간 갱신, Facade Signal 스트림 (README §8) |
 | job 테이블 | 변경분 배치 **증분 upsert**(QT-4, 전체 재그리기 금지), 상태별 색, cluster 열 |
 | job 추가 / 재실행 | **merge** 로만 추가(v9), 실패분 같은 `merge_id` 교체 후 전체 재제출 |
-| Kill 제어 | 전체 kill(verify, **MC-aware** — forward job 은 `envpath` 분류 kill), `PEND만`, 선택 행만(`kill_jobs`) |
+| Kill 제어 | 전체 kill(verify, **MC-aware** — `cluster_envpaths` 로 클러스터별 분류 kill), `PEND만`(제출 우선권 opt-in), 선택 행만(`kill_jobs`) |
 | handler (FR-7) | 체크 시 `add_handler` — RUN 중 폴링마다 job 출력 파싱 + 종료 시 최종 1회 → `handler_finished` 로그 |
 | post_process (FR-10) | 전원 terminal 도달 시 worker 에서 1회 종합 집계 → `post_processing_finished` |
 | job 상세 | 테이블 더블클릭 → 로컬 레코드 상세 (LSF 호출 0) |
@@ -35,8 +35,8 @@ python examples/gui_demo.py   # 통합 GUI 데모
 폼의 "MC forward 흉내"를 켜고 제출하면 mocklsf 가 일부 job 을 원격 클러스터로
 forward 합니다(`collect_clusters=True` 폴링이 `forward_cluster` 를 채움 —
 테이블 cluster 열에서 확인). 이후 "Kill+verify (MC-aware)"는 forward job 을
-클러스터별로 분류해 그 env(cshrc)를 `source` 한 bkill(`envpath=`)로, 로컬 job 은
-일반 kill 로 죽입니다 — forward job 이 로컬 bkill 로 안 죽는 실제 MC 환경의
+클러스터별로 분류해 그 env(cshrc)를 `source` 한 bkill 로, 나머지는
+env 지정 없는 일반 bkill 로 죽입니다 — forward job 이 로컬 bkill 로 안 죽는 실제 MC 환경의
 해법 시연입니다. 상세는 [`../docs/mocklsf.md`](../docs/mocklsf.md) 참고.
 
 ## 파일
@@ -47,7 +47,7 @@ forward 합니다(`collect_clusters=True` 폴링이 `forward_cluster` 를 채움
   - `wrapper(tool, *args)` — 제출 wrapper 커맨드(토큰 리스트) 생성.
   - `configure_mocklsf(pend=, run=, submit_fail_rate=, exit_rate=,
     forward_clusters=, forward_rate=, ...)` — `MOCKLSF_*` 환경변수 설정.
-  - `cluster_env_path(cluster)` — forward 클러스터 cshrc 경로(kill `envpath` 용).
+  - `cluster_env_path(cluster)` — forward 클러스터 cshrc 경로(kill `cluster_envpaths` 값).
   - `install_logging`, `maybe_autoquit`(`LSFMGR_DEMO_AUTOQUIT=<초>`).
 
 > 참고: LOST(job이 흔적 없이 소실)는 mocklsf 가 재현하지 않습니다. `detect_lost()`

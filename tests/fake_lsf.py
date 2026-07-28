@@ -51,8 +51,7 @@ class FakeLsf:
         self.fail_next_bsub = 0              # 앞으로 N회 bsub rc=1
         self.no_jobid_next_bsub = 0          # 앞으로 N회 id 파싱 불가 출력
         self.reject_group = False            # -g 지정 시 거부
-        self.fail_all_queries = False        # bjobs 장애 (LSF down)
-                                             # (chunk 단위 부분 실패 재현용)
+        self.fail_all_queries = False        # bjobs 전면 장애 (LSF down)
         self.bjobs_fail_ids: set = set()     # 이 job_id가 포함된 bjobs id 조회만
                                              # rc=255 (bjobs chunk 부분 실패 재현용)
         self.fail_next_bkill = 0             # 앞으로 N회 bkill rc=255 에러
@@ -190,8 +189,21 @@ class FakeLsf:
         has_explicit_id = any(re.match(r"^\d+(?:\[\d+\])?$", a) for a in rest)
         matched = self._select(opts, rest,
                                include_done=("-a" in opts) or has_explicit_id)
+        # 실제 LSF: 요청한 id 중 **하나라도** 없으면(purge 등) rc=255 +
+        # "Job <id>: No matching job found"를 내면서도 **찾은 job의 행은
+        # stdout에 그대로 출력**한다. 이 혼합 응답을 그대로 재현해야
+        # "살아있는 job까지 LOST 확정" 회귀를 테스트가 잡는다.
+        found_ids = {(j.job_id, j.array_index) for j in matched} | \
+                    {(j.job_id, None) for j in matched}
+        miss = [a for a in rest
+                if (m := re.match(r"^(\d+)(?:\[(\d+)\])?$", a))
+                and (int(m.group(1)),
+                     int(m.group(2)) if m.group(2) else None) not in found_ids]
+        nomatch_err = "".join(f"Job <{a}>: No matching job found\n"
+                              for a in miss)
         if not matched:
-            return CommandResult(255, "", "No matching job found\n")
+            return CommandResult(255, "", nomatch_err or
+                                 "No matching job found\n")
         fmt = opts.get("-o", "")
         # MC 필드 미지원 사이트 흉내 — reject_clusters면 그 필드 요청 시 rc=255
         if self.reject_clusters and "source_cluster" in fmt:
@@ -204,7 +216,8 @@ class FakeLsf:
         for j in matched:
             row = self._row_values(j)          # job당 1회 계산
             lines.append(";".join(row.get(f) or "-" for f in fields))
-        return CommandResult(0, "\n".join(lines) + "\n", "")
+        return CommandResult(255 if miss else 0,
+                             "\n".join(lines) + "\n", nomatch_err)
 
     @staticmethod
     def _row_values(j: FakeJob) -> dict:

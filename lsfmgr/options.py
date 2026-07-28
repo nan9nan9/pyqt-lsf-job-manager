@@ -47,6 +47,7 @@ MANAGER_ONLY_KEYS = frozenset({
     "kill_status_policy", "kill_max_retry", "kill_retry_delay_s",
     "progress_min_interval_s", "progress_min_step_ratio",
     "poll_runtime_updates", "submit_finished_on_gate_reject",
+    "lost_after_missing_polls",
     "collect_clusters", "min_state_dwell_s",
     "test_submit_wrapper_pattern_cmd",
 })
@@ -162,6 +163,12 @@ def _validate(key: str, value: Any) -> Any:
         v = int(value)
         if v < 0:
             raise ValueError(f"kill_max_retry는 0 이상 (got {value})")
+        return v
+    if key == "lost_after_missing_polls":
+        v = int(value)
+        if v < 1:
+            raise ValueError(
+                f"lost_after_missing_polls는 1 이상 (got {value})")
         return v
     if key == "kill_retry_delay_s":
         v = float(value)

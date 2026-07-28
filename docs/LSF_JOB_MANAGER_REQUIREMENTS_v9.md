@@ -340,7 +340,10 @@ JobSetStore(ABC) ── InMemoryStore
 - **FR-4 Monitoring**: 조회는 explicit job id chunked `bjobs -noheader
   -o "... delimiter=';'"`뿐(v10.2에서 -json 복귀, 폭 미지정; v10에서
   group/name 조회 제거 — wrapper job과 경로 통일), `is_on_lsf`만 조회,
-  못 찾은 id → `LOST` 확정(v10.3: bhist fallback 삭제). polling은 batch 반영 후
+  못 찾은 id → **연속 `lost_after_missing_polls`회** 미발견일 때만 `LOST`
+  확정(v10.3: bhist fallback 삭제 + 1회 미발견 즉시 확정 폐기 — 제출 직후
+  등록 지연·조회 클러스터 불일치로 멀쩡한 job이 죽는 것을 막는다).
+  polling은 batch 반영 후
   Signal(**FR-4.1** 요약+변경분, **FR-4.2** LOST 확정).
   - **FR-4.3 판단 보류**: 조회 실패(장애)와 부재(LOST)를 구분 — 미발견이라도
     조회에 **실패가 섞였으면 LOST 확정 안 함**(다음 사이클 재시도). chunk 단위

@@ -7,7 +7,6 @@
 - C8-2: collect_clusters=True인데 포맷 저하 시 저장된 forward_cluster를 None으로 덮음
 - C8-3: LsfConfig가 poll_interval_s를 검증 안 해 auto_poll 시 Qt slot에서 앱이 죽음
 - C8-4: find_jobs가 순회 중 삭제된 jobset의 예외를 흘려 전역 kill이 중단됨
-- C8-5: bhist "Exited with exit code 0"(성공)을 EXIT(실패)로 오분류
 """
 from __future__ import annotations
 
@@ -127,9 +126,3 @@ def test_find_jobs_skips_deleted_jobset(store):
     assert [r.job_id for r in found] == [10]
 
 
-# ----------------------------------------------------------------------
-# C8-5→C9: bhist "Exited"는 exit code와 무관하게 EXIT — LSF 분류가 권위다.
-#          "Exited with exit code 0"(kill/requeue-exit)을 DONE으로 바꾸면
-#          죽인/실패 job이 성공으로 감춰진다(사이클 9에서 EXIT로 되돌림·동결).
-#          정상 완료는 "Done successfully"로 온다.
-# ----------------------------------------------------------------------

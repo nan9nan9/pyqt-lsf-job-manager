@@ -501,23 +501,52 @@ class LsfJobManager(QObject):
             verify = bool(self._defaults.get("verify_kill", False))
         ids: Optional[List[object]] = None
         keys: Optional[Sequence[str]] = None
-        if job_ids_or_jobset is None and job_keys is None:
-            raise TypeError("kill_jobs: job_ids 또는 job_keys 중 하나는 필요")
-        if job_ids_or_jobset is None or isinstance(job_ids_or_jobset, JobSet):
+        # 문자열은 시퀀스라 list()가 **글자 단위로 분해**된다 — jobset_id나
+        # key 하나를 실수로 넘기면 "js_2026..." 이 한 글자짜리 target이 되어
+        # 무관한 job id에 bkill이 나간다. 조용히 통과시키지 않는다.
+        if isinstance(job_keys, str):
+            raise TypeError("kill_jobs: job_keys는 문자열이 아니라 "
+                            f"목록이어야 한다 (got {job_keys!r})")
+        if isinstance(job_ids_or_jobset, str) and job_keys is None:
+            raise TypeError(
+                "kill_jobs: 첫 인자 문자열은 job id 목록이 아니다 — jobset "
+                f"이면 job_keys와 함께 넘기고, 원시 id면 목록으로 넘겨라 "
+                f"(got {job_ids_or_jobset!r})")
+        if job_keys is not None or isinstance(job_ids_or_jobset, JobSet):
+            # key 경로. 첫 인자는 JobSet 핸들이거나 jobset_id 문자열이거나
+            # (핸들 없는 호출이면) None — _jsid가 핸들/문자열을 모두 받는다.
             # key→id 해석은 killer worker에서 한다 (barrier 이후 — 제출 중이던
             # job의 id까지 잡는다). 여기서 미리 풀면 그 job이 kill을 빠져나간다.
-            keys = list(job_keys or ())
-            if job_ids_or_jobset is not None:
-                jsid = self._jsid(job_ids_or_jobset)
-            elif jobset_id is not None:
-                jsid = self._jsid(jobset_id)
+            if job_keys is None:
+                # 선택 kill인데 선택이 없다 — 조용한 no-op은 위험하다
+                # (cancel_submit=True면 kill은 0건인데 제출만 전부 취소된다).
+                # 빈 선택은 job_keys=[]로 명시해야 한다.
+                raise TypeError(
+                    "kill_jobs: jobset을 넘겼으면 job_keys도 필요하다 "
+                    "(전체 kill은 mgr.kill(js), 빈 선택은 job_keys=[])")
+            keys = list(job_keys)
+            owner = (job_ids_or_jobset if job_ids_or_jobset is not None
+                     else jobset_id)
+            if owner is not None:
+                jsid = self._jsid(owner)
             else:
-                # 핸들 없는 key 호출 — 소유 jobset을 역추적한다. 하나면 그걸
-                # 컨텍스트로 쓰고(verify/신호/우선권 유지), 여러 jobset에
-                # 걸치면 컨텍스트 없이(전역) 죽인다.
-                owners = {r.jobset_id
-                          for r in self.store.find_jobs_by_keys(set(keys))}
-                jsid = owners.pop() if len(owners) == 1 else ""
+                # 핸들 없는 key 호출 — 소유 jobset을 역추적한다. 여러 jobset에
+                # 걸치면 jobset별로 나눠 각각 정식 kill을 건다(컨텍스트를 ""로
+                # 뭉개면 verify/신호/우선권/진행표시가 전부 무력해진다).
+                owners: Dict[str, List[str]] = {}
+                for r in self.store.find_jobs_by_keys(set(keys)):
+                    owners.setdefault(r.jobset_id, []).append(r.job_key)
+                if not owners:
+                    log.warning("kill_jobs: 알 수 없는 job_key %d건 — 무시",
+                                len(keys))
+                    return
+                if len(owners) > 1:
+                    for oid, okeys in owners.items():
+                        self.kill_jobs(oid, okeys, verify=verify,
+                                       cluster_envpaths=cluster_envpaths,
+                                       cancel_submit=cancel_submit)
+                    return
+                jsid, keys = next(iter(owners.items()))
         else:
             # 원시 id 경로 — caller가 문자열을 그대로 넘긴다. array element를
             # "id[idx]"로 지정하는데 그 array를 monitor가 (id, None) 단일

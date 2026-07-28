@@ -391,7 +391,7 @@ class LsfCommand:
         # CLEAN_PERIOD 내 종료 job을 보여준다. CLEAN_PERIOD 밖(purge)만
         # LOST 판정으로 넘어간다. (v10: 조회는 id 기반뿐 — group/name
         # 조회는 제거됐다. 되살릴 때는 -a 오염 문제를 다시 고려할 것.)
-        def run(fmt: str) -> Optional[CommandResult]:
+        def run(fmt: str) -> CommandResult:
             argv = cmd_tokens(self.config.bjobs_path) + [
                 "-noheader", "-o", fmt] + selector
             return self._run_query(argv)
@@ -420,8 +420,6 @@ class LsfCommand:
                                 (e.stderr or str(e)).strip()[:200])
                     continue
                 raise
-        if res is None:
-            return []
         return self._parse_bjobs(res.stdout)
 
     def bjobs_by_ids(self, job_ids: Sequence[int]
@@ -475,23 +473,29 @@ class LsfCommand:
         return failed
 
     def _run_or_nomatch(self, argv: List[str],
-                        timeout: float) -> Optional[CommandResult]:
-        """실행 후 결과 반환. '매칭 job 없음'은 None (정상 빈 결과)이고,
-        timeout/비정상 종료는 LsfCommandError — 장애와 없음을 구분한다."""
+                        timeout: float) -> CommandResult:
+        """실행 후 결과 반환. '매칭 job 없음'은 **장애가 아니라 정상 결과**로
+        보고 그대로 돌려준다 — timeout/그 외 비정상 종료만 LsfCommandError.
+
+        핵심: 한 chunk에 purge된 id가 하나라도 섞이면 LSF는 rc≠0 +
+        `Job <id>: No matching job found`를 내면서도 **stdout에는 찾은 job의
+        행을 그대로 출력**한다. 이 결과를 버리면 살아있는 job이 '부재'로
+        오인돼 통째로 LOST 확정된다(실환경 관측 버그) — 반드시 stdout을
+        파싱해야 한다. 없는 id는 행이 없으니 자연히 미발견으로 남는다."""
         try:
             res = self._run(argv, timeout)
         except subprocess.TimeoutExpired:
             raise LsfCommandError(f"{argv[0]} timeout")
         if res.returncode != 0:
             msg = (res.stderr + res.stdout).lower()
-            if any(p in msg for p in _NO_JOB_PATTERNS):
-                return None
-            raise LsfCommandError(
-                f"{argv[0]} exit {res.returncode}: {res.stderr.strip()[:200]}",
-                returncode=res.returncode, stderr=res.stderr)
+            if not any(p in msg for p in _NO_JOB_PATTERNS):
+                raise LsfCommandError(
+                    f"{argv[0]} exit {res.returncode}: "
+                    f"{res.stderr.strip()[:200]}",
+                    returncode=res.returncode, stderr=res.stderr)
         return res
 
-    def _run_query(self, argv: List[str]) -> Optional[CommandResult]:
+    def _run_query(self, argv: List[str]) -> CommandResult:
         return self._run_or_nomatch(argv, self.config.query_timeout_s)
 
     @staticmethod

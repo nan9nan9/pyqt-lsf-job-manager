@@ -1,13 +1,12 @@
-"""실패 진단 기능 테스트 — fail_message 저장 + job_detail 온디맨드 조회.
+"""실패 진단 기능 테스트 — fail_message 저장.
 
-- SUBMIT_FAILED/RETRY_WAIT: bsub/wrapper 실행의 stderr/stdout(터미널 메시지)을
+- SUBMIT_FAILED/RETRY_WAIT: wrapper 실행의 stderr/stdout(터미널 메시지)을
   JobRecord.fail_message에 저장한다.
-- EXIT의 원인은 저장하지 않는다(폴링 오버헤드 0) — 앱에서 상태 클릭 시
-  EXIT 원인은 자동 수집하지 않는다 (v10.3: bhist 조회 삭제).
+- EXIT의 원인은 자동 수집하지 않는다(폴링 오버헤드 0) — v10.3에서 bhist
+  조회를 삭제했고, 상세는 레코드 필드(exit_code 등)로 본다.
 """
 from __future__ import annotations
 
-from lsfmgr import InMemoryStore, LsfJobManager
 from tests.conftest import submit_cmds
 from lsfmgr.states import JobState
 

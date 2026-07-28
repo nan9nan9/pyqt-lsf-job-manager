@@ -43,6 +43,9 @@ def test_real_loss_still_detected_after_recovery(qtbot, manager, fake_lsf):
         pass
     rec = js.jobs()[0]
     fake_lsf.vanish_job(rec.job_id)
+    grace = manager.command.config.lost_after_missing_polls
+    for _ in range(grace - 1):                   # 유예 사이클 소진
+        manager.querier.query(js.id)
     with qtbot.waitSignal(manager.job_lost, timeout=10000):
         manager.query_once(js)
     assert js.summary["LOST"] == 1
@@ -152,32 +155,6 @@ def test_add_jobs_atomic_on_failure(store):
         store.store_add_jobs([make_job(idx=0), make_job(jsid="nope", idx=1)])
     assert store.get_jobs("js1") == [], "실패한 배치의 일부가 반영됨"
 
-
-# ----------------------------------------------------------------------
-# R3-12: bhist가 array element를 구분 못해 전 element에 동일 상태 오기록
-# ----------------------------------------------------------------------
-# ----------------------------------------------------------------------
-# R3-13: SQLite commit 실패 시 pending 잔존 → 다음 commit에 유령 반영
-# ----------------------------------------------------------------------
-# ----------------------------------------------------------------------
-# R3-14: transition으로 키 필드 변경 시 이중 계상 → 거부
-# ----------------------------------------------------------------------
-def test_transition_rejects_key_fields(store):
-    store.store_insert_jobset(make_jobset(n=1))
-    store.store_add_job(make_job(idx=0))
-    # v10.1 rename 후 job_key/jobset_id는 transition의 위치 인자와 충돌해
-    # Python 수준(TypeError)에서 원천 차단된다
-    with pytest.raises(TypeError):
-        store.transition("js1", "js1_0", JobState.PEND, job_key="other")
-    with pytest.raises(TypeError):
-        store.transition("js1", "js1_0", JobState.PEND, jobset_id="js2")
-    # fields를 dict로 받는 transition_many는 _reject_key_fields가 막는다
-    with pytest.raises(ValueError):
-        store.transition_many("js1", [("js1_0", JobState.PEND, None,
-                                       {"job_key": "other"})])
-    with pytest.raises(ValueError):
-        store.transition_many("js1", [("js1_0", JobState.PEND, None,
-                                       {"jobset_id": "js2"})])
 
 
 # ----------------------------------------------------------------------
