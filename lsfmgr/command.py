@@ -281,9 +281,7 @@ class LsfCommand:
         env로 나간 bkill인지가 로그만 봐도 드러나야 오진을 막는다(빈 값이면
         `env=-(local)` = env source 없이 로컬 bkill)."""
         tname = threading.current_thread().name
-        prog = argv[0].rsplit("/", 1)[-1] if argv else "?"   # bsub/bjobs/bkill..
-        if envpath:
-            prog = f"bkill@{envpath.rsplit('/', 1)[-1]}"     # tcsh 대신 실체
+        prog = argv[0].rsplit("/", 1)[-1] if argv else "?"   # 실행 프로그램 그대로
         log.debug("[%s] exec %s: %s (env=%s, cwd=%s, timeout=%.1fs)",
                   tname, prog, " ".join(map(str, argv)),
                   envpath or "-(local)", cwd, timeout)
