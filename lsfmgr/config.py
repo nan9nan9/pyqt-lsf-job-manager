@@ -1,8 +1,8 @@
 """설정 (LsfConfig) — Qt 비의존."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple, Union
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 #: LSF 명령 경로. 단일 프로그램은 str, bsub를 호출하는 wrapper처럼 고정 인자가
 #: 붙는 명령은 토큰 목록으로 지정한다 (예: ["customwrapper_sub", "--proj", "X"]).
@@ -18,6 +18,14 @@ class LsfConfig:
     #  제거됨. 제출은 wrapper 커맨드를 그대로 실행한다.)
     bjobs_path: CmdPath = "bjobs"
     bkill_path: CmdPath = "bkill"
+
+    #: MultiCluster kill — {클러스터명: cshrc 경로}. 지정하면 kill이 대상의
+    #: cluster를 확인해(미상이면 bkill 직전에 최소 포맷으로 1회 조회) 그
+    #: 클러스터 env를 source한 bkill로 나눠 죽인다. forward된 job은 로컬
+    #: bkill로 죽지 않는 환경의 해법이다. 와일드카드 키 `"*"`는 미상/미매핑
+    #: 대상에 쓸 기본 env(없으면 env source 없는 plain bkill).
+    #: 앱 환경 속성이라 호출마다 바뀌지 않는다 — 생성자에서 한 번 준다.
+    cluster_envpaths: Dict[str, str] = field(default_factory=dict)
 
     #: wrapper 제출의 **실행 프로그램 치환** — (glob 패턴, 대체 CmdPath).
     #: 제출 커맨드는 문자열에 프로그램명이 박혀 있어(lsfmgr가 조립하지 않는다)

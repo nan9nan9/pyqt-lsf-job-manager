@@ -409,19 +409,13 @@ class LsfJobManager(QObject):
     def kill(self, jobset_id, *,
                     only_state: Optional[JobState] = None,
                     verify: Optional[bool] = None,
-                    cluster_envpaths: Optional[Dict[str, str]] = None,
                     cancel_submit: bool = False) -> None:
         """[async→Signal] JobSet kill — 결과는 kill_finished.
         verify 미지정 시 verify_kill 옵션(②) 적용.
 
-        cluster_envpaths: {클러스터명: cshrc경로} — MC 분류 kill (env source).
-        지정 시 ① 대상 중 cluster 미상(source/forward_cluster None)이 있으면
-        **bkill 전에 bjobs 1회를 강제 조회**해 채우고(제출 직후 즉시 kill해도
-        cluster를 알고 죽인다), ② 관측 cluster(forward 우선)별로 그 env를
-        source한 bkill로 분류 실행, ③ 그래도 미상이면 기본 env로 kill.
-        와일드카드 키 `"*"`가 그 기본 env — {"*": cshrc} 하나만 주면 전 대상을
-        그 env로 죽인다(구 envpath= 옵션의 대체). 없으면 plain bkill.
-        cluster 관측은 collect_clusters=True 전제.
+        MC 분류 kill(cluster별 env source)은 생성자 옵션
+        `LsfJobManager(cluster_envpaths={클러스터명: cshrc경로})`로 켠다 —
+        앱 환경 속성이라 호출마다 주지 않는다.
 
         cancel_submit: 부분 kill(only_state)에 제출 우선권을 건다 — 진행 중
         제출 취소·재시도 포기·barrier(quiesce)까지. **전체 kill은 항상 적용**
@@ -452,9 +446,7 @@ class LsfJobManager(QObject):
             self.submitter.abort_retries(jobset_id)
             scope = self._gate.kill_scope(jobset_id)
         queued = self.killer.kill_jobset(jobset_id, only_state=only_state,
-                                         verify=verify,
-                                         cluster_envpaths=cluster_envpaths,
-                                         scope=scope)
+                                         verify=verify, scope=scope)
         # 접수 즉시(동기) 착수 통지 — quiesce(진행 중 bsub 완료 대기)로
         # kill_finished가 수십 초 늦어지는 케이스에서도 UI가 '접수됨'을
         # 바로 표시할 수 있다. killer.kill_jobset(동기 — 등록+task 큐잉만)
@@ -469,7 +461,6 @@ class LsfJobManager(QObject):
                   job_keys: Optional[Sequence[str]] = None, *,
                   jobset_id: Optional[str] = None,
                   verify: Optional[bool] = None,
-                  cluster_envpaths: Optional[Dict[str, str]] = None,
                   cancel_submit: bool = False) -> None:
         """[async→Signal] 개별 job kill (chunking 자동).
 
@@ -483,11 +474,6 @@ class LsfJobManager(QObject):
           - kill_jobs([id 또는 "id[idx]", ...], jobset_id=...) — 원시 id 기반.
         jobset 컨텍스트가 있으면 optimistic EXIT 전이·verify가 켜지고 결과가
         핸들 kill_finished로도 중계된다.
-
-        cluster_envpaths: {클러스터명: cshrc경로} — MC 분류 kill (mgr.kill과
-        동일, `"*"`는 기본 env). jobset 컨텍스트가 있으면 jobset 조회로, 없는
-        원시 id 호출이면 **대상 id 직접 bjobs 조회**로 cluster를 채운 뒤
-        분류한다 — 어느 경로든 bkill 전에 cluster를 알고 죽는다.
 
         cancel_submit: 선택 kill에 제출 우선권을 건다(jobset 컨텍스트 필수).
         진행 중 제출 취소·재시도 포기·barrier(quiesce) — 취소는 jobset 전체
@@ -543,7 +529,6 @@ class LsfJobManager(QObject):
                 if len(owners) > 1:
                     for oid, okeys in owners.items():
                         self.kill_jobs(oid, okeys, verify=verify,
-                                       cluster_envpaths=cluster_envpaths,
                                        cancel_submit=cancel_submit)
                     return
                 jsid, keys = next(iter(owners.items()))
@@ -569,9 +554,7 @@ class LsfJobManager(QObject):
             self.submitter.abort_retries(jsid)
             scope = self._gate.kill_scope(jsid)
         queued = self.killer.kill_jobs(ids, job_keys=keys, verify=verify,
-                                       jobset_id=jsid or "",
-                                       cluster_envpaths=cluster_envpaths,
-                                       scope=scope)
+                                       jobset_id=jsid or "", scope=scope)
         if queued:                       # 실제 큐잉일 때만 (shutdown 경합 제외)
             # 전역 kill(jsid="")도 발화한다 — started/finished 짝 계약은
             # jobset 유무와 무관하다(안 그러면 전역 kill을 건 UI가 완료만

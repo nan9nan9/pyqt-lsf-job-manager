@@ -99,7 +99,6 @@ class Killer(QObject):
     def kill_jobset(self, jobset_id: str, *,
                     only_state: Optional[JobState] = None,
                     verify: bool = False,
-                    cluster_envpaths: Optional[Dict[str, str]] = None,
                     scope: Optional[object] = None) -> bool:
         """scope: KillScope (kill 우선권, manager가 SubmitGate로 배선).
         지정 시 worker에서 scope.acquire()로 barrier를 올려 진행 중 submit을
@@ -118,14 +117,12 @@ class Killer(QObject):
             slot = self._reg(jobset_id)
             self._pool.start(_KillTask(
                 self, jobset_id=jobset_id, only_state=only_state,
-                verify=verify,
-                cluster_envpaths=cluster_envpaths, scope=scope, slot=slot))
+                verify=verify, scope=scope, slot=slot))
         return True
 
     def kill_jobs(self, job_ids: Optional[Sequence] = None, *,
                   job_keys: Optional[Sequence[str]] = None,
                   verify: bool = False, jobset_id: str = "",
-                  cluster_envpaths: Optional[Dict[str, str]] = None,
                   scope: Optional[object] = None) -> bool:
         """job_ids: int(job 전체) 또는 "id[idx]" 문자열(array element 1개).
         job_keys: jobset 내 job_key — target id 해석을 **worker에서**(scope
@@ -142,8 +139,7 @@ class Killer(QObject):
                 self, jobset_id=jobset_id,
                 job_ids=None if job_ids is None else list(job_ids),
                 job_keys=None if job_keys is None else list(job_keys),
-                verify=verify, cluster_envpaths=cluster_envpaths,
-                scope=scope, slot=slot))
+                verify=verify, scope=scope, slot=slot))
         return True
 
     def shutdown(self) -> None:
@@ -161,7 +157,6 @@ class _KillTask(QRunnable):
                  job_ids: Optional[List] = None,
                  job_keys: Optional[List[str]] = None,
                  verify: bool = False,
-                 cluster_envpaths: Optional[Dict[str, str]] = None,
                  scope: Optional[object] = None,
                  slot: Optional[List[int]] = None):
         super().__init__()
@@ -172,7 +167,8 @@ class _KillTask(QRunnable):
         self.job_ids = job_ids
         self.job_keys = job_keys       # 지연 해석 대상 (worker에서 job_ids로)
         self.verify = verify
-        self.cluster_envpaths = cluster_envpaths
+        #: MC 분류 kill 매핑 — 앱 환경 속성이라 config에서 읽는다
+        self.cluster_envpaths = killer.command.config.cluster_envpaths
         self.scope = scope
         self.slot = slot                     # 진행 스냅샷 slot (killer._reg 발급)
         cfg = killer.command.config          # chunk progress throttle (submit 대칭)

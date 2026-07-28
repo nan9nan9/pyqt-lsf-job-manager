@@ -1,8 +1,13 @@
-"""kill 시 envpath — MC forward job을 그 클러스터 env를 source한 bkill로 죽인다.
+"""MC 분류 kill — forward job을 그 클러스터 env를 source한 bkill로 죽인다.
 
-job마다 forward된 클러스터가 다를 수 있어, 호출자가 forward_cluster로 분류한 뒤
-클러스터별로 mgr.kill_jobs(js, keys, cluster_envpaths={"*": "/path/clusterX/cshrc.lsf"})를 호출한다.
-그러면 `tcsh -c "source <envpath> && exec bkill <ids>"` 로 실행된다.
+매핑은 **생성자 옵션**이다(앱 환경 속성이라 호출마다 주지 않는다):
+
+    LsfJobManager(cluster_envpaths={"clusterA": "/path/a/cshrc.lsf",
+                                    "*": "/path/default/cshrc.lsf"})
+
+kill 시 라이브러리가 대상의 cluster를 확인해(미상이면 bkill 직전에 최소
+포맷으로 1회 조회) 클러스터별로 나눠 `tcsh -c "source <cshrc> && exec bkill
+<ids>"`를 실행한다. 미상/미매핑은 `"*"`(없으면 plain bkill).
 """
 from __future__ import annotations
 
@@ -64,7 +69,8 @@ def test_bkill_argv_no_envpath_plain():
 def test_kill_jobs_envpath_kills_forwarded(qtbot, fake_lsf, config):
     fake_lsf.forward_needs_env = True                # 로컬 bkill로는 안 죽음
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
-                        collect_clusters=True, kill_status_policy="actual")
+                        collect_clusters=True, kill_status_policy="actual",
+                        cluster_envpaths={"busan": CSHRC})
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             js = submit_cmds(mgr, ["echo a", "echo b"], auto_poll=False)
@@ -74,14 +80,8 @@ def test_kill_jobs_envpath_kills_forwarded(qtbot, fake_lsf, config):
         mgr.querier.query(js.id)
         keys = sorted(r.job_key for r in js.jobs())
 
-        # envpath 없이 죽이면 forward job이 안 죽음(문제 재현)
-        with qtbot.waitSignal(mgr.kill_finished, timeout=10000):
-            mgr.kill_jobs(js, keys[:1])
-        assert len(fake_lsf.alive_jobs()) == 2       # 안 죽음
-
-        # envpath 주면 죽음
         with qtbot.waitSignal(mgr.kill_finished, timeout=10000) as b:
-            mgr.kill_jobs(js, keys, cluster_envpaths={"*": CSHRC}, verify=True)
+            mgr.kill_jobs(js, keys, verify=True)
         assert fake_lsf.alive_jobs() == []           # sourced bkill로 죽음
         assert b.args[1].still_alive == 0
         assert any(c[0] == "tcsh" and CSHRC in c[2]
@@ -91,31 +91,27 @@ def test_kill_jobs_envpath_kills_forwarded(qtbot, fake_lsf, config):
 
 
 # ----------------------------------------------------------------------
-# 여러 클러스터 섞임 — 호출자가 분류해 각 envpath로 나눠 호출
+# 여러 클러스터 섞임 — 라이브러리가 클러스터별로 나눠 각 env로 kill
 # ----------------------------------------------------------------------
-def test_multi_cluster_split_by_caller(qtbot, fake_lsf, config):
+def test_multi_cluster_split_by_library(qtbot, fake_lsf, config):
     fake_lsf.forward_needs_env = True
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
-                        collect_clusters=True)
+                        collect_clusters=True,
+                        cluster_envpaths={"busan": "/lsf/busan/cshrc.lsf",
+                                          "daegu": "/lsf/daegu/cshrc.lsf"})
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             js = submit_cmds(mgr, ["a", "b", "c"], auto_poll=False)
         recs = sorted(js.jobs(), key=lambda r: r.job_key)
         clusters = ["busan", "busan", "daegu"]
-        profiles = {"busan": "/lsf/busan/cshrc.lsf",
-                    "daegu": "/lsf/daegu/cshrc.lsf"}
         for r, c in zip(recs, clusters):
             fake_lsf.jobs[str(r.job_id)].stat = "RUN"
             fake_lsf.jobs[str(r.job_id)].forward_cluster = c
         mgr.querier.query(js.id)
 
-        # 호출자: forward_cluster별로 분류해 각 envpath로 kill
-        by_cluster = {}
-        for r in js.jobs():
-            by_cluster.setdefault(r.forward_cluster, []).append(r.job_key)
-        for cluster, keys in by_cluster.items():
-            with qtbot.waitSignal(mgr.kill_finished, timeout=10000):
-                mgr.kill_jobs(js, keys, cluster_envpaths={"*": profiles[cluster]})
+        # 한 번의 kill로 라이브러리가 클러스터별로 나눠 실행한다
+        with qtbot.waitSignal(mgr.kill_finished, timeout=10000):
+            mgr.kill(js)
         assert fake_lsf.alive_jobs() == []           # 전 클러스터 job 죽음
         # 각 클러스터 cshrc가 실제로 source됐는지
         srcs = [c[2] for c in fake_lsf.calls_of("tcsh")]
@@ -131,7 +127,8 @@ def test_multi_cluster_split_by_caller(qtbot, fake_lsf, config):
 def test_whole_kill_envpath(qtbot, fake_lsf, config):
     fake_lsf.forward_needs_env = True
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
-                        collect_clusters=True)
+                        collect_clusters=True,
+                        cluster_envpaths={"*": CSHRC})
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             js = submit_cmds(mgr, ["a", "b"], auto_poll=False)
@@ -140,7 +137,7 @@ def test_whole_kill_envpath(qtbot, fake_lsf, config):
             fake_lsf.jobs[str(r.job_id)].forward_cluster = "busan"
         mgr.querier.query(js.id)
         with qtbot.waitSignal(mgr.kill_finished, timeout=10000) as b:
-            mgr.kill(js, cluster_envpaths={"*": CSHRC})
+            mgr.kill(js)
         assert fake_lsf.alive_jobs() == []
         assert "sourced" in b.args[1].strategies
     finally:
@@ -148,16 +145,17 @@ def test_whole_kill_envpath(qtbot, fake_lsf, config):
 
 
 # ----------------------------------------------------------------------
-# envpath 없으면 기존 group 전략 그대로 (회귀)
+# 제출 직후(관측 0) 즉시 kill — bkill 직전 cluster 조회로 분류
 # ----------------------------------------------------------------------
 def test_cluster_envpaths_kill_right_after_submit(qtbot, fake_lsf, config):
     """사용자 시나리오(MC): 제출 직후 폴링 전이라 레코드에 cluster가 없다 —
-    cluster_envpaths kill은 bkill **전에** bjobs 1회를 강제 조회해 cluster를
-    채우고, forward job은 그 클러스터 env를 source한 bkill로 죽인다."""
+    kill은 bkill **직전에** 미상 대상만 최소 포맷으로 조회해 cluster를 채우고,
+    forward job은 그 클러스터 env를 source한 bkill로 죽인다."""
     from lsfmgr import InMemoryStore, LsfJobManager
     fake_lsf.forward_needs_env = True        # forward job은 sourced bkill만 유효
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
-                        collect_clusters=True)
+                        collect_clusters=True,
+                        cluster_envpaths={"cluster_busan": CSHRC})
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             js = submit_cmds(mgr, [f"m {i}" for i in range(4)],
@@ -170,16 +168,15 @@ def test_cluster_envpaths_kill_right_after_submit(qtbot, fake_lsf, config):
                 fj.forward_cluster = "cluster_busan"
         assert all(r.forward_cluster is None for r in js.jobs())
 
-        envs = {"cluster_busan": CSHRC}
         with qtbot.waitSignal(mgr.kill_finished, timeout=10000) as blk:
-            mgr.kill(js, cluster_envpaths=envs)
+            mgr.kill(js)
         report = blk.args[1]
         assert report.unconfirmed == 0, report.errors
         assert fake_lsf.alive_jobs() == []          # forward 포함 전원 사망
         # forward 2건은 tcsh(source) 경유, 로컬 2건은 plain bkill
         assert len(fake_lsf.calls_of("tcsh")) == 1
         assert any(c[0].endswith("bkill") for c in fake_lsf.calls)
-        # 강제 조회(bjobs)가 bkill보다 먼저 나갔다
+        # cluster 조회(bjobs)가 bkill보다 먼저 나갔다
         order = [c[0].rsplit("/", 1)[-1] for c in fake_lsf.calls]
         assert order.index("bjobs") < min(
             i for i, p_ in enumerate(order) if p_ in ("bkill", "tcsh"))
@@ -188,12 +185,13 @@ def test_cluster_envpaths_kill_right_after_submit(qtbot, fake_lsf, config):
 
 
 def test_cluster_envpaths_raw_ids_without_jobset(qtbot, fake_lsf, config):
-    """jobset 컨텍스트 없는 원시 id kill도 대상 id를 **직접 bjobs 조회**해
-    cluster를 알아내 분류 kill한다 (store 레코드 불요)."""
+    """jobset 컨텍스트 없는 원시 id kill도 대상 id를 조회해 cluster를
+    알아내 분류 kill한다 (store 레코드 불요)."""
     from lsfmgr import InMemoryStore, LsfJobManager
     fake_lsf.forward_needs_env = True
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
-                        collect_clusters=True)
+                        collect_clusters=True,
+                        cluster_envpaths={"cluster_busan": CSHRC})
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             js = submit_cmds(mgr, ["w 0", "w 1"], auto_poll=False)
@@ -204,8 +202,7 @@ def test_cluster_envpaths_raw_ids_without_jobset(qtbot, fake_lsf, config):
         fake_lsf.calls.clear()
         with qtbot.waitSignal(mgr.killer.finished, timeout=10000) as blk:
             # jobset_id 없이 — 레코드 매핑이 아닌 직접 관측으로 분류돼야 함
-            mgr.killer.kill_jobs(ids,
-                                 cluster_envpaths={"cluster_busan": CSHRC})
+            mgr.killer.kill_jobs(ids)
         assert blk.args[1].unconfirmed == 0
         assert fake_lsf.alive_jobs() == []
         order = [c[0].rsplit("/", 1)[-1] for c in fake_lsf.calls]
@@ -217,17 +214,18 @@ def test_cluster_envpaths_raw_ids_without_jobset(qtbot, fake_lsf, config):
 
 def test_cluster_envpaths_unknown_falls_back_to_default(qtbot, fake_lsf,
                                                         config):
-    """조회 후에도 cluster 미상(관측 실패)이면 기본 envpath로 kill —
-    kill 자체는 반드시 나간다."""
+    """조회 후에도 cluster 미상(매핑에 없는 클러스터/로컬)이면 기본 env로
+    kill — kill 자체는 반드시 나간다."""
     from lsfmgr import InMemoryStore, LsfJobManager
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
-                        collect_clusters=True)
+                        collect_clusters=True,
+                        cluster_envpaths={"cluster_x": CSHRC})
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             js = submit_cmds(mgr, ["u 0"], auto_poll=False)
         fake_lsf.set_all("RUN")                  # cluster 없음(로컬)
         with qtbot.waitSignal(mgr.kill_finished, timeout=10000) as blk:
-            mgr.kill(js, cluster_envpaths={"cluster_x": CSHRC})
+            mgr.kill(js)
         assert blk.args[1].unconfirmed == 0
         assert fake_lsf.alive_jobs() == []
         assert not fake_lsf.calls_of("tcsh")     # 미상 → 기본(plain) bkill
@@ -253,7 +251,8 @@ def test_no_envpath_uses_plain_bkill(qtbot, manager, fake_lsf):
 def test_kill_array_element_envpath(qtbot, fake_lsf, config):
     fake_lsf.forward_needs_env = True
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
-                        collect_clusters=True)
+                        collect_clusters=True,
+                        cluster_envpaths={"*": CSHRC})
     try:
         # v9: array는 wrapper 제출 산물로만 존재 — 레코드/LSF 수동 구성
         from tests.fake_lsf import FakeJob
@@ -274,7 +273,7 @@ def test_kill_array_element_envpath(qtbot, fake_lsf, config):
         # element 2만 kill (id[idx] target)
         key2 = next(r.job_key for r in js.jobs() if r.array_index == 2)
         with qtbot.waitSignal(mgr.kill_finished, timeout=10000):
-            mgr.kill_jobs(js, [key2], cluster_envpaths={"*": CSHRC})
+            mgr.kill_jobs(js, [key2])
         alive_idx = sorted(j.array_index for j in fake_lsf.alive_jobs())
         assert alive_idx == [1, 3]           # element 2만 죽음
         # 명령에 set noglob + id[2] 포함
@@ -290,7 +289,8 @@ def test_kill_array_element_envpath(qtbot, fake_lsf, config):
 def test_optimistic_exit_with_envpath(qtbot, fake_lsf, config):
     fake_lsf.forward_needs_env = True
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
-                        collect_clusters=True)  # optimistic(기본)
+                        collect_clusters=True,   # optimistic(기본)
+                        cluster_envpaths={"*": CSHRC})
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             js = submit_cmds(mgr, ["a", "b"], auto_poll=False)
@@ -300,7 +300,7 @@ def test_optimistic_exit_with_envpath(qtbot, fake_lsf, config):
         mgr.querier.query(js.id)
         keys = sorted(r.job_key for r in js.jobs())
         with qtbot.waitSignal(mgr.kill_finished, timeout=10000):
-            mgr.kill_jobs(js, keys, cluster_envpaths={"*": CSHRC})
+            mgr.kill_jobs(js, keys)
         # optimistic: sourced bkill 확인 → 즉시 EXIT
         assert all(r.state is JobState.EXIT for r in js.jobs())
     finally:

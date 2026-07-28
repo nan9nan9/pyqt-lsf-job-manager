@@ -66,6 +66,7 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)
 | `lost_after_missing_polls` | 3 | 생성자 | bjobs에서 안 보이는 job을 **LOST로 확정하기까지** 필요한 연속 미발견 폴링 횟수. 1이면 즉시. 제출 직후 등록 지연이나 조회 클러스터 불일치로 한두 사이클 안 보이는 job을 죽은 것으로 만들지 않기 위한 유예 |
 | `poll_runtime_updates` | True | 생성자 | RUN 중 `run_time_s`(경과시간) 변화도 `jobs_updated`로 live 발행. 수만 개 규모 부하 시 False로 끔 |
 | `submit_finished_on_gate_reject` | True | 생성자 | `pre_submit` 게이트가 False면 `submit_finished`(cancelled=N)도 발화. False면 종료는 `pre_submit_finished(False)`만 |
+| `cluster_envpaths` | 없음 | 생성자 | MC 분류 kill — `{클러스터명: cshrc경로}`. 지정하면 kill이 대상 cluster를 확인해 그 env를 `source`한 bkill로 나눠 실행(§3.2). 와일드카드 `"*"`는 미상/미매핑의 기본 env |
 | `collect_clusters` | False | 생성자 | LSF MultiCluster forwarding 정보 수집. 켜면 `JobRecord.source_cluster`/`forward_cluster`를 폴링으로 채움(MC 환경 opt-in) |
 | `progress_min_interval_s` | 0.5 | 생성자 | progress/jobs_updated 최소 발화 간격(초). 키우면 부하↓·반응성↓ |
 | `progress_min_step_ratio` | 0.01 | 생성자 | progress 최소 진행 비율(0~1). 키우면 발화↓ |
@@ -291,7 +292,6 @@ mgr.kill(js)                           # 전체 kill (명령 1회, ARG_MAX 안�
 mgr.kill(js, only_state=JobState.PEND) # PEND만
 mgr.kill(js, verify=True)              # 실제 종료까지 확인
 mgr.kill_jobs(js, [job_key, ...])      # 선택 job만 kill (테이블 선택 행)
-mgr.kill_jobs(js, keys, cluster_envpaths={"cluster_b": "/lsf/b/cshrc.lsf"})  # MC 분류 kill
 mgr.kill(js, only_state=JobState.PEND, cancel_submit=True)  # 부분 kill에도 제출 우선권
 mgr.cancel_submit(js)                  # 진행 중 submit 중단 (된 것은 유지)
 mgr.query_once(js)                     # 지금 즉시 1회 조회 요청
@@ -309,13 +309,16 @@ mgr.close(js)                          # 종결 (전원 terminal일 때)
 > - **`"actual"`** — terminated만으론 상태를 안 바꾸고, **실제 LSF 상태**
 >   (`verify=True` 또는 폴링)로만 EXIT를 반영. 정확하지만 반영이 한 박자 늦습니다.
 
-> **MultiCluster kill — 자동 분류** (`cluster_envpaths`, v10.2 권장):
+> **MultiCluster kill — 자동 분류** (`cluster_envpaths`):
 > forward job은 로컬 `bkill`로 안 죽고 그 클러스터 env를 source해야 죽는
-> 환경에서, `{클러스터명: cshrc경로}` 매핑 하나만 넘기면 라이브러리가
-> 알아서 처리합니다:
+> 환경에서, **매니저 생성 시** `{클러스터명: cshrc경로}` 매핑 하나만 주면
+> 이후 모든 kill을 라이브러리가 알아서 처리합니다(앱 환경 속성이라 호출마다
+> 주지 않습니다):
 > ```python
-> mgr.kill(js, cluster_envpaths={"cluster_a": "/env/a.cshrc",
->                                "cluster_b": "/env/b.cshrc"})
+> mgr = LsfJobManager(collect_clusters=True,
+>                     cluster_envpaths={"cluster_a": "/env/a.cshrc",
+>                                       "cluster_b": "/env/b.cshrc"})
+> mgr.kill(js)              # 이후 kill/kill_jobs 전부 자동 분류
 > ```
 > 동작: ① 대상 중 cluster 미상(제출 직후 — 첫 폴링 전)이 있으면 **bkill
 > 전에** 그 id들만 **최소 포맷(`jobid source_cluster forward_cluster`)으로
@@ -329,9 +332,9 @@ mgr.close(js)                          # 종결 (전원 terminal일 때)
 > 있습니다. 그 경우 `{"*": cshrc}`로 기본 env를 명시하세요. **제출 직후 즉시 kill해도 cluster를 알고
 > 죽는다**는 게 핵심입니다. cluster 관측은 `collect_clusters=True` 전제.
 >
-> 분류 없이 **호출 전체를 한 env로** 돌리려면 `cluster_envpaths={"*":
-> "<cshrc>"}` 하나만 주면 됩니다 (구 `envpath=` 옵션의 대체 — v10.3에서
-> 옵션이 하나로 합쳐졌습니다. 옛 `envpath=`는 TypeError).
+> 분류 없이 **전부 한 env로** 돌리려면 `cluster_envpaths={"*": "<cshrc>"}`
+> 하나만 주면 됩니다. (v10.3: 옛 `envpath=`/kill 호출 인자는 모두 삭제됐고
+> 지정하면 TypeError입니다 — 조용히 무시하면 forward job이 안 죽습니다.)
 
 ### 3.3 조회 (동기 — 로컬 스냅샷, LSF 호출 없음)
 

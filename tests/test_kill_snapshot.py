@@ -68,7 +68,8 @@ def test_kill_snapshot_progresses(qtbot, tmp_path):
     gate = threading.Event(); gate.set()       # 붙잡지 않음 — 자연 완료
     cfg = LsfConfig(chunk_size=3)
     mgr = LsfJobManager(store=InMemoryStore(), config=cfg, runner=fake,
-                        collect_clusters=True)
+                        collect_clusters=True,
+                        cluster_envpaths={"*": "/lsf/busan/cshrc.lsf"})
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             js = submit_cmds(mgr, [f"echo {i}" for i in range(12)], auto_poll=False)
@@ -78,7 +79,7 @@ def test_kill_snapshot_progresses(qtbot, tmp_path):
         mgr.querier.query(js.id)
         seen = []
         with qtbot.waitSignal(mgr.kill_finished, timeout=10000):
-            mgr.kill(js, cluster_envpaths={"*": "/lsf/busan/cshrc.lsf"})   # id-chunk sourced
+            mgr.kill(js)                     # id-chunk sourced
             for _ in range(50):
                 s = js.kill_state
                 if s is not None:

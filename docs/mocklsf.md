@@ -132,8 +132,9 @@ export MOCKLSF_FORWARD_RATE=1.0          # 전부 forward (데모용)
   매핑으로 넘긴다 — 분류는 라이브러리가 한다:
   ```python
   from mocklsf import config as mockcfg
-  mgr.kill(js, cluster_envpaths={c: mockcfg.cluster_env_path(c)
-                                 for c in ("cluster_b", "cluster_c")})
+  mgr = LsfJobManager(collect_clusters=True, cluster_envpaths={
+      c: mockcfg.cluster_env_path(c) for c in ("cluster_b", "cluster_c")})
+  mgr.kill(js)                      # 분류는 라이브러리가 한다
   ```
   lsfmgr 는 이때 `tcsh -c "source <cshrc> && set noglob && exec bkill <ids>"`
   를 실행하고, 그 컨텍스트에서 mocklsf bkill 이 forward job 에 닿아 죽인다.

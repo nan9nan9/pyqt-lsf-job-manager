@@ -48,7 +48,7 @@ MANAGER_ONLY_KEYS = frozenset({
     "progress_min_interval_s", "progress_min_step_ratio",
     "poll_runtime_updates", "submit_finished_on_gate_reject",
     "lost_after_missing_polls",
-    "collect_clusters", "min_state_dwell_s",
+    "collect_clusters", "min_state_dwell_s", "cluster_envpaths",
     "test_submit_wrapper_pattern_cmd",
 })
 
@@ -164,6 +164,14 @@ def _validate(key: str, value: Any) -> Any:
         if v < 0:
             raise ValueError(f"kill_max_retry는 0 이상 (got {value})")
         return v
+    if key == "cluster_envpaths":
+        if not isinstance(value, dict) or not all(
+                isinstance(k, str) and isinstance(v, str)
+                for k, v in value.items()):
+            raise ValueError(
+                "cluster_envpaths는 {클러스터명: cshrc경로} 형태의 dict "
+                f"(got {value!r})")
+        return dict(value)
     if key == "lost_after_missing_polls":
         v = int(value)
         if v < 1:
