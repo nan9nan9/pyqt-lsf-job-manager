@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import (
-    Callable, Iterator, List, Optional, Sequence, Set, Tuple,
+    Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple,
 )
 
 from .config import LsfConfig, cmd_tokens
@@ -435,6 +435,38 @@ class LsfCommand:
         failed = self._query_chunks_isolated(
             ids, base, lambda chunk: out.extend(self._bjobs(chunk)), "bjobs")
         return out, failed
+
+    #: kill 직전 cluster 분류 전용 최소 포맷 — 상태/시간 필드는 묻지 않는다
+    #: (필요한 것만 물어야 필드 하나가 조회를 통째로 비게 만드는 사고를 안
+    #: 만든다. 분류에 필요한 건 id와 cluster뿐이다.)
+    _BJOBS_CLUSTER_FMT = f"jobid source_cluster forward_cluster {_DELIM}"
+
+    def bjobs_clusters_by_ids(self, job_ids: Sequence[int]) -> Dict[str, str]:
+        """대상 id의 cluster만 chunked 조회 — MC 분류 kill 직전용.
+
+        반환: target 문자열("id" 및 "id[idx]" 양쪽) → cluster
+        (forward 우선, 없으면 source). 조회 실패 chunk는 그냥 빠진다 —
+        미상은 caller가 기본 env로 처리하므로 kill 자체는 반드시 나간다."""
+        out: Dict[str, str] = {}
+        ids = [str(i) for i in job_ids]
+        base = self._prog_len(self.config.bjobs_path) + 40
+
+        def run_chunk(chunk: List[str]) -> None:
+            argv = cmd_tokens(self.config.bjobs_path) + [
+                "-noheader", "-o", self._BJOBS_CLUSTER_FMT] + chunk
+            for line in self._run_query(argv).stdout.splitlines():
+                parts = [p.strip() for p in line.strip().split(";")]
+                if len(parts) != 3:
+                    continue
+                m = _ARRAY_ID_RE.match(parts[0])
+                cluster = _clean_field(parts[2]) or _clean_field(parts[1])
+                if m is None or cluster is None:
+                    continue
+                out[parts[0]] = cluster          # "id" 또는 "id[idx]" 원문
+                out[m.group(1)] = cluster        # parent id 표기로도 매칭
+
+        self._query_chunks_isolated(ids, base, run_chunk, "bjobs(cluster)")
+        return out
 
     def _query_chunks_isolated(self, ids: List[str], base: int,
                                run_chunk: Callable[[List[str]], None],

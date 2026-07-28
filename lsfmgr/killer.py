@@ -274,45 +274,6 @@ class _KillTask(QRunnable):
             self.job_ids = self._resolve_keys()
         optimistic = (k.command.config.kill_status_policy == "optimistic")
 
-        # --- MC(cluster_envpaths) 모드: kill 전 강제 조회 ---
-        # 제출 직후에는 source/forward_cluster가 미상이라(첫 bjobs 관측 전)
-        # 어느 env로 bkill해야 할지 모른다 — 미상 대상이 있으면 bkill **전에**
-        # bjobs 1회를 강제해 cluster를 채운다. 조회 실패는 미상인 채 진행
-        # (미상은 기본 env로 kill — kill 자체는 반드시 나간다).
-        # ※ cluster 관측은 collect_clusters=True 폴링 포맷 전제.
-        direct_sts: List = []        # jobset 없는 원시 id 경로의 직접 관측분
-        if self.cluster_envpaths:
-            if self.jobset_id:
-                # jobset 단위 조회 — store 갱신을 겸한다(그 사이 끝난 job은
-                # 대상에서 자연히 빠짐)
-                try:
-                    need = any(r.state.is_on_lsf
-                               and r.forward_cluster is None
-                               and r.source_cluster is None
-                               for r in k.store.get_jobs(self.jobset_id))
-                    if need:
-                        log.info("kill 전 강제 조회 — cluster 미상 대상 "
-                                 "존재: %s", self.jobset_id)
-                        k.querier.query(self.jobset_id)
-                except LsfmgrError as e:
-                    log.warning("kill 전 강제 조회 실패(미상인 채 진행): %s",
-                                e)
-            elif self.job_ids:
-                # jobset 컨텍스트 없는 원시 id — store를 거치지 않고 대상
-                # id를 직접 chunked 조회해 cluster만 얻는다(bjobs_by_ids).
-                try:
-                    pids = sorted({int(h) for h in
-                                   (str(i).split("[", 1)[0]
-                                    for i in self.job_ids)
-                                   if h.isdigit()})
-                    if pids:
-                        log.info("kill 전 강제 조회 — 원시 id %d건 직접 "
-                                 "조회", len(pids))
-                        direct_sts, _failed = k.command.bjobs_by_ids(pids)
-                except Exception as e:   # noqa: BLE001 — 미상인 채 진행
-                    log.warning("kill 전 강제 조회 실패(미상인 채 진행): %r",
-                                e)
-
         # --- kill 계획: 세 경로 모두 confirm chunk(_kill_confirm)로 죽인다 —
         # 경로마다 다른 것은 (대상 레코드 풀, target 문자열, rec→target 매핑,
         # 전략 라벨)뿐이고 실행·부기(장부)는 아래 공유 꼬리 한 벌이다 (v10.1).
@@ -358,8 +319,7 @@ class _KillTask(QRunnable):
         calls = unconfirmed = retries = 0
         resolved: set = set()
         if targets:
-            groups = self._split_by_envpath(recs, targets, rec_target,
-                                            direct_sts)
+            groups = self._split_by_envpath(recs, targets, rec_target)
             done_base = 0            # env 그룹이 여러 개여도 진행률은 누적
             for envpath, group in groups.items():
                 c, u, rt, res = self._kill_confirm(
@@ -440,46 +400,41 @@ class _KillTask(QRunnable):
         return (f"{rec.job_id}[{rec.array_index}]"
                 if rec.array_index is not None else str(rec.job_id))
 
-    def _split_by_envpath(self, recs, targets: List[str], rec_target,
-                          direct_sts: Optional[List] = None
-                          ) -> Dict[str, List[str]]:
+    def _split_by_envpath(self, recs, targets: List[str],
+                          rec_target) -> Dict[str, List[str]]:
         """target을 실행 envpath별로 분류 (MC — cluster_envpaths 모드).
 
-        관측된 cluster(forward 우선, 없으면 source)가 매핑에 있으면 그
-        env를, 미상/매핑 없음은 기본 env(매핑의 와일드카드 키 `"*"`, 없으면
-        빈 문자열 = env source 없는 plain bkill)를 쓴다. 관측
-        원천은 ①store 레코드 ②direct_sts(jobset 없는 원시 id 경로의
-        bjobs_by_ids 직접 관측 — JobStatus 목록). cluster_envpaths
-        미지정이면 전부 plain bkill 한 그룹.
-        개별 id 경로(recs=None)는 분류에만 레코드 풀이 필요하므로 지연
-        조회하되, 실패해도 kill이 무산되지 않게 빈 풀로 진행한다(F1 계약)."""
+        cluster는 ① 이미 관측된 store 레코드에서 얻고 ② 그래도 모르는
+        target만 **bkill 직전에** 최소 포맷(jobid+cluster)으로 조회해
+        채운다 — 제출 직후라 아직 아무 관측이 없어도 어느 env로 죽여야
+        할지 알고 나간다. 조회가 실패해도 미상으로 진행할 뿐 kill은 반드시
+        나간다(기본 env = 매핑의 `"*"`, 없으면 env source 없는 plain bkill).
+        cluster_envpaths 미지정이면 전부 plain bkill 한 그룹."""
         if not self.cluster_envpaths:
             return {"": list(targets)}
         default_env = self.cluster_envpaths.get("*", "")
-        if recs is None:
-            try:
-                recs = self._record_pool()
-            except Exception as e:       # noqa: BLE001 — 분류만 포기
-                log.warning("cluster 분류용 레코드 조회 실패(기본 env로 "
-                            "진행): %r", e)
-                recs = []
-        env_of = {}
-        for r in recs:
+        env_of: Dict[str, str] = {}
+        for r in recs or ():
             if r.job_id is None:
                 continue
             cluster = r.forward_cluster or r.source_cluster
             if cluster and cluster in self.cluster_envpaths:
                 env_of[rec_target(r)] = self.cluster_envpaths[cluster]
-        # 직접 관측분 — element("id[idx]")·bare id 두 표기 모두 매칭 가능하게
-        # 넣는다 (store 레코드 매핑이 이미 있으면 그쪽 우선: setdefault)
-        for st in direct_sts or []:
-            cluster = st.forward_cluster or st.source_cluster
-            env = self.cluster_envpaths.get(cluster) if cluster else None
-            if env is None:
-                continue
-            if st.array_index is not None:
-                env_of.setdefault(f"{st.job_id}[{st.array_index}]", env)
-            env_of.setdefault(str(st.job_id), env)
+        unknown = sorted({t for t in targets if t not in env_of})
+        if unknown:
+            log.info("kill 전 cluster 조회 — 미상 %d건", len(unknown))
+            try:
+                found = self.killer.command.bjobs_clusters_by_ids(
+                    sorted({int(h) for h in
+                            (t.split("[", 1)[0] for t in unknown)
+                            if h.isdigit()}))
+            except Exception as e:       # noqa: BLE001 — 미상인 채 진행
+                log.warning("kill 전 cluster 조회 실패(미상 진행): %r", e)
+                found = {}
+            for t in unknown:
+                env = self.cluster_envpaths.get(found.get(t, ""))
+                if env is not None:
+                    env_of[t] = env
         groups: Dict[str, List[str]] = {}
         for t in targets:
             groups.setdefault(env_of.get(t, default_env), []).append(t)

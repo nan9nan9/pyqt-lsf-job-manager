@@ -318,8 +318,9 @@ mgr.close(js)                          # 종결 (전원 terminal일 때)
 >                                "cluster_b": "/env/b.cshrc"})
 > ```
 > 동작: ① 대상 중 cluster 미상(제출 직후 — 첫 폴링 전)이 있으면 **bkill
-> 전에 bjobs 1회를 강제 조회**해 채우고(jobset 컨텍스트 없는 원시 id
-> `kill_jobs`도 대상 id 직접 조회로 동일 보장) ② 관측 cluster(forward 우선,
+> 전에** 그 id들만 **최소 포맷(`jobid source_cluster forward_cluster`)으로
+> 1회 조회**해 채우고(jobset 컨텍스트 유무와 무관하게 동일) ② 관측
+> cluster(forward 우선,
 > 없으면 source)별로 그 env를 `source`한 bkill(`tcsh -c "source ... &&
 > exec bkill ..."`)로 분류 실행 ③ 그래도 미상이면 **기본 env**로 죽입니다 —
 > 기본 env는 매핑의 와일드카드 키 `"*"`이고, 없으면 env source 없이 실행합니다
