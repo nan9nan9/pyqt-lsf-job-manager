@@ -31,7 +31,6 @@ def test_bulk_1000_roundtrip(qtbot, manager, fake_lsf):
     assert blk.args[1].succeeded == 1000
     recs = js.jobs()
     assert len({r.job_id for r in recs}) == 1000       # 전원 유일 id
-    assert all(r.via_wrapper for r in recs)
 
     fake_lsf.set_all("RUN")
     manager.querier.query(js.id)

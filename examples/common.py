@@ -163,14 +163,9 @@ def mocklsf_paths(wrapper: str = DEFAULT_WRAPPER) -> dict:
     }
 
 
-def make_manager(wrapper: str = DEFAULT_WRAPPER,
-                 **mgr_kwargs) -> tuple[LsfJobManager, None]:
-    """예제용 manager 생성 — mocklsf 명령 경로를 주입한다.
-
-    반환은 (manager, None) 2-튜플 (과거 시그니처 호환용 자리).
-    """
-    mgr = LsfJobManager(**mocklsf_paths(wrapper), **mgr_kwargs)
-    return mgr, None
+def make_manager(**mgr_kwargs) -> LsfJobManager:
+    """예제용 manager 생성 — mocklsf 조회/kill 명령 경로를 주입한다."""
+    return LsfJobManager(**mocklsf_paths(), **mgr_kwargs)
 
 
 def install_logging(level: int = logging.INFO) -> None:
@@ -190,11 +185,3 @@ def maybe_autoquit(app) -> None:
     if sec > 0:
         QTimer.singleShot(int(sec * 1000), app.quit)
 
-
-def format_summary(s: dict) -> str:
-    """요약 dict → 한 줄 문자열."""
-    keys = [k for k in ("PEND", "RUN", "DONE", "EXIT", "SUBMIT_FAILED",
-                        "RETRY_WAIT", "LOST", "CREATED", "SUBMITTING")
-            if s.get(k)]
-    body = "  ".join(f"{k}={s[k]}" for k in keys)
-    return f"total={s.get('total', 0)}  {body}"

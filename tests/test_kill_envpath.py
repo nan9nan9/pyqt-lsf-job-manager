@@ -31,7 +31,7 @@ def test_bkill_argv_with_envpath():
         calls.append(argv)
         return CommandResult(0, "Job <100> is being terminated\n", "")
     cmd = LsfCommand(LsfConfig(), runner)
-    cmd.bkill_targets(["100", "101"], envpath=CSHRC)
+    cmd.bkill_targets_confirm(["100", "101"], envpath=CSHRC)
     assert calls[-1] == ["tcsh", "-c",
                          f"source {CSHRC} && set noglob && exec bkill 100 101"]
 
@@ -54,7 +54,7 @@ def test_bkill_argv_no_envpath_plain():
     def runner(argv, timeout, cwd=None):
         calls.append(argv); return CommandResult(0, "", "")
     cmd = LsfCommand(LsfConfig(), runner)
-    cmd.bkill_targets(["100"])                       # envpath 없음
+    cmd.bkill_targets_confirm(["100"])               # envpath 없음
     assert calls[-1] == ["bkill", "100"]
 
 

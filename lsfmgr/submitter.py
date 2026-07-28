@@ -26,7 +26,7 @@ from .errors import SubmitError
 from .jobset_core import JobSetManager
 from .lifecycle import SubmitGate
 from .options import Options
-from .qt import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
+from .qt import CallTask, QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
 from .reports import SubmitProgress, SubmitReport
 from .states import JobState
 from .store.base import JobSetStore
@@ -81,24 +81,22 @@ class _SubmitContext:
     arm_token: object = None
 
 
-class _BaseSubmitTask(QRunnable):
-    """단건 submit worker 공통 골격 (CS-5: 예외는 submitter로 격리 전달).
-
-    공통 흐름(취소 확인 → SUBMITTING 전이 → rate limit → submit → 성공/‏실패
-    처리)만 여기 두고, 실제 submit 호출(`_do_submit`)과 재시도 task 생성
-    (`_retry_factory`)만 서브클래스가 구현한다 (v10: 서브클래스는
-    _WrapperSubmitTask 하나 — 분리는 과거 bsub 경로와의 대칭 잔재지만
-    task 생성/재시도 결합을 낮게 유지하는 이점이 있어 존치).
-    """
+class _SubmitTask(QRunnable):
+    """단건 submit worker — wrapper 커맨드(argv)를 그대로 실행하고 stdout의
+    'Job <id>'만 파싱한다. 관리는 그렇게 얻은 job_id로만 이뤄진다.
+    (v10.1: bsub 경로 삭제로 서브클래스가 하나뿐이던 _BaseSubmitTask/
+    _WrapperSubmitTask 상속 계층을 단일 클래스로 병합 — 동작 동일.)
+    예외는 submitter로 격리 전달한다 (CS-5)."""
 
     def __init__(self, submitter: "BulkSubmitter", ctx: _SubmitContext,
-                 job_key: str, attempt: int,
+                 job_key: str, argv: Sequence[str], attempt: int,
                  submit_cwd: Optional[str] = None):
         super().__init__()
         self.setAutoDelete(True)
         self.submitter = submitter
         self.ctx = ctx
         self.job_key = job_key
+        self.argv = list(argv)
         self.attempt = attempt          # 0 == 최초 시도
         self.submit_cwd = submit_cwd    # 제출 subprocess의 작업 디렉토리(요청값)
 
@@ -119,60 +117,22 @@ class _BaseSubmitTask(QRunnable):
             sub._task_cancelled(ctx, self.job_key)
             return
         try:
-            job_id = self._do_submit()
+            job_id = sub.command.run_submit(
+                self.argv, timeout_s=ctx.options.submit_timeout_s,
+                cwd=self.submit_cwd)     # wrapper는 -cwd 대신 subprocess cwd
         except SubmitError as e:
             sub._task_failed(ctx, self.job_key, self.attempt, e,
                              self._retry_factory())
             return
         sub._task_succeeded(ctx, self.job_key, job_id)
 
-    # --- 서브클래스 구현 지점 ---
-    def _do_submit(self) -> int:
-        """실제 제출 수행 후 job_id 반환. 실패 시 SubmitError."""
-        raise NotImplementedError
-
     def _retry_factory(self):
-        """attempt→새 task 를 만드는 콜백을 반환한다. 지연 실행되므로 값(로컬)만
-        캡처하고 self(autoDelete QRunnable)는 참조하지 않는다."""
-        raise NotImplementedError
-
-
-class _WrapperSubmitTask(_BaseSubmitTask):
-    """wrapper 커맨드 1개를 '그대로' 실행하는 worker (wrapper 제출용).
-
-    lsfmgr 는 인자를 조립하지 않는다 — argv(예: ["customwrapper_sub","-i","a.sp"])를
-    subprocess 로 실행하고 stdout 의 'Job <id>' 만 파싱한다. 관리는 그렇게 얻은
-    job_id 로만 이뤄진다(그룹/이름 부착물 없음).
-    """
-
-    def __init__(self, submitter: "BulkSubmitter", ctx: _SubmitContext,
-                 job_key: str, argv: Sequence[str], attempt: int,
-                 submit_cwd: Optional[str] = None):
-        super().__init__(submitter, ctx, job_key, attempt, submit_cwd)
-        self.argv = list(argv)
-
-    def _do_submit(self) -> int:
-        return self.submitter.command.run_submit(
-            self.argv, timeout_s=self.ctx.options.submit_timeout_s,
-            cwd=self.submit_cwd)             # wrapper는 -cwd 대신 subprocess cwd
-
-    def _retry_factory(self):
+        """attempt→새 task를 만드는 콜백 — 지연 실행되므로 값(로컬)만 캡처하고
+        self(autoDelete QRunnable)는 참조하지 않는다."""
         sub, ctx, job_key, argv, cwd = (self.submitter, self.ctx,
                                         self.job_key, self.argv,
                                         self.submit_cwd)
-        return lambda att: _WrapperSubmitTask(sub, ctx, job_key, argv, att, cwd)
-
-
-class _FnTask(QRunnable):
-    """임의 callable을 pool에서 1회 실행 (비게이트 착수 이관용, 리뷰 M1)."""
-
-    def __init__(self, fn: Callable[[], None]):
-        super().__init__()
-        self.setAutoDelete(True)
-        self._fn = fn
-
-    def run(self):
-        self._fn()
+        return lambda att: _SubmitTask(sub, ctx, job_key, argv, att, cwd)
 
 
 class BulkSubmitter(QObject):
@@ -338,7 +298,7 @@ class BulkSubmitter(QObject):
                 except Exception as e:           # noqa: BLE001 — CS-5
                     log.exception("제출 착수 실패: %s", jobset_id)
                     self._gate_fail(ctx, repr(e))
-            ctx.pool.start(_FnTask(_launch_guarded))
+            ctx.pool.start(CallTask(_launch_guarded))
             return True
         # 게이트 경로 — 리셋 **이전**에 검사하므로 False/예외면 레코드 원상
         # 유지 (예외 시에도 새 레코드를 만들지 않는다 — error +
@@ -355,7 +315,7 @@ class BulkSubmitter(QObject):
 
     def _make_resubmit_task(self, ctx: _SubmitContext, key: str,
                             item, submit_cwd: Optional[str] = None) -> QRunnable:
-        return _WrapperSubmitTask(self, ctx, key, item, 0, submit_cwd)
+        return _SubmitTask(self, ctx, key, item, 0, submit_cwd)
 
     def is_active(self, jobset_id: str) -> bool:
         """해당 jobset에 아직 끝나지 않은 submit 사이클이 있는지 (resubmit_jobs 가드)."""

@@ -149,15 +149,6 @@ def test_find_jobs_global(store):
     assert store.find_jobs(set()) == []
 
 
-def test_via_wrapper_roundtrip(store):
-    store.store_insert_jobset(make_jobset(n=2))
-    # v10: 기본값 True — 과거 bsub 경로 레코드(False)도 왕복 보존돼야 한다
-    store.store_add_job(make_job(idx=0, via_wrapper=False))
-    store.store_add_job(make_job(idx=1))
-    assert store.get_job("js1", "js1_0").via_wrapper is False
-    assert store.get_job("js1", "js1_1").via_wrapper is True
-
-
 def test_runtime_fields_roundtrip(store):
     # run_time_s/start_time/finish_time 저장·복원 (sqlite 컬럼 포함)
     store.store_insert_jobset(make_jobset(n=1))

@@ -42,7 +42,6 @@ def test_create_jobset_with_merge_id_and_user_data(qtbot, manager, fake_lsf):
     assert rec.state is JobState.CREATED
     assert rec.merge_id == "job-a"
     assert rec.user_data == {"run": "customwrapper_sub -i a.sp", "n": 1}
-    assert rec.via_wrapper is True
     assert batches and batches[0][0].job_key == rec.job_key   # 표 즉시 갱신
     assert js.summary["total"] == 1            # intended 자동 증가
 
@@ -54,9 +53,7 @@ def test_create_jobset_paths(manager):
         "customwrapper_sub c.sp",                        # str → shlex 분해
     ])
     r2, r3 = js.jobs()
-    assert r2.via_wrapper is True
     assert shlex.split(r2.command) == ["customwrapper_sub", "-i", "b sp.sp"]
-    assert r3.via_wrapper is True
 
 
 def test_create_jobset_duplicate_merge_id_rejected(manager):

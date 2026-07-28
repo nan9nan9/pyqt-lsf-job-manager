@@ -13,6 +13,7 @@ from __future__ import annotations
 import atexit
 import logging
 import shlex
+from collections import Counter
 from dataclasses import replace as dc_replace
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set
@@ -41,23 +42,13 @@ from .options import (
     validate_options,
 )
 from .pacer import StatePacer
-from .qt import QCoreApplication, QObject, QRunnable, QThreadPool, QTimer, Signal
+from .qt import CallTask, QCoreApplication, QObject, QRunnable, QThreadPool, QTimer, Signal
 from .reports import KillProgress, SubmitProgress
 from .states import JobRecord, JobSetRecord, JobState
 from .store.base import JobSetStore
 from .store.memory import InMemoryStore
 
 log = logging.getLogger("lsfmgr.manager")
-
-#: LsfConfig 필드로 직접 전달되는 manager 전용 키
-_CONFIG_KEYS = ("bjobs_path", "bkill_path", "bhist_path",
-                "arg_max", "chunk_size",
-                "kill_status_policy", "kill_max_retry", "kill_retry_delay_s",
-                "progress_min_interval_s", "progress_min_step_ratio",
-                "poll_runtime_updates", "submit_finished_on_gate_reject",
-                "collect_clusters", "min_state_dwell_s",
-                "test_submit_wrapper_pattern_cmd")
-
 
 class LsfJobManager(QObject):
     """Facade — 컴포넌트 조립 + Facade Signal + JobSet 핸들 발급."""
@@ -116,7 +107,9 @@ class LsfJobManager(QObject):
 
         # --- LsfConfig 구성 (기존 config 주입도 계속 지원, OPT-4) ---
         base_cfg = config or LsfConfig()
-        cfg_updates = {k: mgr_only[k] for k in _CONFIG_KEYS if k in mgr_only}
+        # MANAGER_ONLY 키는 전부 LsfConfig 필드다 — 별도 사본 목록 없이 그대로
+        # config에 싣는다 (목록 이중 유지가 드리프트를 만들던 잔재 제거, v10.1)
+        cfg_updates = dict(mgr_only)
         if "submit_timeout_s" in shared:
             cfg_updates["submit_timeout_s"] = shared["submit_timeout_s"]
         self.config = (dc_replace(base_cfg, **cfg_updates)
@@ -136,7 +129,6 @@ class LsfJobManager(QObject):
             "rate_limit_per_s": cfg.rate_limit_per_s,
             "poll_interval_s": cfg.poll_interval_s,
             "submit_timeout_s": cfg.submit_timeout_s,
-            "chunk_size": cfg.chunk_size,
         }
         self._defaults.update(shared)
         if cfg.retry_backoff > 1.0 and cfg.retry_backoff != 2.0:
@@ -149,7 +141,7 @@ class LsfJobManager(QObject):
         # 현재 클러스터명(lsid) 1회 조회 — 이후 mgr.cluster_name으로 노출되고
         # 제출 성공 레코드의 source_cluster에 스탬프된다. 실패는 None(경고만).
         self.command.fetch_cluster_name()
-        self.jobsets = JobSetManager(self.store, self.command, self.config)
+        self.jobsets = JobSetManager(self.store)
         self.querier = JobsetQuerier(self.store, self.command)
 
         # kill 우선권 게이트 (FR-3) — submit 사이클 등록과 kill barrier를
@@ -403,15 +395,13 @@ class LsfJobManager(QObject):
         list_jobsets() 스냅샷과 이후 summary() 사이에 다른 스레드가 그 jobset을
         close/merge로 지울 수 있다(find_jobs와 동일한 경합) — 사라진 jobset은
         건너뛴다."""
-        agg: Dict[str, int] = {}
+        agg: Counter = Counter()
         for js in self.store.list_jobsets():
             try:
-                s = self.store.summary(js.jobset_id)
+                agg.update(self.store.summary(js.jobset_id))
             except JobSetNotFoundError:
                 continue
-            for key, val in s.items():
-                agg[key] = agg.get(key, 0) + val
-        return agg
+        return dict(agg)
 
     def get_jobs(self, jobset_id: str,
                  states: Optional[Set[JobState]] = None) -> List[JobRecord]:
@@ -445,7 +435,7 @@ class LsfJobManager(QObject):
                 text = f"(조회 실패) {e}"
             self.job_detail_ready.emit(jobset_id, job_key, text)
 
-        self._misc_pool.start(_CallTask(work))
+        self._misc_pool.start(CallTask(work))
 
     def job_detail(self, jobset_id: str, job_key: str) -> str:
         """[sync, LSF 조회 포함] fetch_job_detail의 동기 버전 — blocking 주의
@@ -641,7 +631,7 @@ class LsfJobManager(QObject):
             records.append(JobRecord(
                 job_id=None, array_index=None, jobset_id=jsid,
                 job_key=key, state=JobState.CREATED,
-                command=shlex.join(argv), via_wrapper=True,
+                command=shlex.join(argv),
                 merge_id=mid, user_data=ud, submit_cwd=cwd))
         return records
 
@@ -1167,21 +1157,6 @@ class LsfJobManager(QObject):
         failed = [r for r in changed if r.state.is_failed]
         if failed:
             h.jobs_failed.emit(failed)
-
-
-class _CallTask(QRunnable):
-    """임의 callable을 worker 스레드에서 실행 (detail 조회 등 fire-and-forget)."""
-
-    def __init__(self, fn):
-        super().__init__()
-        self.setAutoDelete(True)
-        self._fn = fn
-
-    def run(self):
-        try:
-            self._fn()
-        except Exception:                    # noqa: BLE001 — CS-5
-            log.exception("백그라운드 작업 실패")
 
 
 class _PostProcessTask(QRunnable):

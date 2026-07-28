@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import logging
+
+from .config import validate_cmd_path
 from dataclasses import dataclass, fields
 from typing import Any, Dict, Optional, Tuple
 
@@ -56,7 +58,6 @@ BUILTIN_DEFAULTS: Dict[str, Any] = {
     "poll_interval_s": 10.0,
     "auto_poll": True,
     "submit_timeout_s": 30.0,
-    "chunk_size": 200,
     "verify_kill": False,
     "label": "",
     "tags": (),
@@ -78,7 +79,6 @@ class Options:
     poll_interval_s: float = 10.0
     auto_poll: bool = True
     submit_timeout_s: float = 30.0
-    chunk_size: int = 200
     verify_kill: bool = False
     label: str = ""
     tags: Tuple[str, ...] = ()
@@ -196,12 +196,7 @@ def _validate(key: str, value: Any) -> Any:
             raise ValueError(f"arg_max는 4096 이상 (got {value})")
         return v
     if key in ("bjobs_path", "bkill_path", "bhist_path"):
-        ok = (isinstance(value, str) and value) or (
-            isinstance(value, (list, tuple)) and value
-            and all(isinstance(t, str) and t for t in value))
-        if not ok:
-            raise ValueError(
-                f"{key}는 비어있지 않은 str 또는 str 토큰 목록 (got {value!r})")
+        validate_cmd_path(value, key)
         return value
     # test_submit_wrapper_pattern_cmd는 LsfConfig.__post_init__가 구조 검증한다
     return value

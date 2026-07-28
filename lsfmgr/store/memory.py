@@ -143,14 +143,9 @@ class InMemoryStore(JobSetStore):
             self._jobs[jobset_id][job_key] = new
             return new
 
-    def transition_many(self, jobset_id, specs):
+    def _transition_many_impl(self, jobset_id, specs):
         """lock 1회로 다건 전이 — 건당 lock acquire/release 제거.
-        키 필드 검증은 **적용 시작 전** 일괄 수행한다 — 루프 도중 예외면
-        앞선 전이는 커밋됐는데 반환 목록이 유실되어 호출자(폴링)의
-        jobs_updated 통지가 영구 누락된다 (store_add_jobs와 동일 원자성)."""
-        specs = list(specs)
-        for _key, _st, _g, fields in specs:
-            self._reject_key_fields(fields)
+        (키 필드 선검증은 base.transition_many 템플릿이 소유)"""
         out: List[JobRecord] = []
         now = datetime.now()
         with self._lock:

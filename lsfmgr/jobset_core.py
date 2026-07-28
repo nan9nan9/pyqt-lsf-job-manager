@@ -17,8 +17,6 @@ from dataclasses import replace
 from datetime import datetime
 from typing import Iterable, List, Optional, Sequence
 
-from .command import LsfCommand
-from .config import LsfConfig
 from .errors import (
     CloseNotAllowedError,
     JobNotFoundError,
@@ -39,11 +37,10 @@ def generate_jobset_id() -> str:
 
 class JobSetManager:
 
-    def __init__(self, store: JobSetStore, command: LsfCommand,
-                 config: Optional[LsfConfig] = None):
+    def __init__(self, store: JobSetStore):
+        # (v10.1: LsfCommand/config 의존 제거 — LSF 호출이 전부 사라져
+        #  이 계층은 선언대로 순수 Store 연산이다)
         self.store = store
-        self.command = command
-        self.config = config or command.config
         # JobSetRecord read-modify-write 직렬화 — Store는 개별 연산만
         # 원자적이므로, intended_count 갱신처럼 "읽고-고쳐-쓰는" 경로가 겹치면
         # 한쪽 갱신이 유실된다 (예: new_jobs vs merge_from의 intended_count 갱신).

@@ -99,9 +99,6 @@ class JobRecord:
     # LSF MultiCluster(job forwarding) — collect_clusters=True일 때 폴링이 채운다
     source_cluster: Optional[str] = None     # 제출(로컬) 클러스터
     forward_cluster: Optional[str] = None    # 포워딩된 실행(원격) 클러스터
-    # 제출 경로 표식 (v10: wrapper 단일 경로 — 항상 True로 기록된다.
-    # 과거 bsub 경로 레코드(False)와의 구분용 스키마 호환 필드)
-    via_wrapper: bool = True
     # 제출 시 subprocess를 실행할 작업 디렉토리(요청값). None이면 부모(GUI)
     # 프로세스의 cwd에서 실행(스레드 안전 — os.chdir 금지). job 단위 속성이라
     # merge/재제출에도 보존된다. 관측값 working_dir(bjobs exec_cwd)과는 별개다.

@@ -40,11 +40,11 @@ from qtpy.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from lsfmgr import JobState, LsfJobManager
+from lsfmgr import JobState
 from lsfmgr.command import default_runner
 from common import (
     WRAPPERS, cluster_env_path, configure_mocklsf, install_logging,
-    maybe_autoquit, mocklsf_paths, wrapper,
+    make_manager, maybe_autoquit, wrapper,
 )
 
 #: MC forward 흉내에 쓸 원격 클러스터들 (실제 MC 의 원격 cluster 흉내).
@@ -570,18 +570,14 @@ class Dashboard(QWidget):
         self.log.appendPlainText(f"[{jsid[-8:]}] {msg}")
 
 
-def new_manager(runner=None):
-    """mocklsf 경로 + 로깅 runner 로 manager 생성.
-    collect_clusters=True — MC forward 흉내 시 forward_cluster 폴링 수집."""
-    return LsfJobManager(workers=8, max_retry=3, collect_clusters=True,
-                         runner=runner, **mocklsf_paths())
-
-
 def main():
     app = QApplication(sys.argv)
     install_logging()
     win = Dashboard()
-    win.bind_manager(new_manager(runner=make_logging_runner(win.bus)))
+    # collect_clusters=True — MC forward 흉내 시 forward_cluster 폴링 수집
+    win.bind_manager(make_manager(workers=8, max_retry=3,
+                                  collect_clusters=True,
+                                  runner=make_logging_runner(win.bus)))
     win.resize(1180, 800)
     win.show()
 

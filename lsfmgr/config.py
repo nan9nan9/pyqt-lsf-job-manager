@@ -149,16 +149,7 @@ class LsfConfig:
                 raise ValueError(
                     f"test_submit_wrapper_pattern_cmd의 패턴은 빈 문자열이 아닌 "
                     f"glob (got {pattern!r})")
-            if isinstance(cmd, (str, bytes)):
-                tokens = [cmd] if cmd else []
-            elif isinstance(cmd, (tuple, list)):
-                tokens = list(cmd)
-            else:
-                tokens = None
-            if not tokens or not all(isinstance(t, str) and t for t in tokens):
-                raise ValueError(
-                    f"test_submit_wrapper_pattern_cmd의 명령은 빈 문자열이 아닌 "
-                    f"str 또는 토큰 목록 (got {cmd!r})")
+            validate_cmd_path(cmd, "test_submit_wrapper_pattern_cmd의 명령")
             self.test_submit_wrapper_pattern_cmd = (pattern, cmd)
         # poll_interval_s/submit_timeout_s도 여기서 검증한다 — 안 하면
         # LsfConfig(poll_interval_s=0) 같은 값이 통과해, auto_poll 시
@@ -181,6 +172,17 @@ class LsfConfig:
 def cmd_tokens(path: CmdPath) -> List[str]:
     """CmdPath를 argv 앞부분 토큰 목록으로 정규화. str이면 프로그램 1개."""
     return [path] if isinstance(path, str) else list(path)
+
+
+def validate_cmd_path(value, what: str) -> None:
+    """CmdPath 형태 검증 공용 지점 — 비어있지 않은 str 또는 str 토큰 목록.
+    (규약 정의(cmd_tokens) 옆에 검증도 한 곳 — options/_config가 공유)"""
+    ok = (isinstance(value, str) and value) or (
+        isinstance(value, (tuple, list)) and len(value) > 0
+        and all(isinstance(t, str) and t for t in value))
+    if not ok:
+        raise ValueError(
+            f"{what}는 비어있지 않은 str 또는 str 토큰 목록 (got {value!r})")
 
 # (v10: JobSpec/spec_to_json/spec_from_json 삭제 — bsub 인자 조립 제출이
 #  제거되어 옵션 템플릿·재제출 옵션 보존이 필요 없다. 제출은 wrapper

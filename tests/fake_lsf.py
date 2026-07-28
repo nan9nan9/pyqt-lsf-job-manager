@@ -9,7 +9,7 @@ import fnmatch
 import json
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from lsfmgr.command import CommandResult
@@ -80,15 +80,23 @@ class FakeLsf:
                 return self._submit_generic(argv)
             return handler(argv[1:])
 
-    def _submit_generic(self, argv: List[str]) -> CommandResult:
-        """임의 wrapper 제출 흉내 — 커맨드 전체를 command로 기록하고
-        Job <id>를 출력한다. bsub용 실패 주입(fail_next_bsub 등)을 공유한다."""
+    def _inject_submit_failure(self):
+        """제출 실패 주입 공유 지점 — generic wrapper/_do_bsub 두 경로가 같은
+        semantics를 갖도록 한 곳에서 판정한다. 주입 없으면 None."""
         if self.fail_next_bsub > 0:
             self.fail_next_bsub -= 1
             return CommandResult(1, "", "LSF error: queue unavailable")
         if self.no_jobid_next_bsub > 0:
             self.no_jobid_next_bsub -= 1
             return CommandResult(0, "garbled output without id\n", "")
+        return None
+
+    def _submit_generic(self, argv: List[str]) -> CommandResult:
+        """임의 wrapper 제출 흉내 — 커맨드 전체를 command로 기록하고
+        Job <id>를 출력한다."""
+        fail = self._inject_submit_failure()
+        if fail is not None:
+            return fail
         jid = self.next_id
         self.next_id += 1
         self.jobs[str(jid)] = FakeJob(
@@ -141,12 +149,9 @@ class FakeLsf:
                                  {"-q", "-J", "-g", "-R", "-o", "-e", "-env"})
         if self.reject_group and "-g" in opts:
             return CommandResult(255, "", "Bad job group name. Job not submitted.")
-        if self.fail_next_bsub > 0:
-            self.fail_next_bsub -= 1
-            return CommandResult(1, "", "LSF error: queue unavailable")
-        if self.no_jobid_next_bsub > 0:
-            self.no_jobid_next_bsub -= 1
-            return CommandResult(0, "garbled output without id\n", "")
+        fail = self._inject_submit_failure()
+        if fail is not None:
+            return fail
 
         jid = self.next_id
         self.next_id += 1
@@ -198,47 +203,41 @@ class FakeLsf:
         if self.reject_clusters and "source_cluster" in fmt:
             return CommandResult(
                 255, "", "bad field name: source_cluster\n")
-        fields = [f.split(":", 1)[0] for f in fmt.split()
-                  if "=" not in f] or ["jobid", "stat", "exit_code",
-                                       "job_name"]
-        if "-json" in opts:
-            return self._bjobs_json(matched, fields)
-        return self._bjobs_delim(matched, fields)
+        fields = [f.split(":", 1)[0] for f in fmt.split() if "=" not in f] \
+            or ["jobid", "stat", "exit_code", "job_name"]
+        # v10.1: 프로덕션 bjobs는 항상 -json — delimiter 직렬화기는 삭제됨
+        return self._bjobs_json(matched, fields)
 
     @staticmethod
-    def _field_value(j: FakeJob, name: str, empty: str) -> str:
-        """-o 필드명 1개의 표시 값 — 미해당은 empty('-' 또는 '').
+    def _row_values(j: FakeJob) -> dict:
+        """job 1건의 전 필드 표시 값 (미해당은 "").
         array_index=0도 element다 — falsy 판정 금지(실제 LSF는 "id[0]" 출력)."""
         jid = (f"{j.job_id}[{j.array_index}]" if j.array_index is not None
                else str(j.job_id))
         return {
             "jobid": jid,
             "stat": j.stat,
-            "exit_code": empty if j.exit_code is None else str(j.exit_code),
+            "exit_code": "" if j.exit_code is None else str(j.exit_code),
             "job_name": j.name,
-            "run_time": (empty if j.run_time_s is None
+            "run_time": ("" if j.run_time_s is None
                          else f"{j.run_time_s} second(s)"),
-            "start_time": j.start_time or empty,
-            "finish_time": j.finish_time or empty,
-            "exec_cwd": j.working_dir or empty,
-            "source_cluster": j.source_cluster or empty,
-            "forward_cluster": j.forward_cluster or empty,
-        }.get(name, empty)
+            "start_time": j.start_time or "",
+            "finish_time": j.finish_time or "",
+            "exec_cwd": j.working_dir or "",
+            "source_cluster": j.source_cluster or "",
+            "forward_cluster": j.forward_cluster or "",
+        }
 
     def _bjobs_json(self, matched: List[FakeJob],
                     fields: List[str]) -> CommandResult:
         # 실제 LSF -json: -o 필드명의 대문자 키, 빈 값은 "" (padding/폭 무시)
-        recs = [{f.upper(): self._field_value(j, f, "") for f in fields}
-                for j in matched]
+        recs = []
+        for j in matched:
+            row = self._row_values(j)          # job당 1회 계산
+            recs.append({f.upper(): row.get(f, "") for f in fields})
         payload = json.dumps({"COMMAND": "bjobs", "JOBS": len(recs),
                               "RECORDS": recs})
         return CommandResult(0, payload + "\n", "")
-
-    def _bjobs_delim(self, matched: List[FakeJob],
-                     fields: List[str]) -> CommandResult:
-        lines = [";".join(self._field_value(j, f, "-") for f in fields)
-                 for j in matched]
-        return CommandResult(0, "\n".join(lines) + "\n", "")
 
     def _select(self, opts, id_args: List[str],
                 include_done: bool = True) -> List[FakeJob]:
@@ -378,17 +377,14 @@ class FakeLsf:
     # ------------------------------------------------------------------
     # bmod / bgdel
     # ------------------------------------------------------------------
+    # v10.1: bmod/bgdel은 라이브러리가 더는 호출하지 않는다. 핸들러를 아예
+    # 지우면 미지-명령 폴백(_submit_generic)이 이를 '제출'로 오인해 가짜
+    # job을 만들므로, 실수 호출이 rc=127로 즉시 드러나는 스텁만 남긴다.
     def _do_bmod(self, args: List[str]) -> CommandResult:
-        opts, rest = _parse_opts(args, {"-g"})
-        for a in rest:
-            if a.isdigit():
-                for j in self.jobs.values():
-                    if j.job_id == int(a):
-                        j.group = opts.get("-g", j.group)
-        return CommandResult(0, "Parameters of job are changed\n", "")
+        return CommandResult(127, "", "bmod: v10에서 미사용 (호출되면 회귀)")
 
     def _do_bgdel(self, args: List[str]) -> CommandResult:
-        return CommandResult(0, "Job group was deleted\n", "")
+        return CommandResult(127, "", "bgdel: v10에서 미사용 (호출되면 회귀)")
 
     def _do_lsid(self, args: List[str]) -> CommandResult:
         if self.fail_all_queries:

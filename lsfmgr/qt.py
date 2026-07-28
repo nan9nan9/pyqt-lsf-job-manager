@@ -26,7 +26,29 @@ try:
 except AttributeError:                                 # PyQt5 / PySide2
     DEFERRED_DELETE = QEvent.DeferredDelete
 
+import logging as _logging
+
+_log = _logging.getLogger("lsfmgr.qt")
+
+
+class CallTask(QRunnable):
+    """임의 callable을 pool에서 1회 실행하는 공용 QRunnable —
+    fire-and-forget용. 예외는 로그로 격리한다 (CS-5)."""
+
+    def __init__(self, fn):
+        super().__init__()
+        self.setAutoDelete(True)
+        self._fn = fn
+
+    def run(self):
+        try:
+            self._fn()
+        except Exception:                    # noqa: BLE001 — CS-5
+            _log.exception("백그라운드 작업 실패")
+
+
 __all__ = [
+    "CallTask",
     "QCoreApplication",
     "QEvent",
     "DEFERRED_DELETE",

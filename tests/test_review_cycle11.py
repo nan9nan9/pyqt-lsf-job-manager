@@ -33,8 +33,8 @@ def test_folded_reaggregation_uses_latest_not_stale(qtbot, manager):
     # R=(910,None)이 _aggregate_elements 집계되는지만 검증)
     def fake_by_ids(ids):
         if 910 in set(ids):
-            return ([JobStatus(910, 0, JobState.DONE, 0, f"{jsid}_0"),
-                     JobStatus(910, 5, JobState.DONE, 0, f"{jsid}_5")], set())
+            return ([JobStatus(910, 0, JobState.DONE, 0),
+                     JobStatus(910, 5, JobState.DONE, 0)], set())
         return ([], set())
     cmd.bjobs_by_ids = fake_by_ids
 

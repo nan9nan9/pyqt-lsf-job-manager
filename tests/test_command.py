@@ -16,33 +16,27 @@ def cmd(fake_lsf):
 
 
 # ----------------------------------------------------------------------
-# lsid 클러스터 진단 (DEBUG 전용)
+# lsid 클러스터명 조회 (fetch_cluster_name — manager 초기화가 1회 호출)
 # ----------------------------------------------------------------------
-def test_lsid_diagnostic_at_debug(fake_lsf, caplog):
-    import logging
-    caplog.set_level(logging.DEBUG, logger="lsfmgr.command")
-    LsfCommand(LsfConfig(), fake_lsf)
-    # bare "lsid"로 실행 — 경로 고정 없이 프로세스 PATH가 잡는 클러스터 진단
+def test_fetch_cluster_name_parses_and_caches(fake_lsf):
+    cmd = LsfCommand(LsfConfig(), fake_lsf)
+    assert fake_lsf.calls_of("lsid") == []         # 생성만으론 실행 안 함
+    assert cmd.fetch_cluster_name() == "fake_cluster"
+    # bare "lsid" — 경로 고정 없이 프로세스 PATH가 잡는 클러스터 진단
     assert fake_lsf.calls_of("lsid") == [["lsid"]]
-    assert "fake_cluster" in caplog.text
+    assert cmd.cluster_name == "fake_cluster"      # 캐시됨
 
 
-def test_lsid_skipped_without_debug(fake_lsf, caplog):
+def test_fetch_cluster_name_failure_swallowed(caplog):
     import logging
-    caplog.set_level(logging.INFO, logger="lsfmgr.command")
-    LsfCommand(LsfConfig(), fake_lsf)
-    assert not fake_lsf.calls_of("lsid")     # DEBUG 아니면 실행 자체를 안 함
-
-
-def test_lsid_failure_is_swallowed(caplog):
-    import logging
-    caplog.set_level(logging.DEBUG, logger="lsfmgr.command")
+    caplog.set_level(logging.WARNING, logger="lsfmgr.command")
 
     def runner(argv, timeout, cwd=None):
         raise OSError("lsid: command not found")
 
-    LsfCommand(LsfConfig(), runner)          # 예외가 밖으로 안 새면 성공
-    assert "lsid 진단 실패" in caplog.text
+    cmd = LsfCommand(LsfConfig(), runner)
+    assert cmd.fetch_cluster_name() is None        # 예외 삼킴 — None
+    assert "lsid 클러스터 조회 실패" in caplog.text
 
 
 # ----------------------------------------------------------------------
@@ -100,7 +94,7 @@ def test_bjobs_uses_json_output(cmd, fake_lsf):
     """모든 bjobs 호출은 -json으로 나간다 (v10 — delimiter 파싱 제거)."""
     jid = _submit(cmd, name="t_0")
     out, _failed = cmd.bjobs_by_ids([jid])
-    assert [s.job_name for s in out] == ["t_0"]
+    assert [s.job_id for s in out] == [jid]
     for call in fake_lsf.calls_of("bjobs"):
         assert "-json" in call
         assert "-g" not in call and "-J" not in call
@@ -194,14 +188,16 @@ def test_bjobs_transient_error_no_downgrade():
 def test_bkill_targets_chunked(fake_lsf):
     cmd = LsfCommand(LsfConfig(chunk_size=20), fake_lsf)
     ids = [_submit(cmd, f"r {i}") for i in range(45)]
-    calls = cmd.bkill_targets([str(i) for i in ids])
+    resolved, calls = cmd.bkill_targets_confirm([str(i) for i in ids])
     assert calls == 3
+    assert resolved == {str(i) for i in ids}
     assert fake_lsf.alive_jobs() == []
 
 
 def test_bkill_no_matching_job_is_ok(cmd):
-    # 이미 종료된 job kill은 에러 아님 (no-match는 예외가 아님)
-    cmd.bkill_targets(["999999"])
+    # 이미 없는 job kill — no-match는 '해소'로 분류 (재시도 불필요)
+    resolved, calls = cmd.bkill_targets_confirm(["999999"])
+    assert "999999" in resolved and calls == 1
 
 
 def test_bkill_confirm_parses_terminating(cmd, fake_lsf):

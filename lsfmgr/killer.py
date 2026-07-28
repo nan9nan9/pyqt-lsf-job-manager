@@ -249,61 +249,59 @@ class _KillTask(QRunnable):
                        "job이 kill에서 빠졌을 수 있음")
                 log.warning("%s: %s", msg, self.jobset_id)
                 errors.append(msg)
-        calls = 0
-        unconfirmed = 0
-        retries = 0
         optimistic = (k.command.config.kill_status_policy == "optimistic")
-        killed_recs: List = []       # optimistic EXIT 대상 (kill 확인된 레코드)
 
-        # verify=True일 때 "잔존(still_alive)"을 셀 kill 대상 문자열("id" 또는
-        # "id[idx]"). job_id만으로 세면 array element 1개를 죽였을 때 같은
-        # parent job_id를 공유하는 형제 element들이 잔존으로 오집계된다 —
-        # target 문자열 기준으로 element는 (id,idx) 정확 매칭한다 (_verify).
-        verify_targets: set = set()
-
+        # --- kill 계획: 세 경로 모두 confirm chunk(_kill_confirm)로 죽인다 —
+        # 경로마다 다른 것은 (대상 레코드 풀, target 문자열, rec→target 매핑,
+        # 전략 라벨)뿐이고 실행·부기(장부)는 아래 공유 꼬리 한 벌이다 (v10.1).
         if self.job_ids is not None:
-            # 개별 ID kill — 확인 후 미확인분 재시도 (FR-3.4)
-            requested = len(self.job_ids)
+            # 개별 ID kill (FR-3.4) — 원시 id/"id[idx]" 문자열 그대로
+            recs = self._record_pool()
             targets = [str(i) for i in self.job_ids]
-            calls, unconfirmed, retries, resolved = self._kill_confirm(
-                targets, errors)
-            strategies.append("chunk")
-            verify_targets = set(targets)
-            if optimistic:
-                killed_recs = self._records_for(resolved)
+            requested = len(targets)
+            rec_target = self._id_str
+            label = "chunk"
         elif self.only_state is not None:
-            # 부분 kill (FR-3.2) — Store에서 해당 상태 job을 골라 chunking.
+            # 부분 kill (FR-3.2) — 해당 상태 job만. array element는 반드시
+            # "id[idx]" 지정(parent id면 다른 상태 element까지 전부 죽는다).
             # (bkill -stat은 LSF 버전 의존이라 결정적 방식을 기본으로 한다)
-            # array element는 반드시 "id[idx]"로 지정 — parent id로 죽이면
-            # 다른 상태의 element까지 전부 kill된다.
             recs = k.store.get_jobs(self.jobset_id, states={self.only_state})
             targets = [self._id_str(r) for r in recs if r.job_id is not None]
             requested = len(targets)
-            verify_targets = set(targets)
-            if targets:
-                calls, unconfirmed, retries, resolved = self._kill_confirm(
-                    targets, errors)
-                strategies.append(f"chunk(state={self.only_state.value})")
-                if optimistic:
-                    killed_recs = [r for r in recs
-                                   if self._id_str(r) in resolved]
+            rec_target = self._id_str
+            label = f"chunk(state={self.only_state.value})"
         else:
-            (requested, calls, alive,
-             unconfirmed, retries, resolved) = self._kill_whole_jobset(
-                strategies, errors)
-            # 전체 kill도 confirm 경로(per-id 확인 + chunk 격리 + 재시도)다 —
-            # v10.1: 무확인 bkill_targets는 첫 chunk 장애에 나머지 chunk를
-            # 건너뛰고 재시도도 없어 kill이 통째로 무위가 됐다(부분/개별
-            # kill과 비대칭). verify는 **bare job_id**(whole)로 센다 — 전체
-            # kill은 그 job_id 전부가 대상이므로, kill 창에 rerun(bsub -r)으로
-            # 되살아난 element(스냅샷엔 없던)도 잔존으로 잡는다.
-            verify_targets = {str(r.job_id) for r in alive
-                              if r.job_id is not None}
-            if optimistic:
-                # per-id 확인이 있으므로 errors 유무와 무관하게 **확인된
-                # id만** 마킹한다 — 확인 안 된 id는 on-LSF로 남아 폴링/재kill
-                killed_recs = [r for r in alive
-                               if str(r.job_id) in resolved]
+            # 전체 kill — 살아있는 전 job. array element는 parent id 1개로
+            # 전체가 죽으므로 bare id로 dedupe하고, rec→target 매핑도 bare id
+            # (verify가 kill 창에 rerun(bsub -r)으로 되살아난 element까지
+            # 잔존으로 잡는 근거이기도 하다).
+            k.store.get_jobset(self.jobset_id)   # 존재 검증 (없으면 예외)
+            recs = [r for r in k.store.get_jobs(self.jobset_id)
+                    if r.state.is_on_lsf]
+            targets = sorted({str(r.job_id) for r in recs
+                              if r.job_id is not None})
+            requested = len(recs)
+            rec_target = (lambda r: str(r.job_id))
+            label = "chunk(sourced)" if self.envpath else "chunk"
+
+        # --- 공유 꼬리: confirm 실행 + 전략 기록 + optimistic 대상 산출 ---
+        # verify_targets: "잔존(still_alive)"을 셀 target 문자열 집합 — job_id
+        # 만으로 세면 element 1개 kill에 형제 element가 잔존으로 오집계된다
+        # (_verify가 "id[idx]"를 (id,idx) 정확 매칭하는 이유).
+        verify_targets = set(targets)
+        calls = unconfirmed = retries = 0
+        resolved: set = set()
+        if targets:
+            calls, unconfirmed, retries, resolved = self._kill_confirm(
+                targets, errors)
+            strategies.append(label)
+        # optimistic 대상 — per-id 확인이 있으므로 errors 유무와 무관하게
+        # **확인된 target만** 마킹한다(미확인분은 on-LSF로 남아 폴링/재kill).
+        killed_recs: List = []
+        if optimistic:
+            killed_recs = [r for r in recs
+                           if r.job_id is not None
+                           and rec_target(r) in resolved]
 
         # verify를 optimistic 마킹보다 **먼저** 한다. 먼저 EXIT로 찍으면 그
         # 레코드가 재조회 대상(_ON_LSF)과 잔존 집계(is_on_lsf)에서 모두 빠져
@@ -342,17 +340,13 @@ class _KillTask(QRunnable):
         return (f"{rec.job_id}[{rec.array_index}]"
                 if rec.array_index is not None else str(rec.job_id))
 
-    def _records_for(self, resolved: set) -> List:
-        """resolved id 집합에 해당하는 레코드 — optimistic EXIT 대상.
-        jobset_id를 알면 그 jobset에서, 모르면(kill_jobs 원시 id) 전역 검색."""
+    def _record_pool(self) -> List:
+        """kill_jobs(원시 id) 대상의 레코드 후보 풀 — jobset_id를 알면 그
+        jobset에서, 모르면 parent id로 전역 검색 ("id[idx]"도 정규화)."""
         if self.jobset_id:
-            pool = self.killer.store.get_jobs(self.jobset_id)
-        else:
-            # "id[idx]" 문자열 target도 parent id로 정규화해 검색
-            pool = self.killer.store.find_jobs(
-                {int(str(i).split("[", 1)[0]) for i in (self.job_ids or [])})
-        return [r for r in pool
-                if r.job_id is not None and self._id_str(r) in resolved]
+            return self.killer.store.get_jobs(self.jobset_id)
+        return self.killer.store.find_jobs(
+            {int(str(i).split("[", 1)[0]) for i in (self.job_ids or [])})
 
     def _mark_exited(self, recs: List) -> List:
         """확인된 kill 대상을 EXIT로 전이 (아직 on-lsf인 것만, guard로 CAS).
@@ -403,30 +397,6 @@ class _KillTask(QRunnable):
             errors.append(msg)
         return calls, len(pending), attempt, resolved_all
 
-    def _kill_whole_jobset(self, strategies: List[str],
-                           errors: List[str]) -> tuple:
-        """전체 kill — 살아있는 job_id 전부를 confirm chunked bkill로
-        (v10.1: 부분/개별 kill과 동일한 _kill_confirm 경로 — chunk 단위
-        장애 격리 + 미확인분 재시도 + per-id 해소 확인).
-        envpath 지정 시(MC forward) 그 env를 source한 bkill로 죽인다.
-        array element는 parent id 1개로 전체가 죽으므로 dedupe.
-        반환: (requested, calls, alive, unconfirmed, retries, resolved)."""
-        k = self.killer
-        k.store.get_jobset(self.jobset_id)       # 존재 검증 (없으면 예외)
-        alive = [r for r in k.store.get_jobs(self.jobset_id)
-                 if r.state.is_on_lsf]
-        if not alive:
-            return 0, 0, [], 0, 0, set()
-
-        targets = sorted({str(r.job_id) for r in alive
-                          if r.job_id is not None})
-        calls = unconfirmed = retries = 0
-        resolved: set = set()
-        if targets:
-            calls, unconfirmed, retries, resolved = self._kill_confirm(
-                targets, errors)
-            strategies.append("chunk(sourced)" if self.envpath else "chunk")
-        return len(alive), calls, alive, unconfirmed, retries, resolved
 
     def _verify(self, targets: set) -> Tuple[Optional[int], set, List]:
         """재조회로 실제 종료 확인 (FR-3.3).

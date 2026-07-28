@@ -111,12 +111,19 @@ class JobSetStore(ABC):
         반환: 실제로 전이된 레코드 목록(guard 거부·키 소실분은 제외, 입력 순서).
         구현은 일괄 처리로 건당 오버헤드를 없앤다 — 수만 건
         전이가 한 사이클에 몰릴 때 폴링 스레드 블로킹/WAL 락 독점을 막는다.
-        기본 구현은 건당 transition (계약 유지).
-        키 필드 검증은 적용 시작 전 일괄 — 부분 적용 후 예외로 반환 목록이
-        유실되지 않게 한다 (memory 구현과 동일 원자성)."""
+
+        템플릿 메서드(v10.1): 키 필드 **선검증**(부분 적용 후 예외로 반환
+        목록이 유실되지 않게)은 여기 한 곳이 소유하고, 백엔드는
+        _transition_many_impl만 오버라이드한다 — 새 백엔드가 계약을
+        복사-기억할 필요가 없다."""
         specs = list(specs)
         for _key, _st, _g, fields in specs:
             self._reject_key_fields(fields)
+        return self._transition_many_impl(jobset_id, specs)
+
+    def _transition_many_impl(self, jobset_id: str,
+                              specs) -> List[JobRecord]:
+        """일괄 전이 본체 — 기본 구현은 건당 transition (계약 유지)."""
         out: List[JobRecord] = []
         for job_key, new_state, guard, fields in specs:
             try:

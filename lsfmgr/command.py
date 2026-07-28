@@ -73,12 +73,13 @@ def _adapt_runner(runner: Runner) -> Runner:
 
 @dataclass(frozen=True)
 class JobStatus:
-    """bjobs 1행 파싱 결과."""
+    """bjobs 1행 파싱 결과. (v10.1: job_name 필드 삭제 — name 매칭이
+    사라져 write-only 데이터였다. -o 포맷의 job_name 요청은 사람이 raw
+    JSON을 볼 때의 식별용으로만 유지하고 파서는 읽지 않는다.)"""
     job_id: int
     array_index: Optional[int]
     state: JobState
     exit_code: Optional[int]
-    job_name: str
     run_time_s: Optional[int] = None       # LSF run_time(초)
     start_time: Optional[datetime] = None  # LSF start_time
     finish_time: Optional[datetime] = None # LSF finish_time
@@ -263,32 +264,17 @@ class LsfCommand:
         # 동시에 시도할 수 있다 — 무락 증가면 같은 필드 오류에 이중 강등돼
         # FULL을 건너뛰고 CORE로 떨어진다. 사용한 인덱스 기준 CAS로 1단만.
         self._bjobs_fmt_lock = threading.Lock()
-        # DEBUG 진단 — 이 프로세스가 실제로 보는 LSF 클러스터를 기록한다.
-        # 셸에서 친 lsid와 다르면 "GUI 기동 env ≠ 지금 셸 env"라는 뜻이다
-        # (subprocess는 부모 프로세스 env를 상속하며 셸 rc를 타지 않는다).
-        if log.isEnabledFor(logging.DEBUG):
-            self._log_cluster_info()
-
-    def _log_cluster_info(self) -> None:
-        """DEBUG 전용 클러스터 진단 — **의도적으로 경로 설정 없이** bare
-        "lsid"를 실행한다. 경로를 고정하면 그 경로의 클러스터가 나올 뿐,
-        '지금 이 프로세스 env(PATH)가 잡는 클러스터'라는 진단 의미가 사라진다.
-        순수 진단이라 어떤 실패도 삼킨다(본 기능과 무관)."""
-        try:
-            res = self.runner(["lsid"], 10.0, None)
-        except Exception as e:               # noqa: BLE001 — 진단 실패는 무해
-            log.debug("lsid 진단 실패 (무시): %r", e)
-            return
-        log.debug("현재 LSF 클러스터 진단 (lsid, rc=%d):\n%s",
-                  res.returncode, (res.stdout + res.stderr).strip())
 
     def fetch_cluster_name(self) -> Optional[str]:
         """현재 프로세스 env가 가리키는 LSF 클러스터명(lsid) 조회 — 캐시에
-        저장. 진단(_log_cluster_info)과 같은 이유로 bare "lsid"를 쓴다.
-        LsfJobManager 초기화가 1회 호출한다 — 실패는 None으로 삼킨다
+        저장. **의도적으로 경로 설정 없이** bare "lsid"를 실행한다 — 경로를
+        고정하면 그 경로의 클러스터가 나올 뿐, '지금 이 프로세스 env(PATH)가
+        잡는 클러스터'라는 진단 의미가 사라진다. _run funnel 경유라 DEBUG
+        레벨이면 원문(rc/stdout/소요시간)이 NFR-6 로그로 남는다(별도 진단
+        불필요). LsfJobManager 초기화가 1회 호출 — 실패는 None으로 삼킨다
         (클러스터명은 부가 정보, 기동을 막으면 안 된다)."""
         try:
-            res = self.runner(["lsid"], 10.0, None)
+            res = self._run(["lsid"], 10.0)
             m = _LSID_CLUSTER_RE.search(res.stdout)
             if m:
                 self.cluster_name = m.group(1)
@@ -584,7 +570,6 @@ class LsfCommand:
                 job_id=int(m.group(1)),
                 array_index=int(m.group(2)) if m.group(2) else None,
                 state=state, exit_code=exit_code,
-                job_name=_jfield(rec, "JOB_NAME"),
                 run_time_s=_parse_run_time(_jfield(rec, "RUN_TIME")),
                 start_time=_parse_lsf_time(_jfield(rec, "START_TIME")),
                 finish_time=finish_time,
@@ -695,25 +680,6 @@ class LsfCommand:
         return len("tcsh -c source  && set noglob && exec bkill ") \
             + len(envpath) + 10
 
-    def bkill_targets(self, targets: Sequence[str],
-                      on_progress: Optional[Callable[[int], None]] = None,
-                      envpath: str = "") -> int:
-        """chunked bkill — "id" 또는 "id[idx]"(array element) 형태 허용.
-        ARG_MAX 안전 (④ 최후 수단). 반환: LSF 호출 횟수.
-        envpath 지정 시 그 LSF env를 source한 bkill (MC forward job).
-        on_progress(누적_처리_수)는 chunk 완료마다 호출된다(진행 통지)."""
-        calls = 0
-        processed = 0
-        base = self._bkill_base_len(envpath)
-        for chunk in chunk_args(list(targets), self.config.chunk_size,
-                                self.config.arg_max, base):
-            self._run_kill(self._bkill_argv(chunk, envpath))
-            calls += 1
-            processed += len(chunk)
-            if on_progress:
-                on_progress(processed)
-        return calls
-
     def bkill_targets_confirm(self, targets: Sequence[str],
                               on_progress: Optional[Callable[[int], None]] = None,
                               envpath: str = ""
@@ -749,7 +715,3 @@ class LsfCommand:
             if on_progress:
                 on_progress(processed)
         return resolved, calls
-
-    def _run_kill(self, argv: List[str]) -> bool:
-        """반환: 매칭된 job이 있었는지 (no-match는 예외가 아니라 False)."""
-        return self._run_or_nomatch(argv, self.config.kill_timeout_s) is not None

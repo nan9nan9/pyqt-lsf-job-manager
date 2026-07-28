@@ -35,8 +35,8 @@ def test_sibling_refresh_not_stale_from_cache(qtbot, manager):
     # 불가능해졌다 — by-id 단일 조회 결과가 전 element 레코드에 반영되는지만 검증)
     def fake_by_ids(ids):
         if 900 in set(ids):
-            return ([JobStatus(900, 0, JobState.DONE, 0, f"{jsid}_0"),
-                     JobStatus(900, 1, JobState.DONE, 0, f"{jsid}_1")], set())
+            return ([JobStatus(900, 0, JobState.DONE, 0),
+                     JobStatus(900, 1, JobState.DONE, 0)], set())
         return ([], set())
     cmd.bjobs_by_ids = fake_by_ids
 
