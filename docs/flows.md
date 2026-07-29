@@ -53,7 +53,8 @@ Signal 순서(보장): `(pre_submit_started → pre_submit_finished)`\* → `sub
 
 **완료 통지**: 이후 폴링/`query_once`로 **전원 terminal** 감지 시
 `jobset_finished(요약)` 1회 — 등록물과 무관하게 job 상태만 본다. 재제출로 다시
-활성이 되면 재무장돼 다음 완료에 또 발화한다.
+활성이 되면 재무장돼 다음 완료에 또 발화한다. 단, **사용자가 건 kill로** 전원
+terminal이 된 완료는 통지하지 않는다(§2) — 스스로 끝낸 것이라 알릴 게 없다.
 
 **완료 후처리(`post_process` 지정 시)**: 같은 감지 지점에서 `jobset_finished` 직후
 worker에서 1회 — `post_processing_started → post_processing_finished(result)`.

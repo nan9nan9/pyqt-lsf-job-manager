@@ -91,7 +91,7 @@ mgr.submit(js, post_process=post)
 | `kill_progress` | `(jobset_id, done, total)` | chunk kill 진행(throttled) |
 | `kill_finished` | `(jobset_id, KillReport)` | `kill(js)` · `kill_jobs(...)` |
 | `handler_finished` | `(jobset_id, handler_name, HandlerResult)` | `add_handler` 로 등록한 handler 1회 실행 완료 시 |
-| `jobset_finished` | `(jobset_id, summary)` | 전 job 이 terminal 도달 — polling · `query_once` · submit 완료(전량 실패 시) |
+| `jobset_finished` | `(jobset_id, summary)` | 전 job 이 terminal 도달 — polling · `query_once` · submit 완료(전량 실패 시). **사용자 kill 로 끝난 완료는 발화 안 함** |
 | `post_processing_started` | `(jobset_id)` | `submit(post_process=fn)` — 전원 terminal 후처리 착수 |
 | `post_processing_finished` | `(jobset_id, result)` | 후처리 콜백 완료 (반환값, 예외 시 `None`) |
 | `error_occurred` | `(jobset_id, message)` | 모든 async 경로의 워커 예외 |

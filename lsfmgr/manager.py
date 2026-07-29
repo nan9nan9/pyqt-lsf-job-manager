@@ -745,9 +745,10 @@ class LsfJobManager(QObject):
         self._post_process.pop(sid, None)        # source 소멸 — 무장/보류 해제
         self._pending_arm.pop(sid, None)
         self._finished_latch.discard(sid)
-        # target은 job이 늘었다 — 흡수분이 CREATED면 다시 미완료이므로 완료
-        # 통지가 새로 나가야 한다.
-        self._finished_latch.discard(tid)
+        # target의 latch는 **건드리지 않는다** — 흡수분이 CREATED면 다음 완료
+        # 감지가 non-terminal을 보고 알아서 푼다(그 job이 terminal이 되려면
+        # submit을 거쳐야 하고, 착수 확정에서도 푼다). 여기서 미리 풀면 완료본
+        # 둘을 합쳤을 때 — 아무 전이도 없는데 — 완료 통지가 또 나간다.
         self._forget_paced(sid)                  # 사라진 jobset의 표시 보류분
         self.polling.stop_polling(sid)
         self.handlers.remove_all(sid)
@@ -1106,18 +1107,22 @@ class LsfJobManager(QObject):
             return
         fn = self._post_process.pop(jobset_id, None)  # 한 번만
         if jobset_id not in self._finished_latch:
-            self._finished_latch.add(jobset_id)
             try:
                 summary = self.store.summary(jobset_id)
             except LsfmgrError:
-                summary = {}
+                return       # jobset이 방금 사라짐 — 빈 요약을 쏘면 구독자가
+                             # s["total"]에서 깨진다. latch도 세우지 않는다.
+            self._finished_latch.add(jobset_id)
             self.jobset_finished.emit(jobset_id, summary)
         if fn is None:
             return
-        if self._shutdown_done or self.submitter.is_active(jobset_id):
-            # jobset_finished slot이 그 자리에서 재제출/shutdown한 경우 —
-            # 이 실행은 이미 지나간 사이클이다. 새 사이클의 post_process는
-            # _pending_arm이 따로 들고 있으므로 여기서 버려도 유실이 아니다.
+        if self._shutdown_done:
+            # jobset_finished slot이 그 자리에서 shutdown한 경우 — 이미 drain된
+            # pool에 join되지 않는 스레드를 만들지 않는다 (CS-8).
+            # ※ 여기서 is_active(재제출)까지 막지는 않는다. 이 실행은 전원
+            #   terminal에 **도달했으므로** post_process는 실행돼야 한다
+            #   (콜백은 위에서 뜬 recs 스냅샷만 쓴다). 새 사이클의 무장은
+            #   _pending_arm이 따로 들고 있어 서로 간섭하지 않는다.
             return
         self.post_processing_started.emit(jobset_id)
         self._post_pool.start(_PostProcessTask(self, jobset_id, fn, recs))
@@ -1174,6 +1179,32 @@ class LsfJobManager(QObject):
             if recs:
                 self._emit_jobs(j, recs)
             self._emit_summary(j)
+            self._mute_finish_after_kill(j)
+
+    def _mute_finish_after_kill(self, jsid: str) -> None:
+        """**사용자가 건 kill로** 전원 terminal이 된 완료는 통지하지 않는다 —
+        스스로 끝낸 것이라 "다 끝났다"는 알림이 필요 없다. 발화 없이 latch만
+        세워, 이어지는 폴링 tick의 완료 감지가 조용히 지나가게 한다.
+
+        의도치 않은 종료(자연 종료, LSF/관리자의 외부 bkill, EXIT)는 이 경로를
+        타지 않으므로 그대로 통지된다 — 사용자가 알아야 하는 쪽만 남는다.
+
+        여기서 '전원 terminal'인지를 보므로 **부분 kill은 억제되지 않는다**:
+        PEND만/선택 행만 죽이면 남은 job이 아직 non-terminal이라 latch가 안
+        서고, 그 job들이 나중에 끝나면 정상적으로 통지된다.
+
+        ※ kill_status_policy="actual"이면 이 시점에 레코드가 아직 EXIT가
+          아니라 억제되지 않는다 — 폴링이 EXIT를 확인하는 순간 통지가 나간다.
+        ※ post_process는 억제하지 않는다 — "전원 terminal이면 실행"이라는
+          별개 계약이고, kill로 끝난 결과도 수집 대상이다."""
+        if not jsid or jsid in self._finished_latch:
+            return
+        try:
+            recs = self.store.get_jobs(jsid)
+        except LsfmgrError:
+            return
+        if recs and all(r.state.is_terminal for r in recs):
+            self._finished_latch.add(jsid)
 
     def _handle_of(self, jobset_id: str) -> Optional[JobSet]:
         h = self._handles.get(jobset_id)

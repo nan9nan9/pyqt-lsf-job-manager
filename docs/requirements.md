@@ -376,6 +376,12 @@ JobSetStore(ABC) ── InMemoryStore
   **재무장**: 다시 non-terminal이 되면(재제출·merge로 job 추가) latch가 풀려 다음
   완료에 또 발화한다 — "완료"는 제출 사이클이 아니라 jobset 상태의 성질이다.
   job이 하나도 없는 빈 jobset에서는 발화하지 않는다.
+  **사용자 kill 억제**: `mgr.kill(js)`/`kill_jobs`로 전원 terminal이 된 완료는
+  발화하지 않는다(latch만 세운다) — 사용자가 스스로 끝낸 것이라 알릴 것이 없다.
+  의도치 않은 종료(자연 종료·외부 bkill·EXIT)는 kill 요청을 안 거치므로 그대로
+  통지되고, 부분 kill은 남은 job이 non-terminal이라 억제되지 않는다.
+  `kill_status_policy="actual"`은 kill 시점에 레코드가 EXIT가 아니라 억제되지
+  않는다(폴링 확인 시 통지). post_process는 억제하지 않는다(FR-10은 별개 계약).
 
 ---
 

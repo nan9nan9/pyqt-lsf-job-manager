@@ -117,6 +117,157 @@ def test_rearms_on_resubmit(qtbot, manager, fake_lsf):
 
 
 # ----------------------------------------------------------------------
+# 내가 건 kill로 끝났으면 통지 없음 — 사용자가 스스로 끝낸 완료
+# ----------------------------------------------------------------------
+def test_muted_when_user_killed_whole_jobset(qtbot, manager, fake_lsf):
+    fired = []
+    js = manager.create_jobset(["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
+    js.jobset_finished.connect(lambda s: fired.append(s))
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        manager.submit(js, auto_poll=False)
+
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000):
+        manager.kill(js)
+    assert js.summary["EXIT"] == 2          # 전원 EXIT (optimistic)
+    manager.query_once(js)                  # 폴링이 돌아도
+    qtbot.wait(200)
+    assert fired == []                      # 통지 없음
+
+
+# ----------------------------------------------------------------------
+# kill로 끝나도 post_process는 실행 — 별개 계약(결과 수집)
+# ----------------------------------------------------------------------
+def test_post_process_still_runs_after_kill(qtbot, manager, fake_lsf):
+    fired = []
+    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js.jobset_finished.connect(lambda s: fired.append(s))
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        manager.submit(js, post_process=lambda r: len(r), auto_poll=False)
+
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000):
+        manager.kill(js)
+    with qtbot.waitSignal(js.post_processing_finished, timeout=10000) as blk:
+        manager.query_once(js)
+
+    assert blk.args[0] == 1
+    assert fired == []                      # 후처리는 돌되 완료 통지는 없음
+
+
+# ----------------------------------------------------------------------
+# 부분 kill은 억제 대상이 아님 — 남은 job이 끝나면 통지된다
+# ----------------------------------------------------------------------
+def test_partial_kill_still_notifies(qtbot, manager, fake_lsf):
+    fired = []
+    js = manager.create_jobset(["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
+    js.jobset_finished.connect(lambda s: fired.append(s))
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        manager.submit(js, auto_poll=False)
+
+    recs = js.jobs()
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000):
+        manager.kill_jobs(js, [recs[0].job_key])     # 1건만 kill
+    qtbot.wait(100)
+    assert fired == []                      # 아직 나머지가 살아 있다
+
+    with qtbot.waitSignal(js.jobset_finished, timeout=10000) as blk:
+        fake_lsf.set_job(recs[1].job_id, "DONE", 0)  # 나머지는 자연 종료
+        manager.query_once(js)
+    assert blk.args[0]["total"] == 2        # 내가 안 죽인 job의 완료는 통지
+
+
+# ----------------------------------------------------------------------
+# kill 억제 후 재제출하면 다음 완료는 정상 통지 (재무장)
+# ----------------------------------------------------------------------
+def test_rearms_after_killed_jobset_resubmitted(qtbot, manager, fake_lsf):
+    fired = []
+    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js.jobset_finished.connect(lambda s: fired.append(s))
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        manager.submit(js, auto_poll=False)
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000):
+        manager.kill(js)
+    manager.query_once(js)
+    qtbot.wait(150)
+    assert fired == []
+
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        manager.submit(js, auto_poll=False)
+    with qtbot.waitSignal(js.jobset_finished, timeout=10000):
+        _finish(manager, fake_lsf, js)
+    assert len(fired) == 1
+
+
+# ----------------------------------------------------------------------
+# 완료본 둘을 merge하면 재발화 없음 — 아무 job도 전이하지 않았다
+# ----------------------------------------------------------------------
+def test_merge_of_finished_jobsets_does_not_refire(qtbot, manager, fake_lsf):
+    fired = []
+    manager.jobset_finished.connect(lambda j, s: fired.append(j))
+
+    a = manager.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        manager.submit(a, auto_poll=False)
+    with qtbot.waitSignal(a.jobset_finished, timeout=10000):
+        _finish(manager, fake_lsf, a)
+
+    b = manager.create_jobset(["customwrapper_sub b.sp"], merge_ids=["b"])
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        manager.submit(b, auto_poll=False)
+    with qtbot.waitSignal(b.jobset_finished, timeout=10000):
+        _finish(manager, fake_lsf, b)
+    assert fired == [a.id, b.id]
+
+    manager.merge(a, b)                 # 완료본 흡수 — 전이 없음
+    manager.query_once(a)
+    qtbot.wait(200)
+    assert fired == [a.id, b.id]        # a 재발화 없음
+
+
+# ----------------------------------------------------------------------
+# merge로 **미완료** job이 들어오면 재무장 — 그 job이 끝날 때 다시 발화
+# ----------------------------------------------------------------------
+def test_merge_of_created_jobs_rearms(qtbot, manager, fake_lsf):
+    fired = []
+    manager.jobset_finished.connect(lambda j, s: fired.append(j))
+
+    a = manager.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        manager.submit(a, auto_poll=False)
+    with qtbot.waitSignal(a.jobset_finished, timeout=10000):
+        _finish(manager, fake_lsf, a)
+
+    add = manager.create_jobset(["customwrapper_sub c.sp"], merge_ids=["c"])
+    manager.merge(a, add)               # CREATED 1건 추가 — 다시 미완료
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        manager.submit(a, auto_poll=False)
+    with qtbot.waitSignal(a.jobset_finished, timeout=10000) as blk:
+        _finish(manager, fake_lsf, a)
+
+    assert fired == [a.id, a.id]
+    assert blk.args[0]["total"] == 2
+
+
+# ----------------------------------------------------------------------
+# jobset_finished slot이 그 자리에서 재제출해도 이번 실행의 post_process는 실행
+# ----------------------------------------------------------------------
+def test_post_process_survives_resubmit_from_slot(qtbot, manager, fake_lsf):
+    calls = []
+    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        manager.submit(js, post_process=lambda r: calls.append(len(r)),
+                       auto_poll=False)
+
+    # 완료 통지를 받자마자 재제출하는 GUI 패턴 (한 번만)
+    manager.jobset_finished.connect(
+        lambda j, s: manager.submit(js, auto_poll=False)
+        if not calls and not manager.is_submitting(j) else None)
+
+    with qtbot.waitSignal(js.post_processing_finished, timeout=10000):
+        _finish(manager, fake_lsf, js)
+    assert calls == [1]                 # 도달한 완료의 후처리는 유실되지 않음
+
+
+# ----------------------------------------------------------------------
 # post_process와 함께 쓰면 jobset_finished가 먼저
 # ----------------------------------------------------------------------
 def test_order_before_post_processing(qtbot, manager, fake_lsf):
