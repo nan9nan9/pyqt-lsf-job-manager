@@ -1,8 +1,8 @@
 """옵션 3단 계층 해석 — defaults → manager kwargs → call kwargs (§1.2, v7).
 
-- OPT-1: 해석은 resolve_options() 한 함수로 일원화, frozen Options 반환
-- OPT-2: 알 수 없는 키워드 → TypeError (오타 조기 발견)
-- OPT-3: 범위 검증 위반 → ValueError
+- 해석은 resolve_options() 한 함수로 일원화, frozen Options 반환
+- 알 수 없는 키워드 → TypeError (오타 조기 발견)
+- 범위 검증 위반 → ValueError
 - Qt 비의존 순수 Python.
 """
 from __future__ import annotations
@@ -88,7 +88,7 @@ class Options:
     description: str = ""
 
     def retry_delay_s(self, attempt: int) -> float:
-        """attempt번째(0부터) 실패 후 재시도 대기 시간 (FR-2.2).
+        """attempt번째(0부터) 실패 후 재시도 대기 시간.
 
         MAX_RETRY_DELAY_S로 clamp — QTimer.singleShot의 ms 인자는 int32라
         약 24.8일을 넘으면 OverflowError가 나고, slot 안 예외는 PyQt에서
@@ -118,7 +118,7 @@ def parse_retry_backoff(value: str) -> Tuple[str, float]:
 
 
 # ----------------------------------------------------------------------
-# 검증 (OPT-3)
+# 검증
 # ----------------------------------------------------------------------
 def _validate(key: str, value: Any) -> Any:
     """옵션 1개 검증/정규화. 위반 시 ValueError."""
@@ -221,12 +221,12 @@ def _validate(key: str, value: Any) -> Any:
 
 def validate_options(kwargs: Dict[str, Any], *, allowed: frozenset,
                      where: str) -> Dict[str, Any]:
-    """키 집합 검증(OPT-2) + 값 검증(OPT-3) 후 정규화된 dict 반환."""
+    """키 집합 검증 + 값 검증 후 정규화된 dict 반환."""
     out: Dict[str, Any] = {}
     for key, value in kwargs.items():
         if key in DEPRECATED_KEYS:
             # allowed 검사보다 먼저 — 원래 그 컨텍스트에서 불허였던 키도
-            # 경고-무시로 통과한다(OPT-2보다 하위 호환 우선). 제거 키를
+            # 경고-무시로 통과한다(키 검증보다 하위 호환 우선). 제거 키를
             # TypeError로 죽이면 기존 앱이 업그레이드만으로 깨진다.
             log.warning(
                 "%s: 옵션 %r은 제거됨(v9/v10) — 무시합니다", where, key)
@@ -241,7 +241,7 @@ def validate_options(kwargs: Dict[str, Any], *, allowed: frozenset,
 
 def resolve_options(defaults: Dict[str, Any], call_kwargs: Dict[str, Any], *,
                     context: str = "submit") -> Options:
-    """OPT-1 — 옵션 해석 단일 지점.
+    """옵션 해석 단일 지점.
 
     defaults(①내장+②manager가 이미 merge된 값) 위에 ③call kwargs를 덮어
     frozen Options를 만든다. context에 따라 허용 키가 다르다:

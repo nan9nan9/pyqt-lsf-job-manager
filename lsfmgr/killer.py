@@ -1,4 +1,4 @@
-"""Killer — chunked bkill + verify (FR-3).
+"""Killer — chunked bkill + verify.
 
 (v10: group/array/name 전략 tier 삭제 — 부착물이 생성되지 않으므로
  kill은 job_id 기반 chunked bkill 단일 경로다. ARG_MAX 안전은 chunk_args.)
@@ -49,7 +49,7 @@ class Killer(QObject):
         # _shutdown 체크와 _pool.start를 원자화한다 — 없으면 kill 스레드가
         # _shutdown=False를 읽은 직후 shutdown()이 _shutdown=True + waitForDone
         # 으로 pool을 비워버린 뒤 task가 start돼 아무도 join 못 하는 worker가
-        # 뜬다(CS-8). shutdown()도 이 락 아래에서 플래그를 세운다.
+        # 뜬다. shutdown()도 이 락 아래에서 플래그를 세운다.
         # 락 순서: _shutdown_lock → _active_lock(_reg) (역순 금지).
         self._shutdown_lock = threading.Lock()
 
@@ -109,7 +109,7 @@ class Killer(QObject):
         발행하는 kill_started와 pull API가 일치해야 한다)."""
         with self._shutdown_lock:            # 체크+start 원자화 (shutdown 경합)
             if self._shutdown:
-                # shutdown 후 새 kill worker는 아무도 join하지 않는다 (CS-8).
+                # shutdown 후 새 kill worker는 아무도 join하지 않는다.
                 # False 반환 — caller가 kill_started를 발화하지 않게(started/
                 # finished 짝 계약: task를 안 띄웠으니 kill_finished도 안 온다).
                 log.warning("shutdown 후 kill 요청 무시: %s", jobset_id)
@@ -185,7 +185,7 @@ class _KillTask(QRunnable):
         try:
             try:
                 report = self._run()
-            except Exception as e:           # noqa: BLE001 — CS-5
+            except Exception as e:           # noqa: BLE001
                 log.exception("kill 실패: %s", self.jobset_id)
                 self.killer.error.emit(self.jobset_id, repr(e))
                 # 착수/완료 짝 계약 — 예외에도 kill_finished는 발행한다.
@@ -239,7 +239,7 @@ class _KillTask(QRunnable):
         strategies: List[str] = []
         errors: List[str] = []
         if scope is not None:
-            # kill 우선권 (FR-3) — barrier를 올리는 순간(SubmitGate lock 아래
+            # kill 우선권 — barrier를 올리는 순간(SubmitGate lock 아래
             # 원자적) 그 시점의 submit 활동을 넘겨받아 취소·대기한다. 미제출
             # job은 CREATED로 복귀해 대상에서 빠지고, 그새 제출이 완료된
             # job은 PEND(job_id 확보)로 확정되어 아래 스냅샷에 포함된다.
@@ -274,7 +274,7 @@ class _KillTask(QRunnable):
         # 경로마다 다른 것은 (대상 레코드 풀, target 문자열, rec→target 매핑,
         # 전략 라벨)뿐이고 실행·부기(장부)는 아래 공유 꼬리 한 벌이다 (v10.1).
         if self.job_ids is not None:
-            # 개별 ID kill (FR-3.4) — 원시 id/"id[idx]" 문자열 그대로.
+            # 개별 ID kill — 원시 id/"id[idx]" 문자열 그대로.
             # 레코드 풀은 여기서 조회하지 않는다(recs=None → 공유 꼬리에서
             # confirm **이후** 지연 조회) — 먼저 조회하면 jobset 소실 경합/
             # 비수치 id의 예외가 bkill 자체를 무산시킨다 (리팩토링 회귀 F1:
@@ -285,7 +285,7 @@ class _KillTask(QRunnable):
             rec_target = self._id_str
             label = "chunk"
         elif self.only_state is not None:
-            # 부분 kill (FR-3.2) — 해당 상태 job만. array element는 반드시
+            # 부분 kill — 해당 상태 job만. array element는 반드시
             # "id[idx]" 지정(parent id면 다른 상태 element까지 전부 죽는다).
             # (bkill -stat은 LSF 버전 의존이라 결정적 방식을 기본으로 한다)
             recs = k.store.get_jobs(self.jobset_id, states={self.only_state})
@@ -329,13 +329,16 @@ class _KillTask(QRunnable):
             strategies.append(label)
             if any(groups):              # env를 source한 그룹이 하나라도
                 strategies.append("sourced")
-        # optimistic 대상 — per-id 확인이 있으므로 errors 유무와 무관하게
+        # 마킹 대상 — per-id 확인이 있으므로 errors 유무와 무관하게
         # **확인된 target만** 마킹한다(미확인분은 on-LSF로 남아 폴링/재kill).
+        # 정책과 무관하게 산출한다: optimistic은 EXIT 전이 + killed 표식,
+        # actual은 표식만(전이는 폴링이 실측으로) — 어느 쪽이든 "내가 죽였다"는
+        # 지금만 알 수 있는 사실이라 여기서 레코드에 남긴다.
         # 개별 id 경로(recs=None)는 풀을 여기서야 조회한다 — kill은 이미
         # 끝났으므로 조회 실패(jobset 소실/비수치 id)는 마킹만 포기하고
         # 삼킨다(LSF job은 죽었다 — 레코드 정리는 폴링이 수렴시킨다).
         killed_recs: List = []
-        if optimistic and resolved:
+        if resolved:
             if recs is None:
                 try:
                     recs = self._record_pool()
@@ -362,10 +365,13 @@ class _KillTask(QRunnable):
         # optimistic 정책: 확인된 job을 즉시 EXIT로 전이 (bjobs 대기 없이).
         # EXIT는 terminal이라 폴링 대상(is_on_lsf)에서 빠져 다시 조회되지 않는다.
         changed: List = []
-        if optimistic and killed_recs:
+        if killed_recs:
             to_mark = ([r for r in killed_recs if r.job_key not in alive_keys]
                        if alive_keys else killed_recs)
-            changed = self._mark_exited(to_mark)
+            if optimistic:
+                changed = self._mark_exited(to_mark)      # EXIT + killed 표식
+            else:
+                self._flag_killed(to_mark)                # 표식만 (전이는 폴링)
 
         # verify 조회가 수행한 전이도 report.changed로 합류시킨다 — verify가
         # terminal(EXIT/DONE)로 전이시킨 job은 이후 폴링(_ON_LSF만 조회)에도,
@@ -460,13 +466,29 @@ class _KillTask(QRunnable):
             try:
                 new = self.killer.store.transition(
                     r.jobset_id, r.job_key, JobState.EXIT,
-                    fail_reason="KILLED",
+                    fail_reason="KILLED", killed=True,
                     guard=lambda cur: cur.state.is_on_lsf)
             except (JobNotFoundError, JobSetNotFoundError):
                 continue
             if new is not None:
                 changed.append(new)
         return changed
+
+    def _flag_killed(self, recs: List) -> None:
+        """actual 정책 — 상태는 그대로 두고 killed 표식만 남긴다. EXIT 전이는
+        폴링/verify가 실측으로 하되, "이 EXIT은 내가 죽인 것"이라는 근거는
+        지금(kill 수용 확인 직후)만 알 수 있으므로 여기서 기록한다.
+
+        상태를 안 바꾸려고 현재 상태를 그대로 넘기고, guard로 스냅샷 이후
+        상태가 바뀌었으면(폴링과 경합) 건너뛴다 — 표식은 부기라 유실돼도
+        kill 자체나 상태 수렴에는 영향이 없다."""
+        for r in recs:
+            try:
+                self.killer.store.transition(
+                    r.jobset_id, r.job_key, r.state, killed=True,
+                    guard=lambda cur, s=r.state: cur.state is s)
+            except (JobNotFoundError, JobSetNotFoundError):
+                continue
 
     def _verify_direct(self, whole: set, exact: set, ranges: List):
         """jobset 없는 verify — 대상 parent id를 직접 chunked 조회한다.
@@ -491,7 +513,7 @@ class _KillTask(QRunnable):
                       envpath: str = "", total: Optional[int] = None,
                       done_base: int = 0) -> Tuple[int, int, int, set]:
         """concrete-id kill — bkill 출력의 확인('is being terminated' 등)을
-        보고 미확인분을 재시도한다 (submit retry와 대칭, FR-3.4).
+        보고 미확인분을 재시도한다 (submit retry와 대칭).
         envpath 미지정(빈 문자열)이면 env source 없는 plain bkill — MC 분류
         kill(_split_by_envpath)은 그룹별 envpath를 명시 전달한다.
         total/done_base는 진행률 통지용 — env 그룹으로 나눠 여러 번 부를 때
@@ -529,7 +551,7 @@ class _KillTask(QRunnable):
 
 
     def _verify(self, targets: set) -> Tuple[Optional[int], set, List]:
-        """재조회로 실제 종료 확인 (FR-3.3).
+        """재조회로 실제 종료 확인.
         반환: (잔존 수, 잔존 job_key 집합, 조회가 전이시킨 레코드 목록 —
         caller가 report.changed에 합류시켜 신호 유실을 막는다).
         kill 대상(targets: "id"/"id[idx]"/"id[m-n]" 문자열) 중 아직 LSF에

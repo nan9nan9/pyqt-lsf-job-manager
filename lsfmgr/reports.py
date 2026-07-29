@@ -1,4 +1,4 @@
-"""결과 리포트 (frozen dataclass — Signal 인자로 안전, CS-2)."""
+"""결과 리포트 (frozen dataclass — Signal 인자로 안전)."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -81,10 +81,10 @@ class KillReport:
     strategies: List[str] = field(default_factory=list)   # 사용된 전략 순서
     command_calls: int = 0               # 실제 LSF 호출 횟수
     still_alive: Optional[int] = None    # verify=True일 때 재조회 후 잔존 수
-    unconfirmed: int = 0                 # 재시도 후에도 kill 확인 못 한 수 (FR-3.4)
+    unconfirmed: int = 0                 # 재시도 후에도 kill 확인 못 한 수
     kill_retries: int = 0                # kill 재시도 라운드 수
     changed: List = field(default_factory=list)   # optimistic 정책에서 EXIT로
-                                         # 전이된 JobRecord (FR-3.5)
+                                         # 전이된 JobRecord
     errors: List[str] = field(default_factory=list)
 
 

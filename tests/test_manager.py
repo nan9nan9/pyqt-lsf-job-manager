@@ -40,7 +40,7 @@ def test_shutdown_idempotent(manager):
 
 def test_no_coredump_on_exit_without_shutdown(tmp_path):
     """앱이 shutdown()을 안 부르고, 이벤트루프도 안 돌리고 종료해도 core dump가
-    안 나야 한다 — atexit 안전망이 폴링 QThread/워커를 정리한다 (CS-8).
+    안 나야 한다 — atexit 안전망이 폴링 QThread/워커를 정리한다.
     실제 crash는 서브프로세스 종료 코드로만 잡히므로 별도 프로세스로 실행."""
     import os
     import subprocess
@@ -71,7 +71,7 @@ def test_no_coredump_on_exit_without_shutdown(tmp_path):
 
 
 def test_shutdown_during_submit_preserves_job_ids(qtbot, fake_lsf, config):
-    """CS-8 — shutdown 시 진행 중 bsub의 job_id 유실 없음."""
+    """shutdown 시 진행 중 bsub의 job_id 유실 없음."""
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf)
     jobs = [f"r {i}" for i in range(50)]
     jsid = submit_cmds(mgr, jobs, workers=2, rate_limit_per_s=30).id

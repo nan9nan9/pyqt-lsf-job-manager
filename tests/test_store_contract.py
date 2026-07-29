@@ -163,7 +163,7 @@ def test_runtime_fields_roundtrip(store):
 
 
 # ----------------------------------------------------------------------
-# summary 불변식 (FR-5.2, 수용 기준 4)
+# summary 불변식 (수용 기준 4)
 # ----------------------------------------------------------------------
 def test_summary_invariant(store):
     store.store_insert_jobset(make_jobset(n=5))
@@ -191,7 +191,7 @@ def test_summary_counts_missing_records_as_created(store):
 
 
 # ----------------------------------------------------------------------
-# 검색 (FR-5.6)
+# 검색
 # ----------------------------------------------------------------------
 def test_search_by_tag_label_since(store):
     old = datetime.now() - timedelta(days=2)
@@ -207,7 +207,7 @@ def test_search_by_tag_label_since(store):
 
 
 # ----------------------------------------------------------------------
-# 동시성 (CS-1, 수용 기준 9)
+# 동시성 (수용 기준 9)
 # ----------------------------------------------------------------------
 def test_concurrent_transitions(store):
     n_jobs, n_threads = 50, 8

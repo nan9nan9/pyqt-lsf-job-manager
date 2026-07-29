@@ -1,4 +1,4 @@
-"""JobSet 관리 테스트 — 손실 감지 / merge / close / add_job (FR-5)."""
+"""JobSet 관리 테스트 — 손실 감지 / merge / close / add_job."""
 from __future__ import annotations
 
 import pytest
@@ -17,7 +17,7 @@ def submitted(qtbot, manager, fake_lsf):
 
 
 # ----------------------------------------------------------------------
-# 손실 감지 (FR-5.3)
+# 손실 감지
 # ----------------------------------------------------------------------
 def test_detect_lost_no_name_recovery(qtbot, manager, fake_lsf, submitted):
     """v10: name 역조회 복구 제거 — ID 미확보 SUBMITTING은 조회 없이 바로
@@ -60,7 +60,7 @@ def test_detect_lost_marks_lost(qtbot, manager, fake_lsf, submitted):
 
 
 # ----------------------------------------------------------------------
-# merge (FR-5.5)
+# merge
 # ----------------------------------------------------------------------
 def test_merge_name_collision_is_atomic(qtbot, manager, fake_lsf):
     """이름 충돌 merge는 **아무것도 반영하지 않고** 실패한다 (리뷰 H1 회귀 —
@@ -93,7 +93,7 @@ def test_merge_name_collision_is_atomic(qtbot, manager, fake_lsf):
 # merge된 jobset kill — 부착물 전부 순회 (§1.1)
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
-# close (FR-5.7)
+# close
 # ----------------------------------------------------------------------
 def test_close_requires_all_terminal(qtbot, manager, fake_lsf, submitted):
     with pytest.raises(LsfmgrError):
@@ -135,7 +135,7 @@ def test_remove_job_decrements_intended_count(qtbot, manager, fake_lsf, submitte
 # resubmit_jobs — 상태 기반 재실행 (kill 후 재제출, 레코드 재사용)
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
-# 메타데이터/검색 (FR-5.6)
+# 메타데이터/검색
 # ----------------------------------------------------------------------
 def test_search_by_tag(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):

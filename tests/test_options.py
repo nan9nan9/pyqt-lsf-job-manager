@@ -53,7 +53,7 @@ def test_frozen_options():
 
 
 # ----------------------------------------------------------------------
-# OPT-2: 알 수 없는 키워드 → TypeError
+# 알 수 없는 키워드 → TypeError
 # ----------------------------------------------------------------------
 def test_unknown_keyword_typeerror():
     with pytest.raises(TypeError, match="wokers"):
@@ -73,7 +73,7 @@ def test_kill_context_allows_only_verify():
 
 
 # ----------------------------------------------------------------------
-# OPT-3: 범위 검증 → ValueError
+# 범위 검증 → ValueError
 # ----------------------------------------------------------------------
 @pytest.mark.parametrize("kwargs", [
     {"workers": 0}, {"workers": 65},

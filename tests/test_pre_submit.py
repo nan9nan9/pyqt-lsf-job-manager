@@ -1,4 +1,4 @@
-"""pre_submit 게이트 (FR-9) — 제출 전 커맨드 리스트 전체를 단일 워커에서 검사.
+"""pre_submit 게이트 — 제출 전 커맨드 리스트 전체를 단일 워커에서 검사.
 
 신호 순서: pre_submit_started → pre_submit_finished(ok) → (ok일 때만) submit_started →
 submit_finished. False/예외 처리와 옵션(submit_finished_on_gate_reject) 검증.

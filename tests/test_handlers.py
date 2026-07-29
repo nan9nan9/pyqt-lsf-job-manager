@@ -1,4 +1,4 @@
-"""JobSet handler — 폴링 구동 / start·end state / 최종 실행 / 에러 (FR-7)."""
+"""JobSet handler — 폴링 구동 / start·end state / 최종 실행 / 에러."""
 from __future__ import annotations
 
 import pytest

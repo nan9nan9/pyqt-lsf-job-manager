@@ -300,8 +300,8 @@ mgr.jobset_finished.connect(                   # 전역 계층 — (jobset_id, s
   반대로 **의도치 않은 종료**(자연 종료, LSF/관리자의 외부 `bkill`, 비정상 EXIT)는
   kill 요청을 거치지 않으므로 그대로 통지됩니다 — 알아야 하는 쪽만 옵니다.
   **부분 kill**(PEND만/선택 행)은 억제 대상이 아니라, 남은 job이 끝나면 통지됩니다.
-  (`kill_status_policy="actual"`이면 kill 시점에 레코드가 아직 EXIT가 아니라
-  억제되지 않고, 폴링이 EXIT를 확인할 때 통지됩니다.)
+  구분 근거는 레코드의 `rec.killed`(위 "실패 원인 표시" 참고)와 "kill이 끝낸
+  완료냐"입니다 — 전원이 `killed`면 EXIT가 폴링으로 나중에 확인돼도 조용합니다.
   `post_process`는 이와 무관하게 kill로 끝나도 실행됩니다(결과 수집은 별개 계약).
 - **1회**만 발화하지만, 재제출하거나 merge로 job이 늘어 다시 미완료가 되면 재무장돼
   다음 완료에 또 발화합니다. job이 하나도 없는 빈 jobset에서는 발화하지 않습니다.
@@ -346,8 +346,8 @@ if mgr.can_merge(js, fix):
 mgr.submit(js)                 # 전체 재실행
 ```
 
-재제출 리셋은 이전 실행 흔적(job_id/exit_code/실행시간/fail_message/클러스터)을
-지우고, `merge_id`/`user_data`/`submit_cwd`는 보존합니다. handler(§5.7)도 자동
+재제출 리셋은 이전 실행 흔적(job_id/exit_code/실행시간/fail_message/`killed`/
+클러스터)을 지우고, `merge_id`/`user_data`/`submit_cwd`는 보존합니다. handler(§5.7)도 자동
 재무장됩니다.
 
 ### 5.2 명령 가드 — 전부 "비활성(inactive)" 기준
@@ -479,6 +479,12 @@ mgr.jobset(jobset_id)      # ID로 핸들 재획득
 > - **EXIT**: LSF 이력을 따로 조회하지 않습니다(폴링 오버헤드 0). 레코드 필드
 >   (`exit_code` / `run_time_s` / `working_dir` / `start_time` / `finish_time`)로
 >   보여 주면 됩니다 — 전부 로컬 스냅샷이라 LSF 호출이 0입니다.
+> - **"내가 죽인 EXIT"인지**는 `rec.killed`로 구분합니다. `mgr.kill()`/`kill_jobs()`가
+>   bkill 수용을 확인한 job에만 `True`이고, 자연 종료·외부 `bkill`(관리자/다른
+>   세션)·비정상 EXIT은 `False`로 남습니다. `exit_code`(130/137/143)로는 구분되지
+>   않습니다 — 외부 kill도 같은 코드를 남기니까요. 실패 목록을 보여줄 때
+>   `js.failed_jobs`에서 `r.killed`를 걸러내면 "의도한 정지"와 "진짜 실패"가
+>   나뉩니다. 재제출 리셋에서 `False`로 돌아갑니다.
 
 > 조회 값은 **마지막 polling 시점 스냅샷**입니다 (최대 `poll_interval_s` 지연).
 > 단 `SUBMIT_FAILED`는 submit 과정에서 직접 기록되므로 항상 정확합니다.

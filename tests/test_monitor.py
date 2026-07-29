@@ -1,4 +1,4 @@
-"""polling / 조회 전략 / LOST 전이 테스트 (FR-4)."""
+"""polling / 조회 전략 / LOST 전이 테스트."""
 from __future__ import annotations
 
 import pytest
@@ -17,7 +17,7 @@ def submitted(qtbot, manager, fake_lsf):
 
 
 # ----------------------------------------------------------------------
-# 조회 전략 (FR-4.1) — group 기반 1회 호출
+# 조회 전략 — group 기반 1회 호출
 # ----------------------------------------------------------------------
 def test_query_uses_id_chunks_only(qtbot, manager, fake_lsf, submitted):
     """v10: 조회는 explicit id chunked bjobs뿐 — -g/-J를 쓰지 않는다."""
@@ -40,7 +40,7 @@ def test_jobs_updated_carries_only_changes(qtbot, manager, fake_lsf,
     jsid, changed = blocker.args
     assert len(changed) == 20                 # PEND → RUN 전부 변경
 
-    # 변화 없으면 jobs_updated는 안 오고 jobset_updated만 온다 (QT-4)
+    # 변화 없으면 jobs_updated는 안 오고 jobset_updated만 온다
     got_jobs_updated = []
     manager.jobs_updated.connect(lambda *a: got_jobs_updated.append(a))
     with qtbot.waitSignal(manager.jobset_updated, timeout=10000):
@@ -122,10 +122,10 @@ def test_core_downgrade_preserves_runtime_fields(qtbot, manager, fake_lsf,
 
 
 # ----------------------------------------------------------------------
-# bjobs 미발견 → LOST (FR-4.3, 수용 기준 6) — 본체는 test_query_defer.py
+# bjobs 미발견 → LOST (수용 기준 6) — 본체는 test_query_defer.py
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
-# 주기 polling (FR-4.4)
+# 주기 polling
 # ----------------------------------------------------------------------
 def test_periodic_polling(qtbot, manager, fake_lsf, submitted):
     fake_lsf.set_all("RUN")

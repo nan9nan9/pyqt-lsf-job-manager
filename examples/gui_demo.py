@@ -4,14 +4,14 @@
 (v10.1: basic_example / handler_example / mc_example 을 이 파일 하나로 통합)
 
   - create_jobset → submit: wrapper 커맨드 그대로 실행, `Job <id>` 캡처 관리
-    (진행률 바 / 취소 / rate limit / retry — QT-5/QT-6, FR-2)
+    (진행률 바 / 취소 / rate limit / retry)
   - 다중 JobSet 트리 + 요약 실시간 갱신 + job 테이블 증분 upsert (README §5)
   - job 추가는 **merge**: 별도 batch jobset 생성 후 흡수 (v9 규칙)
   - 실패 재실행: 같은 merge_id 로 교체(merge) 후 전체 재제출
   - kill: 전체(verify, **MC-aware** — 생성자 cluster_envpaths 로 분류 kill) /
-    PEND만 / 선택 행만 (FR-3, job_id chunk 단일 경로)
-  - JobSet handler: RUN 중 폴링마다 job 출력 파싱 + 종료 시 최종 1회 (FR-7)
-  - post_process: 전원 terminal 도달 시 worker 에서 1회 종합 집계 (FR-10)
+    PEND만 / 선택 행만 (job_id chunk 단일 경로)
+  - JobSet handler: RUN 중 폴링마다 job 출력 파싱 + 종료 시 최종 1회
+  - post_process: 전원 terminal 도달 시 worker 에서 1회 종합 집계
   - job 더블클릭 → 로컬 레코드 상세 (LSF 호출 0)
 
 테스트 환경은 저장소 동봉 mocklsf(가상 LSF)이며, 실제 LSF 는 LSFMGR_REAL=1.
@@ -125,9 +125,9 @@ class SubmitForm(QGroupBox):
         self.wrapper.addItems(WRAPPERS + ["혼합(mix)"])
         self.queue = QLineEdit("normal")          # wrapper 에 -q 로 전달
         self.label = QLineEdit("sweep")
-        self.auto_poll = QCheckBox("auto_poll (AUTO-1)")
+        self.auto_poll = QCheckBox("auto_poll")
         self.auto_poll.setChecked(True)
-        self.use_handler = QCheckBox("handler 등록 (RUN 중 출력 파싱, FR-7)")
+        self.use_handler = QCheckBox("handler 등록 (RUN 중 출력 파싱)")
         self.mc_forward = QCheckBox(
             f"MC forward 흉내 ({'/'.join(FORWARD_CLUSTERS)}, 70%)")
         self.pend_min = QSpinBox(minimum=0, maximum=600, value=1)

@@ -7,7 +7,7 @@ from typing import Optional
 
 
 class TokenBucketLimiter:
-    """token bucket 방식 rate limiter (CS-6).
+    """token bucket 방식 rate limiter.
 
     rate_per_s가 None이면 무제한. acquire()는 토큰 확보까지 짧게 대기하며,
     cancel_event가 set되면 False를 반환하고 즉시 빠져나온다.
@@ -41,7 +41,7 @@ class TokenBucketLimiter:
 
 
 class EmitThrottler:
-    """progress Signal emit 빈도 제한 (QT-5) — thread-safe.
+    """progress Signal emit 빈도 제한 — thread-safe.
 
     min_interval_s 경과 또는 진행률 min_step_ratio 이상 변화 시에만 True.
     마지막(done == total) 통지는 항상 True.

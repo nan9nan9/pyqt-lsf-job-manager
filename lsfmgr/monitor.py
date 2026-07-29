@@ -1,10 +1,10 @@
-"""상태 조회/모니터링 (FR-4).
+"""상태 조회/모니터링.
 
 - JobsetQuerier: job_id chunked bjobs 조회 → 미발견은 LOST 전이.
   (v10: group/name 부착물 조회 제거 — id 기반 단일 경로.)
   blocking이므로 반드시 worker 스레드에서 호출.
-- PollingService: 전용 QThread + 그 스레드 소속 QTimer로 주기 polling (QT-1).
-  결과는 batch Signal로만 통지 (QT-4).
+- PollingService: 전용 QThread + 그 스레드 소속 QTimer로 주기 polling.
+  결과는 batch Signal로만 통지.
 """
 from __future__ import annotations
 
@@ -73,9 +73,9 @@ class JobsetQuerier:
         self.store.get_jobset(jobset_id)     # 존재 검증 (없으면 예외)
         # 조회 대상(is_on_lsf)만 store 단에서 걸러 가져온다 — 대다수가
         # terminal인 대형 jobset에서 매 사이클 terminal 레코드까지 재구성해
-        # 나르던 비용을 줄인다 (NFR-3. InMemory는 상태 필터만, SQL 백엔드를
+        # 나르던 비용을 줄인다 (InMemory는 상태 필터만, SQL 백엔드를
         # 다시 붙인다면 (jobset_id,state) 인덱스 전제).
-        targets = self.store.get_jobs(jobset_id, states=_ON_LSF)   # FR-4.2
+        targets = self.store.get_jobs(jobset_id, states=_ON_LSF)
         if not targets:
             return QueryResult(jobset_id, self.store.summary(jobset_id))
 
@@ -104,7 +104,7 @@ class JobsetQuerier:
         def lookup(rec: JobRecord) -> Optional[JobStatus]:
             if rec.job_id is None:
                 # id 미확보 레코드는 id 조회로 확인 자체가 불가 —
-                # 복구/LOST 판단은 detect_lost(FR-5.3)의 몫이다
+                # 복구/LOST 판단은 detect_lost()의 몫이다
                 return None
             st = statuses.get((rec.job_id, rec.array_index))
             if st is not None:
@@ -118,7 +118,7 @@ class JobsetQuerier:
                     return _aggregate_elements(rec, list(elems.values()))
             return None
 
-        # --- 3) 상태 반영 + bjobs 미발견분은 LOST 판정 (FR-4.3) ---
+        # --- 3) 상태 반영 + bjobs 미발견분은 LOST 판정 ---
         # 이 사이클은 시작 시점 스냅샷(targets) 기반이고 bjobs 왕복 동안 수 초가
         # 흐른다 — 그 사이 레코드가 바뀌었으면(재제출(submit)의 리셋→재제출 등)
         # 스냅샷 기준 갱신이 새 job_id/상태를 옛 값으로 되돌린다. guard(CAS)로
@@ -181,7 +181,7 @@ class JobsetQuerier:
             for rec in missing:
                 if rec.job_id is None or rec.job_id in bjobs_failed:
                     # job_id 없는 레코드는 id 조회로 확인 자체가 불가하고,
-                    # bjobs chunk가 실패한 사이클도 근거가 없다 (FR-4.3).
+                    # bjobs chunk가 실패한 사이클도 근거가 없다.
                     # LSF 순단이면 다음 사이클에 복구되고, 진짜 소실이면
                     # 장애 해소 후 사이클에서 확정된다.
                     deferred.append(rec.job_key)
@@ -196,7 +196,7 @@ class JobsetQuerier:
                                    {"fail_reason": "NOT_FOUND_IN_LSF"}))
         self._set_streaks(jobset_id, cur)
         # 사이클당 1줄로 집계 — job당 경고면 대형 jobset의 장애 사이클마다
-        # 수백 줄이 반복돼 로그가 잠긴다 (NFR-6)
+        # 수백 줄이 반복돼 로그가 잠긴다
         if deferred:
             log.warning("조회 불가로 %d건 판단 보류 (LOST 확정 안 함): %s",
                         len(deferred), _brief(deferred))
@@ -279,7 +279,7 @@ class _PollWorker(QObject):
         super().__init__()
         self.querier = querier
         self._timers: Dict[str, QTimer] = {}
-        self._in_progress: set = set()       # CS-4 중복 polling 방지
+        self._in_progress: set = set()       # 중복 polling 방지
         self._auto_stop = True
         self._idle_counts: Dict[str, int] = {}   # 활동 없음 연속 사이클 수
         #: stop_all 완료(타이머 정리)를 shutdown이 quit 전에 확인하는 신호
@@ -316,7 +316,7 @@ class _PollWorker(QObject):
 
     @Slot(str)
     def _poll(self, jobset_id: str) -> None:
-        if jobset_id in self._in_progress:   # CS-4
+        if jobset_id in self._in_progress:   # 중복 폴링 방지
             return
         self._in_progress.add(jobset_id)
         try:
@@ -326,14 +326,14 @@ class _PollWorker(QObject):
             log.info("jobset %s 삭제됨 — polling 자동 중지", jobset_id)
             self.stop_polling(jobset_id)
             return
-        except Exception as e:               # noqa: BLE001 — 스레드 보호 (CS-5)
+        except Exception as e:               # noqa: BLE001 — 스레드 보호
             log.exception("polling 실패: %s", jobset_id)
             self.error.emit(jobset_id, repr(e))
             return
         finally:
             self._in_progress.discard(jobset_id)
 
-        # batch Signal — 변경분만 (QT-4)
+        # batch Signal — 변경분만
         self.updated.emit(jobset_id, result.summary, list(result.changed))
         for rec in result.lost:
             self.lost.emit(jobset_id, rec)
@@ -341,7 +341,7 @@ class _PollWorker(QObject):
         self._maybe_auto_stop(jobset_id)
 
     def _maybe_auto_stop(self, jobset_id: str) -> None:
-        """AUTO-2 — 더 볼 것이 없으면 polling 자동 중지 (LSF 부하, NFR-4).
+        """더 볼 것이 없으면 polling 자동 중지 (LSF 부하).
 
         ① 전원 terminal → 즉시 중지.
         ② 활동 없음(빈 jobset / cancel로 CREATED만 잔존): LSF에 있지도,
@@ -411,7 +411,7 @@ class PollingService(QObject):
         self._req_stop.emit(jobset_id)
 
     def poll_now(self, jobset_id: str) -> None:
-        """1회 갱신 요청 (비동기, FR-4.4 query_once)."""
+        """1회 갱신 요청 (비동기, query_once)."""
         self._req_poll.emit(jobset_id)
 
     def shutdown(self) -> None:

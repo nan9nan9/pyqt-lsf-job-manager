@@ -1,4 +1,4 @@
-"""JobSetManager — JobSet CRUD / 요약 / 손실 감지 / merge / close (FR-5).
+"""JobSetManager — JobSet CRUD / 요약 / 손실 감지 / merge / close.
 
 Store만 사용 (Qt 비의존). v10: LSF 호출(부착물 name 역조회·bgdel)이
 전부 제거되어 이 계층은 순수 Store 연산이다.
@@ -30,7 +30,7 @@ log = logging.getLogger("lsfmgr.jobset")
 
 
 def generate_jobset_id() -> str:
-    """timestamp + uuid 조합 (FR-5.1)."""
+    """timestamp + uuid 조합."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"js_{ts}_{uuid.uuid4().hex[:8]}"
 
@@ -60,11 +60,11 @@ class JobSetManager:
         return self.store.store_insert_jobset(record)
 
     # ------------------------------------------------------------------
-    # job 추가 (FR-5.4) — 생성은 local_create_jobs, 이후 추가는 merge_from만
+    # job 추가 — 생성은 local_create_jobs, 이후 추가는 merge_from만
     # ------------------------------------------------------------------
     def local_create_jobs(self, jobset_id: str,
                           records: Sequence[JobRecord]) -> List[JobRecord]:
-        """제출 전(CREATED) 레코드 일괄 생성 — 바구니 누적 (FR-5.4 확장).
+        """제출 전(CREATED) 레코드 일괄 생성 — 바구니 누적.
 
         job_key 중복 + merge_id 중복(None 제외)을 선검사하고 단일 배치로
         추가한다 — merge_id는 jobset 내 논리 키라 유일해야 replace가
@@ -104,7 +104,7 @@ class JobSetManager:
         """source jobset의 job들을 merge_id 규칙으로 target에 **in-place
         흡수**하고 source를 삭제한다 (target 핸들/테이블 연속).
 
-        규칙 (FR-5.5 v9):
+        규칙 (v9):
           - source job의 merge_id가 target에 존재 → **replace**: target의
             기존 job_key(물리 키)는 유지하고 내용/상태를 source 것으로 교체
             (테이블 행 연속). LSF의 실제 job은 건드리지 않는다 — 살아있는
@@ -169,7 +169,7 @@ class JobSetManager:
                     merge_id: Optional[str] = None,
                     job_key: Optional[str] = None,
                     force: bool = False) -> List[JobRecord]:
-        """job 삭제 — job_id / merge_id / job_key 중 하나로 지정 (FR-5.4 v9).
+        """job 삭제 — job_id / merge_id / job_key 중 하나로 지정 (v9).
 
         비활성(CREATED/terminal)만 삭제 가능 — 활성이면 LsfmgrError,
         force=True면 레코드만 강제 삭제(LSF job 정리는 caller 책임).
@@ -223,7 +223,7 @@ class JobSetManager:
         return jobs
 
     # ------------------------------------------------------------------
-    # 손실 감지 (FR-5.3)
+    # 손실 감지
     # ------------------------------------------------------------------
     def detect_lost(self, jobset_id: str) -> List[JobRecord]:
         """intended_count 대비 ID 미확보 job을 감지해 LOST 전이한다.
@@ -251,7 +251,7 @@ class JobSetManager:
         return lost
 
     # ------------------------------------------------------------------
-    # 종결 (FR-5.7)
+    # 종결
     # ------------------------------------------------------------------
     def local_close_jobset(self, jobset_id: str, *,
                            force: bool = False) -> JobSetRecord:

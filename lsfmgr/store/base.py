@@ -1,7 +1,7 @@
 """JobSetStore 추상 인터페이스 (Qt 비의존 순수 Python).
 
 공통 API(§4.2)는 두 백엔드가 동일 계약으로 구현하고,
-모든 public 메서드는 thread-safe여야 한다 (CS-1).
+모든 public 메서드는 thread-safe여야 한다.
 """
 from __future__ import annotations
 
@@ -113,7 +113,7 @@ class JobSetStore(ABC):
     def transition(self, jobset_id: str, job_key: str, new_state: JobState,
                    guard: Optional[Callable[[JobRecord], bool]] = None,
                    **fields: Any) -> Optional[JobRecord]:
-        """원자적 상태 전이 (read-modify-write, CS-1).
+        """원자적 상태 전이 (read-modify-write).
         fields로 job_id/exit_code/fail_reason 등 동시 갱신.
         키 필드(job_key/jobset_id)는 변경 불가 — ValueError.
         guard가 주어지면 lock 안에서 현재 레코드로 평가해 False면 전이를
@@ -167,13 +167,13 @@ class JobSetStore(ABC):
     # ------------------------------------------------------------------
     @abstractmethod
     def summary(self, jobset_id: str) -> Dict[str, Any]:
-        """상태별 카운트. 불변식: 상태 합계 == intended_count (FR-5.2).
+        """상태별 카운트. 불변식: 상태 합계 == intended_count.
         반환 예: {"total": 5000, "RUN": 2100, "PEND": 2800, ...}"""
 
     @abstractmethod
     def search(self, *, tag: Optional[str] = None, label: Optional[str] = None,
                since: Optional[datetime] = None) -> List[JobSetRecord]:
-        """세션 범위 검색 (FR-5.6)."""
+        """세션 범위 검색."""
 
     # ------------------------------------------------------------------
     # 수명
@@ -184,7 +184,7 @@ class JobSetStore(ABC):
 
 def make_summary(jobset: JobSetRecord,
                  jobs: Iterable[JobRecord]) -> Dict[str, Any]:
-    """공통 요약 생성 — total은 intended_count (불변식 FR-5.2)."""
+    """공통 요약 생성 — total은 intended_count (불변식)."""
     counts: Dict[str, int] = {}
     n = 0
     for rec in jobs:

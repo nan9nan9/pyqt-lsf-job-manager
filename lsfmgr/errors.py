@@ -90,4 +90,4 @@ class SubmitError(LsfmgrError):
 
 
 class ArgMaxExceededError(LsfmgrError):
-    """단일 chunk가 ARG_MAX 한도를 초과 — chunk_size 조정 필요 (NFR-5)."""
+    """단일 chunk가 ARG_MAX 한도를 초과 — chunk_size 조정 필요."""

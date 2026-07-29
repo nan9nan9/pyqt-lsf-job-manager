@@ -1,4 +1,4 @@
-"""JobSetHandlerService — JobSet별 사용자 handler (FR-7).
+"""JobSetHandlerService — JobSet별 사용자 handler.
 
 JobSet 하나에 이름 있는 handler를 붙여, 지정한 state 구간 동안 **폴링 사이클마다**
 worker 스레드에서 실행한다. 각 job이 시작 state(기본 RUN)에 들어가면 실행을 켜고,
@@ -182,7 +182,7 @@ class JobSetHandlerService(QObject):
         except LsfmgrError:
             self.remove_all(jobset_id)          # jobset 사라짐(삭제/merge)
             return
-        except Exception:                        # noqa: BLE001 — CS-5
+        except Exception:                        # noqa: BLE001
             # store 일시 장애 — 이번 사이클만 건너뛴다 (다음 폴링에 재시도).
             # slot 밖으로 전파되면 PyQt는 abort한다
             log.exception("handler tick 조회 실패: %s", jobset_id)
@@ -229,7 +229,7 @@ class JobSetHandlerService(QObject):
             return
         try:
             rec = self.store.get_job(jobset_id, job_key)
-        except Exception:                        # noqa: BLE001 — CS-5
+        except Exception:                        # noqa: BLE001
             return                               # jobset/job 소멸 — 무시
         if not (rec.state in h.end_states or rec.state.is_terminal):
             return
@@ -242,7 +242,7 @@ class JobSetHandlerService(QObject):
             data = h.fn(HandlerContext(h.jobset_id, rec, final))
             result = HandlerResult(h.name, h.jobset_id, rec.job_key,
                                    rec.job_id, final, data=data)
-        except Exception as e:                       # noqa: BLE001 — CS-5
+        except Exception as e:                       # noqa: BLE001
             log.exception("handler 실행 실패: %s/%s", h.jobset_id, h.name)
             result = HandlerResult(h.name, h.jobset_id, rec.job_key,
                                    rec.job_id, final, error=repr(e))

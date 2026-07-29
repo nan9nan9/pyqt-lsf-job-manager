@@ -1,4 +1,4 @@
-"""FakeLsf — LSF cluster를 흉내내는 mock runner (NFR-8).
+"""FakeLsf — LSF cluster를 흉내내는 mock runner.
 
 LsfCommand의 runner 시그니처 (argv, timeout) -> CommandResult 를 구현하여
 subprocess 없이 제출(wrapper)/bjobs/bkill 동작을 시뮬레이션한다.
@@ -302,7 +302,7 @@ class FakeLsf:
                             and lo <= j.array_index <= hi
                             and j.stat in ("PEND", "RUN")]
         # 실제 LSF처럼 job별 확인 메시지를 낸다 — "Job <id> is being terminated".
-        # 이 문구가 있어야 lsfmgr가 kill 확인으로 인정한다 (FR-3.4).
+        # 이 문구가 있어야 lsfmgr가 kill 확인으로 인정한다.
         def _disp(j):
             return (f"{j.job_id}[{j.array_index}]" if j.array_index is not None
                     else str(j.job_id))

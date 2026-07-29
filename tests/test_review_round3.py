@@ -36,7 +36,7 @@ def test_probe_failure_defers_lost(qtbot, manager, fake_lsf):
 
 
 def test_real_loss_still_detected_after_recovery(qtbot, manager, fake_lsf):
-    """순단 보류가 진짜 소실 감지(FR-4.3)를 막으면 안 된다."""
+    """순단 보류가 진짜 소실 감지를 막으면 안 된다."""
     js = submit_cmds(manager, [f"r {i}" for i in range(3)],
                         auto_poll=False)
     with qtbot.waitSignal(js.submit_finished, timeout=10000):
@@ -57,7 +57,7 @@ def test_real_loss_still_detected_after_recovery(qtbot, manager, fake_lsf):
 # R3-4: merge 후 삭제된 원본 jobset을 영구 polling
 # ----------------------------------------------------------------------
 def test_merge_stops_polling_of_originals(qtbot, manager, fake_lsf):
-    a = submit_cmds(manager, [f"a {i}" for i in range(3)])   # AUTO-1
+    a = submit_cmds(manager, [f"a {i}" for i in range(3)])   # auto_poll 기본
     b = submit_cmds(manager, [f"b {i}" for i in range(3)])
     qtbot.waitUntil(lambda: not manager.submitter.is_active(a.id)
                     and not manager.submitter.is_active(b.id), timeout=10000)
@@ -102,7 +102,7 @@ def test_shutdown_finalizes_pending_retries(qtbot, fake_lsf, config):
 # ----------------------------------------------------------------------
 # (R3-7: JobSpec.env — v10에서 bsub 조립 경로 삭제로 기능 소멸)
 # ----------------------------------------------------------------------
-# R3-8: 빈 jobset / cancel로 CREATED만 잔존 시 polling 영구 지속 (AUTO-2 확장)
+# R3-8: 빈 jobset / cancel로 CREATED만 잔존 시 polling 영구 지속 (자동 중지 확장)
 # ----------------------------------------------------------------------
 def test_polling_autostops_on_empty_jobset(qtbot, manager, fake_lsf):
     js = manager.create_jobset()          # v9: 빈 jobset은 생성만 가능

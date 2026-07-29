@@ -1,4 +1,4 @@
-"""JobSet 핸들 / AUTO-1~4 / 옵션 계층 통합 테스트 (v7, 수용 기준 14·15·16)."""
+"""JobSet 핸들 / 라이프사이클 자동화 / 옵션 계층 통합 테스트 (v7, 수용 기준 14·15·16)."""
 from __future__ import annotations
 
 import pytest
@@ -26,7 +26,7 @@ def test_three_line_usage(qtbot, fake_lsf, config):
         assert isinstance(js, JobSet)
         with qtbot.waitSignal(js.submit_finished, timeout=10000):
             pass
-        # AUTO-1: polling이 자동 시작되어 updated가 도착해야 함
+        # polling이 자동 시작되어 updated가 도착해야 함
         qtbot.waitUntil(lambda: len(summaries) >= 1, timeout=10000)
         assert summaries[-1]["total"] == 10
     finally:
@@ -34,7 +34,7 @@ def test_three_line_usage(qtbot, fake_lsf, config):
 
 
 # ----------------------------------------------------------------------
-# AUTO-4 — mode 자동 선택
+# mode 자동 선택
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
 # 수용 기준 16 — 핸들 Signal 격리 + Facade 이중 발행 일치
@@ -194,7 +194,7 @@ def test_verify_kill_manager_default(qtbot, fake_lsf, config):
 
 
 # ----------------------------------------------------------------------
-# AUTO-3 — aboutToQuit 자동 shutdown (수용 기준 12 확장)
+# aboutToQuit 자동 shutdown (수용 기준 12 확장)
 # ----------------------------------------------------------------------
 def test_auto3_shutdown_on_about_to_quit(qtbot, qapp, fake_lsf, config):
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf)

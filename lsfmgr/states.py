@@ -1,6 +1,6 @@
 """상태 모델 — JobState / JobRecord / JobSetRecord (Qt 비의존 순수 Python).
 
-frozen dataclass는 불변이므로 Qt Signal 인자로 스레드 간 안전하게 전달 가능 (CS-2).
+frozen dataclass는 불변이므로 Qt Signal 인자로 스레드 간 안전하게 전달 가능.
 갱신은 dataclasses.replace()로 새 객체를 만들어 Store를 통해서만 수행한다.
 """
 from __future__ import annotations
@@ -88,6 +88,12 @@ class JobRecord:
     fail_message: Optional[str] = None
     retry_count: int = 0
     exit_code: Optional[int] = None
+    #: 이 매니저의 kill 요청으로 종료된 job인지 — mgr.kill()/kill_jobs()가
+    #: bkill 수용을 확인한 대상에 표시한다. 자연 종료·외부 bkill(관리자/다른
+    #: 세션)·비정상 EXIT은 이 경로를 안 타므로 False로 남는다. "EXIT인데 내가
+    #: 죽인 게 아니다"를 가르는 **유일한 근거** — exit_code(130/137/143)는
+    #: 외부 kill과 구분되지 않는다. 재제출 리셋에서 False로 되돌아간다.
+    killed: bool = False
     submit_time: Optional[datetime] = None
     command: str = ""                # retry 재submit용
     updated_at: Optional[datetime] = None

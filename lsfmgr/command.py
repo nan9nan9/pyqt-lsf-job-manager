@@ -1,7 +1,7 @@
 """LsfCommand — 제출(wrapper)/bjobs/bkill subprocess 래퍼.
 
-Qt 비의존 순수 Python (§8 원칙). shell 미경유, runner 주입으로 mock 테스트 가능
-(NFR-8). chunking + ARG_MAX 검사 내장 (NFR-5).
+Qt 비의존 순수 Python (§8 원칙). shell 미경유, runner 주입으로 mock 테스트
+가능. chunking + ARG_MAX 검사 내장.
 """
 from __future__ import annotations
 
@@ -204,7 +204,7 @@ def _parse_lsf_time_cached(s: str) -> Optional[datetime]:
 
 def chunk_args(items: Sequence[str], chunk_size: int, arg_max: int,
                base_len: int = 0) -> Iterator[List[str]]:
-    """인자 목록을 chunk_size 및 ARG_MAX(총 길이) 기준으로 분할 (NFR-5)."""
+    """인자 목록을 chunk_size 및 ARG_MAX(총 길이) 기준으로 분할."""
     chunk: List[str] = []
     length = base_len
     for item in items:
@@ -262,7 +262,7 @@ class LsfCommand:
     def _run(self, argv: Sequence[str], timeout: float,
              cwd: Optional[str] = None, envpath: str = "") -> CommandResult:
         """**모든** LSF subprocess(wrapper 제출/bjobs/bkill)가
-        지나는 단일 실행 funnel. 여기서 NFR-6 DEBUG 로깅을 한다 — 실제로 어떤
+        지나는 단일 실행 funnel. 여기서 DEBUG 로깅을 한다 — 실제로 어떤
         명령이 어느 스레드에서 어떤 cwd로 실행되고 얼마나 걸려 무슨 결과가
         나왔는지 추적할 수 있다.
 
@@ -332,7 +332,7 @@ class LsfCommand:
         치환한다 — 레코드의 command는 원본 그대로다(표시·재제출 기준 유지).
 
         lsfmgr 가 -q/-J/-g 등을 붙이지 않는다 — argv 전체가 사용자가 준 wrapper
-        커맨드(예: ["customwrapper_sub", "-i", "a.sp"])다. 실패 분류(FR-2.1):
+        커맨드(예: ["customwrapper_sub", "-i", "a.sp"])다. 실패 분류:
           - rc != 0            → BSUB_EXIT_<rc>   (재시도 O — 일시적 오류 가정)
           - timeout            → BSUB_TIMEOUT     (재시도 X — 중복 제출 위험)
           - 'Job <id>' 없음    → NO_JOBID_PARSED  (재시도 X — 이미 제출됐을 수 있음)
@@ -362,7 +362,7 @@ class LsfCommand:
         return int(m.group(1))
 
     # ------------------------------------------------------------------
-    # bjobs — 조회 (FR-4.1 전략별 변형)
+    # bjobs — 조회 (전략별 변형)
     # ------------------------------------------------------------------
     # CORE: 상태 추적의 최소 단위 필수 3필드.
     # FULL: CORE + 실행시간/위치 확장 필드. 사이트가 확장 필드를 거부하면
@@ -612,7 +612,7 @@ class LsfCommand:
                               on_progress: Optional[Callable[[int], None]] = None,
                               envpath: str = ""
                               ) -> Tuple[Set[str], int]:
-        """chunked bkill + 출력 확인 파싱 (FR-3.4).
+        """chunked bkill + 출력 확인 파싱.
 
         반환: (해소된 target 집합, LSF 호출 횟수).
         '해소'는 더 이상 kill이 필요 없다고 확인된 것 — 'Job <id> is being

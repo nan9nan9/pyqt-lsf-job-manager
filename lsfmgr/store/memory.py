@@ -15,7 +15,7 @@ class InMemoryStore(JobSetStore):
     """프로세스 메모리에만 저장. 종료 시 JobSet 소멸 (LSF job 자체는 잔존)."""
 
     def __init__(self):
-        self._lock = threading.RLock()          # CS-1
+        self._lock = threading.RLock()          # store 접근 직렬화
         self._jobsets: Dict[str, JobSetRecord] = {}
         # jobset_id → {job_key → JobRecord}
         self._jobs: Dict[str, Dict[str, JobRecord]] = {}
@@ -134,7 +134,7 @@ class InMemoryStore(JobSetStore):
     def transition(self, jobset_id: str, job_key: str, new_state: JobState,
                    guard=None, **fields: Any) -> Optional[JobRecord]:
         self._reject_key_fields(fields)
-        with self._lock:                        # read-modify-write 원자성 (CS-1)
+        with self._lock:                        # read-modify-write 원자성
             old = self.get_job(jobset_id, job_key)
             if guard is not None and not guard(old):
                 return None                     # CAS 불일치 — 전이 건너뜀

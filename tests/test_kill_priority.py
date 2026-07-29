@@ -1,4 +1,4 @@
-"""kill 우선권 (FR-3) — submit 진행 중 kill이 와도 유출/스킵이 없어야 한다.
+"""kill 우선권 — submit 진행 중 kill이 와도 유출/스킵이 없어야 한다.
 
 정책:
   - kill 시점에 아직 제출 안 된 job(SUBMITTING, worker 미착수) → submit 취소,

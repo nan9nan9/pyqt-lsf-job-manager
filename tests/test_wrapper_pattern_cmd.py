@@ -126,7 +126,7 @@ def test_invalid_option_rejected(bad):
 
 
 def test_manager_kwarg_and_typo(fake_lsf):
-    """②(생성자) 계층 옵션 — kwarg로도 받고 오타는 TypeError (OPT-2)."""
+    """②(생성자) 계층 옵션 — kwarg로도 받고 오타는 TypeError."""
     mgr = LsfJobManager(store=InMemoryStore(), runner=fake_lsf,
                         test_submit_wrapper_pattern_cmd=("*_sub", MOCK))
     try:

@@ -1,4 +1,4 @@
-"""kill 전략 / 부분 kill / verify 테스트 (FR-3)."""
+"""kill 전략 / 부분 kill / verify 테스트."""
 from __future__ import annotations
 
 import pytest
@@ -98,7 +98,7 @@ def test_kill_chunk_fallback(qtbot, manager, fake_lsf, submitted, config):
 
 
 # ----------------------------------------------------------------------
-# 부분 kill (FR-3.2)
+# 부분 kill
 # ----------------------------------------------------------------------
 def test_partial_kill_by_state(qtbot, manager, fake_lsf, submitted):
     recs = manager.get_jobs(submitted)
@@ -150,7 +150,7 @@ def test_kill_progress_signal(qtbot, fake_lsf, config):
 
 
 # ----------------------------------------------------------------------
-# kill 확인 + 재시도 (FR-3.4)
+# kill 확인 + 재시도
 # ----------------------------------------------------------------------
 def test_kill_retries_until_confirmed(qtbot, manager, fake_lsf, submitted):
     """bkill이 일시 장애(rc≠0, 확인 문구 없음)면 submit처럼 재시도해서,
@@ -166,7 +166,7 @@ def test_kill_retries_until_confirmed(qtbot, manager, fake_lsf, submitted):
 
 
 # ----------------------------------------------------------------------
-# kill 상태 정책 (FR-3.5) — optimistic(기본) vs actual
+# kill 상태 정책 — optimistic(기본) vs actual
 # ----------------------------------------------------------------------
 def test_kill_jobs_optimistic_without_jobset(qtbot, manager, fake_lsf,
                                              submitted):
@@ -265,7 +265,7 @@ def test_kill_unconfirmed_reported(qtbot, manager, fake_lsf, submitted):
 
 
 # ----------------------------------------------------------------------
-# verify (FR-3.3)
+# verify
 # ----------------------------------------------------------------------
 def test_kill_verify(qtbot, manager, fake_lsf, submitted):
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:

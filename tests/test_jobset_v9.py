@@ -326,7 +326,7 @@ def test_merge_from_transfers_polling(qtbot, manager, fake_lsf):
 
 
 # ----------------------------------------------------------------------
-# pre_submit 게이트 — mgr.submit(js, pre_submit=fn) (A안, FR-9)
+# pre_submit 게이트 — mgr.submit(js, pre_submit=fn) (A안)
 # ----------------------------------------------------------------------
 def test_submit_jobset_pre_submit_gate_pass(qtbot, manager, fake_lsf):
     """게이트 통과 시 정상 제출 — 검사 대상은 커맨드 리스트 전체."""

@@ -1,4 +1,4 @@
-"""submit / retry / progress / cancel 테스트 (pytest-qt, NFR-8)."""
+"""submit / retry / progress / cancel 테스트 (pytest-qt)."""
 from __future__ import annotations
 
 import pytest
@@ -14,7 +14,7 @@ def wait_submit_finished(qtbot, mgr, timeout=10000):
 
 
 # ----------------------------------------------------------------------
-# 대량 submit (FR-1.1 / FR-1.2)
+# 대량 submit
 # ----------------------------------------------------------------------
 def test_bulk_submit_parallel(qtbot, manager, fake_lsf):
     jobs = [f"run {i}" for i in range(100)]
@@ -150,7 +150,7 @@ def test_progress_signal(qtbot, manager):
 
 
 # ----------------------------------------------------------------------
-# retry (FR-2)
+# retry
 # ----------------------------------------------------------------------
 def test_retry_then_success(qtbot, manager, fake_lsf):
     fake_lsf.fail_next_bsub = 2          # 처음 2회 실패 → 재시도로 성공
@@ -185,7 +185,7 @@ def test_no_jobid_parse_failure_classified(qtbot, manager, fake_lsf):
 
 
 # ----------------------------------------------------------------------
-# cancel (QT-6)
+# cancel
 # ----------------------------------------------------------------------
 def test_cancel_submit(qtbot, manager, fake_lsf):
     # rate limit으로 느리게 만들어 중간 취소 여지를 확보
@@ -197,11 +197,11 @@ def test_cancel_submit(qtbot, manager, fake_lsf):
     assert report.total == 50
     assert report.succeeded + report.failed + report.cancelled == 50
     assert report.cancelled > 0
-    # 이미 submit된 job은 JobSet에 정상 기록 (QT-6)
+    # 이미 submit된 job은 JobSet에 정상 기록
     pend = manager.get_jobs(jsid, states={JobState.PEND})
     assert len(pend) == report.succeeded
 
 
 # ----------------------------------------------------------------------
-# array (FR-1.3)
+# array
 # ----------------------------------------------------------------------

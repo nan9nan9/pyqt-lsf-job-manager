@@ -177,7 +177,7 @@ class StatePacer(QObject):
             del self._shown[key]
 
     def _safe_emit(self, jobset_id: str, records: List[JobRecord]) -> None:
-        """user slot 예외 격리 (CS-5) — _drain은 Qt slot이라 예외가 나가면
+        """user slot 예외 격리 — _drain은 Qt slot이라 예외가 나가면
         PyQt에서 abort로 이어지고, 남은 배출/_reschedule을 건너뛰어 큐가
         영영 안 빠진다."""
         try:

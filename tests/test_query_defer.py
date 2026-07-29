@@ -1,4 +1,4 @@
-"""조회 수단 장애 시 status 판단 보류 (LOST 오확정 방지, FR-4.3).
+"""조회 수단 장애 시 status 판단 보류 (LOST 오확정 방지).
 
 핵심 계약: bjobs에서 사라진 job이라도 **그 job이 속한 bjobs chunk가 실패**한
 사이클에서는 LOST로 확정하지 않고 '보류'한다 — LSF 순단 1회에 멀쩡한 job이
@@ -122,7 +122,7 @@ def test_chunk_failure_isolated(qtbot, config, fake_lsf):
 
 def test_jobid_none_deferred_when_query_failing(qtbot, manager, fake_lsf):
     """job_id 없는 missing 레코드는 id 기반 조회로 확인 자체가 불가 —
-    조회 장애가 섞인 사이클엔 LOST 확정하지 않고 보류한다 (FR-4.3)."""
+    조회 장애가 섞인 사이클엔 LOST 확정하지 않고 보류한다."""
     from lsfmgr.states import JobRecord
 
     js, jid = _submit_running(qtbot, manager, fake_lsf)
