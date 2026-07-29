@@ -276,6 +276,28 @@ mgr.submit(js, post_process=collect)           # pre_submit과 함께 써도 됨
 > ⚠️ 이 콜백도 **worker 스레드** 실행 — GUI 객체 접근 금지. 한 제출당 1회만
 > 발화하며, 완료 전 재제출(`post_process` 없이)하면 이전 무장은 해제됩니다.
 
+### 4.6 완료 통지 (`jobset_finished`)
+
+후처리 콜백 없이 **"이 jobset 다 끝났다"만** 알고 싶을 때 쓰는 신호입니다. LSF job
+상태만 보고 판정하므로 `post_process` 등록 여부와 **무관**하며, 전 job이 terminal
+(`DONE`/`EXIT`/`SUBMIT_FAILED`/`LOST`)이 된 순간 최종 요약과 함께 1회 발화합니다.
+
+```python
+js.jobset_finished.connect(                    # (summary dict)
+    lambda s: status.setText(f"완료 — DONE {s.get('DONE', 0)}/{s['total']}"))
+
+mgr.jobset_finished.connect(                   # 전역 계층 — (jobset_id, summary)
+    lambda jsid, s: dashboard.mark_done(jsid, s))
+```
+
+- **감지 시점**은 `post_process`와 같습니다 — 폴링(`auto_poll` 기본)/`query_once`,
+  그리고 제출이 전량 실패해 폴링 없이 끝난 경우는 submit 완료 지점.
+- 둘 다 쓰면 순서는 **`jobset_finished` → `post_processing_started`**.
+- **성공 여부와 무관** — 전원 실패로 끝나도 발화합니다("끝났다"는 신호이지
+  "전부 성공"이 아님). 성공/실패는 요약이나 `js.failed_jobs`로 판단하세요.
+- **1회**만 발화하지만, 재제출하거나 merge로 job이 늘어 다시 미완료가 되면 재무장돼
+  다음 완료에 또 발화합니다. job이 하나도 없는 빈 jobset에서는 발화하지 않습니다.
+
 ---
 
 ## 5. JobSet — 모든 것의 중심
@@ -513,6 +535,7 @@ mgr.remove_handler(js, "collect")          # 해제
 | `submit_progress` | `(done, total)` | submit 진행 (throttled) |
 | `submit_finished` | `SubmitReport` | submit 완료 (retry 포함 최종) |
 | `pre_submit_started` / `pre_submit_finished` | — / `bool` | `pre_submit` 게이트 시작/종료 |
+| `jobset_finished` | `dict` 최종 요약 | 이 JobSet의 **전 job이 terminal** 도달 (등록물 무관, 1회) |
 | `post_processing_started` / `post_processing_finished` | — / `object` | 전원 terminal 후처리 시작/완료 |
 | `kill_started` | — | kill 접수 즉시(동기) — 정지 대기로 완료가 늦어져도 UI가 바로 표시 |
 | `kill_progress` | `(done, total)` | chunk kill 진행 (throttled, 마지막 100%) |
@@ -537,8 +560,9 @@ submit (mgr.submit(js) — 재제출 포함):
   → submit_progress + jobs_updated(변경분)     # 스로틀 배치 (0.5s 또는 1%)
   → submit_finished(SubmitReport)             # 반드시 마지막 배치 뒤에 도착
   → jobset_updated(최종 요약)
-  ⋯ (이후 폴링으로 전원 terminal 도달 시, post_process 지정했으면)
-  → post_processing_started → post_processing_finished(result)
+  ⋯ (이후 폴링으로 전원 terminal 도달 시)
+  → jobset_finished(최종 요약)                # 항상 — 등록물과 무관
+  → post_processing_started → post_processing_finished(result)   # post_process 지정 시
 
 kill:
   → kill_started                     # 접수 즉시(동기) — 스피너 켜는 지점

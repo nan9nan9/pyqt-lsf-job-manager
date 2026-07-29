@@ -290,6 +290,9 @@ class Dashboard(QWidget):
                    f" 미확인={r.unconfirmed} 잔존={r.still_alive}"
                    + (f" 오류={len(r.errors)}건" if r.errors else "")))
         mgr.handler_finished.connect(self._on_handler)
+        mgr.jobset_finished.connect(
+            lambda j, s: self._log(
+                j, f"jobset_finished — 전원 terminal (총 {s.get('total', 0)}건)"))
         mgr.post_processing_started.connect(
             lambda j: self._log(j, "post_processing_started"))
         mgr.post_processing_finished.connect(self._on_post_process)

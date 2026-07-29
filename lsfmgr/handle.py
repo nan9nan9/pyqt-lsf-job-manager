@@ -36,6 +36,7 @@ class JobSet(QObject):
     handler_finished = Signal(str, object)   # handler_name, HandlerResult
     pre_submit_started = Signal()           # pre_submit 게이트 시작
     pre_submit_finished = Signal(bool)      # 게이트 종료 (True=통과)
+    jobset_finished = Signal(dict)              # 전 job terminal 도달 — 최종 요약
     post_processing_started = Signal()          # 전원 terminal 후처리 시작
     post_processing_finished = Signal(object)   # 후처리 결과 (예외 시 None)
 

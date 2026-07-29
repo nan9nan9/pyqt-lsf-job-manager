@@ -51,8 +51,12 @@ Signal 순서(보장): `(pre_submit_started → pre_submit_finished)`\* → `sub
 `jobs_updated[SUBMITTING 전원]` → `submit_progress`+`jobs_updated`(스로틀 배치)
 → `submit_finished` → `jobset_updated`.  (\*pre_submit 게이트 지정 시)
 
-**완료 후처리(`post_process` 지정 시)**: 이후 폴링/`query_once`로 **전원 terminal**
-감지 시 worker에서 1회 — `post_processing_started → post_processing_finished(result)`.
+**완료 통지**: 이후 폴링/`query_once`로 **전원 terminal** 감지 시
+`jobset_finished(요약)` 1회 — 등록물과 무관하게 job 상태만 본다. 재제출로 다시
+활성이 되면 재무장돼 다음 완료에 또 발화한다.
+
+**완료 후처리(`post_process` 지정 시)**: 같은 감지 지점에서 `jobset_finished` 직후
+worker에서 1회 — `post_processing_started → post_processing_finished(result)`.
 성공/실패 무관(전원 terminal이면 실행), 한 제출당 1회. 예외는 `error_occurred`
 + `post_processing_finished(None)`.
 

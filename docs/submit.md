@@ -287,8 +287,10 @@ mgr.submit(js, post_process=collect)     # pre_submit 과 함께 지정 가능
   worker 에서 1회 실행. `auto_poll`(기본)이면 자동 감지된다.
 - **결과 무관**: DONE/EXIT/SUBMIT_FAILED/LOST 가 섞여도 **전원 terminal** 이면
   실행된다 — 콜백에서 성공/실패를 분류한다.
-- **신호**: `post_processing_started` → `post_processing_finished(result)`
-  (`result` = 콜백 반환값, 예외 시 `None` + `error_occurred`).
+- **신호**: `jobset_finished(summary)` → `post_processing_started` →
+  `post_processing_finished(result)` (`result` = 콜백 반환값, 예외 시 `None` +
+  `error_occurred`). `jobset_finished`는 `post_process` 를 안 걸어도 나온다 —
+  후처리 없이 완료만 알고 싶으면 그것만 연결하면 된다.
 - **한 제출당 1회**. 완료 전에 `post_process` 없이 재제출하면 이전 무장은 해제된다.
 - 콜백은 **worker 스레드** 실행 — GUI 객체 접근 금지.
 

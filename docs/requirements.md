@@ -144,6 +144,7 @@ class JobSet(QObject):
     kill_finished   = Signal(object)   # KillReport
     handler_finished= Signal(str, object)      # name, HandlerResult
     pre_submit_started/pre_submit_finished        # pre_submit 게이트 (FR-9)
+    jobset_finished = Signal(dict)     # 전 job terminal 도달, 최종 요약 (FR-11)
     post_processing_started/post_processing_finished      # post_process (FR-10)
     error_occurred  = Signal(str)
 
@@ -367,6 +368,14 @@ JobSetStore(ABC) ── InMemoryStore
   끝났다"는 시점이지 "전부 성공"이 아니다). 신호: `post_processing_started →
   post_processing_finished(result)`(반환값, 예외 시 `None` + `error_occurred`).
   한 제출당 1회, 완료 전 `post_process` 없이 재제출하면 이전 무장 해제.
+- **FR-11 jobset_finished 완료 통지**: jobset의 **전 job이 terminal**에 도달한 순간
+  `jobset_finished(jobset_id, summary)` 1회. 등록물(`post_process`/handler)과
+  **무관**하게 job 상태만 보고 판정하므로, 아무것도 등록하지 않은 jobset도 완료를
+  통지받는다. 감지 지점은 FR-10과 같은 공통 지점(폴링/`query_once`/submit 완료)이며,
+  `post_process`도 걸었다면 `jobset_finished → post_processing_started` 순서다.
+  **재무장**: 다시 non-terminal이 되면(재제출·merge로 job 추가) latch가 풀려 다음
+  완료에 또 발화한다 — "완료"는 제출 사이클이 아니라 jobset 상태의 성질이다.
+  job이 하나도 없는 빈 jobset에서는 발화하지 않는다.
 
 ---
 
