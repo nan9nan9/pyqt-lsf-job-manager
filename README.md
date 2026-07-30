@@ -511,7 +511,8 @@ JobSet에 **이름 있는 handler**를 붙이면, 각 job이 지정한 state 구
 ```python
 def collect(ctx):                          # worker 스레드 — GUI 안 막음
     # ctx.job_id / ctx.submit_cwd(작업 디렉토리) / ctx.record / ctx.final
-    return parse_outputs(ctx.submit_cwd)   # 반환값이 Signal로 전달됨
+    cwd = ctx.submit_cwd or os.getcwd()    # 미지정 job은 None → 부모 프로세스 cwd
+    return parse_outputs(cwd)              # 반환값이 Signal로 전달됨
 
 js.handler_finished.connect(
     lambda name, res: print(name, res.job_key, res.data, res.final))

@@ -175,7 +175,8 @@ JobSet 에 **이름 있는 handler** 를 붙여, 지정한 state 구간 동안 *
 ```python
 def collect(ctx):                        # worker 스레드에서 실행됨 (GUI freeze 없음)
     # ctx.job_id / ctx.job_key / ctx.submit_cwd / ctx.record(JobRecord 전체) / ctx.final
-    return parse_outputs(ctx.submit_cwd)    # 반환값이 그대로 Signal 로 전달됨
+    cwd = ctx.submit_cwd or os.getcwd()  # 미지정 job 은 None → 부모 프로세스 cwd
+    return parse_outputs(cwd)               # 반환값이 그대로 Signal 로 전달됨
 
 # 결과 구독 — handler 이름으로 필터
 mgr.handler_finished.connect(
@@ -206,7 +207,12 @@ mgr.remove_handler(js, "collect")        # 해제
   (main 으로 위임). `add_handler` 는 main 스레드 전용.
 - handler 인자 `ctx`(`HandlerContext`)는 job 참조 포인트다 — `ctx.record`(JobRecord:
   `job_id`/`command`/`state`/`run_time_s`/…), 편의 프로퍼티 `ctx.job_id` ·
-  `ctx.submit_cwd`(작업 디렉토리 절대경로) · `ctx.final`.
+  `ctx.submit_cwd`(작업 디렉토리) · `ctx.final`.
+  `ctx.submit_cwd` 는 **조회로 채워지는 값이 아니라** `create_jobset` 에 준
+  `work_dir`/`work_dirs` 요청값 그대로다 — 안 줬으면 계속 `None` 이고, 그건
+  "부모(GUI) 프로세스 cwd 에서 실행됨" 을 뜻한다. 경로가 필요한 handler 는
+  `ctx.submit_cwd or os.getcwd()` 로 받는다(`os.chdir` 는 이 라이브러리가
+  금지하므로 프로세스 cwd 는 변하지 않는다 — 이 폴백은 정확하다).
 - 반환값·예외는 `HandlerResult` 로 전달된다 — `res.data`(반환값), `res.error`(예외
   repr, 정상이면 None), `res.final`, `res.job_key`, `res.job_id`.
 
