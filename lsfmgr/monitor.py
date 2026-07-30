@@ -53,8 +53,11 @@ class JobsetQuerier:
     def __init__(self, store: JobSetStore, command: LsfCommand):
         self.store = store
         self.command = command
-        # jobset → {job_key: 연속 미발견 횟수}. 사이클마다 통째로 갈아끼워
-        # (발견되면 자연히 사라짐) 누수·정리 로직이 없다.
+        # jobset → {job_key: 연속 미발견 횟수}. 살아있는 jobset의 job_key는
+        # 사이클마다 통째로 갈아끼워(발견되면 자연히 사라짐) 정리가 필요 없다.
+        # 다만 **jobset 자체가 사라지면**(merge source 소멸 등) 그 jobset으로는
+        # 다시 query()가 안 불려 항목이 영영 남는다 — manager가 소멸 지점에서
+        # forget()으로 지운다 (pacer.forget과 같은 계약).
         self._missing_streak: Dict[str, Dict[str, int]] = {}
         self._streak_lock = threading.Lock()
 
@@ -67,6 +70,26 @@ class JobsetQuerier:
             if streaks:
                 self._missing_streak[jobset_id] = streaks
             else:
+                self._missing_streak.pop(jobset_id, None)
+
+    def forget(self, jobset_id: str,
+               job_keys: Optional[List[str]] = None) -> None:
+        """사라진 job(remove/clear)·jobset(merge source)의 미발견 스트릭을
+        버린다. job_keys=None이면 그 jobset 전체.
+
+        **살아있는 job의 스트릭까지 지우면 안 된다** — 지우면 LOST 유예가
+        처음부터 다시 세어져 확정이 그만큼 늦어진다. 그래서 jobset 통째
+        삭제가 아닌 경우엔 사라진 key만 지운다."""
+        with self._streak_lock:
+            if job_keys is None:
+                self._missing_streak.pop(jobset_id, None)
+                return
+            streaks = self._missing_streak.get(jobset_id)
+            if streaks is None:
+                return
+            for key in job_keys:
+                streaks.pop(key, None)
+            if not streaks:
                 self._missing_streak.pop(jobset_id, None)
 
     def query(self, jobset_id: str) -> QueryResult:

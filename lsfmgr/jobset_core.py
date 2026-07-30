@@ -257,16 +257,22 @@ class JobSetManager:
                            force: bool = False) -> JobSetRecord:
         """전원 terminal이면 close. (v10: bgdel group 정리 제거 — 부착물이
         생성되지 않으므로 정리할 group도 없다.)"""
-        js = self.store.get_jobset(jobset_id)
-        records = self.store.get_jobs(jobset_id)
-        not_terminal = [r for r in records if not r.state.is_terminal]
-        if not_terminal and not force:
-            raise CloseNotAllowedError(
-                f"terminal이 아닌 job {len(not_terminal)}개 — close 불가 "
-                f"(force=True로 강제 가능)",
-                jobset_id=jobset_id,
-                job_keys=[r.job_key for r in not_terminal])
-        return self.store.update_jobset(replace(js, closed=True))
+        # 이 클래스의 다른 JobSetRecord 갱신 경로와 같이 _meta_lock 아래에서
+        # 읽고-고쳐-쓴다. 지금은 JobSetRecord 갱신이 전부 main 스레드(manager
+        # 공개 API)라 경합이 없지만, 여기만 lock 밖이면 갱신 하나가 off-main으로
+        # 옮겨지는 순간 close가 그 사이 바뀐 intended_count를 옛 값으로 되돌려
+        # summary 불변식(합계==intended_count)이 영구 파손된다.
+        with self._meta_lock:
+            js = self.store.get_jobset(jobset_id)
+            records = self.store.get_jobs(jobset_id)
+            not_terminal = [r for r in records if not r.state.is_terminal]
+            if not_terminal and not force:
+                raise CloseNotAllowedError(
+                    f"terminal이 아닌 job {len(not_terminal)}개 — close 불가 "
+                    f"(force=True로 강제 가능)",
+                    jobset_id=jobset_id,
+                    job_keys=[r.job_key for r in not_terminal])
+            return self.store.update_jobset(replace(js, closed=True))
 
 
 def _dedup(items: Iterable) -> list:

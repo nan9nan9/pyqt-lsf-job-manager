@@ -552,6 +552,15 @@ class LsfJobManager(QObject):
             # 즉 접힌 array의 특정 element만 겨냥한 raw kill은 verify가 과소집계
             # 할 수 있다 — 접힌 array는 bare id(전체)로 kill·verify하거나,
             # jobset+job_key 경로(위)를 쓰면 안전하다(None 레코드에 bare id 생성).
+            if job_ids_or_jobset is None:
+                # 셋 중 어느 형태도 아니다(kill_jobs() / kill_jobs(jobset_id=..)).
+                # 그대로 두면 list(None)의 "'NoneType' object is not iterable"만
+                # 나와 어느 인자를 빠뜨렸는지 알 수 없다 — 위 오용 검사들과
+                # 같은 격으로 쓸 형태를 짚어 준다.
+                raise TypeError(
+                    "kill_jobs: kill 대상이 없다 — 원시 id 목록을 첫 인자로 "
+                    "넘기거나(kill_jobs([123, ...], jobset_id=...)), 선택 kill은 "
+                    "job_keys=로 넘겨라. jobset 전체 kill은 mgr.kill(js)")
             ids = list(job_ids_or_jobset)
             jsid = (self._jsid(jobset_id)
                     if jobset_id is not None else "")
@@ -810,10 +819,15 @@ class LsfJobManager(QObject):
 
     def _forget_paced(self, jobset_id: str,
                       job_keys: Optional[List[str]] = None) -> None:
-        """사라진 job/jobset의 보류 중인 표시 전이를 버린다 (pacer 사용 시).
-        dwell 창 안에 삭제되면 늦게 도착한 전이가 지워진 행을 되살린다."""
+        """사라진 job/jobset에 매달린 **보류 상태**를 일괄 정리한다.
+
+        - pacer: 보류 중인 표시 전이 — dwell 창 안에 삭제되면 늦게 도착한
+          전이가 지워진 행을 되살린다.
+        - querier: LOST 미발견 스트릭 — jobset이 통째로 사라지면(merge source)
+          그 jobset으로는 다시 query()가 안 불려 항목이 영영 남는다."""
         if self._pacer is not None:
             self._pacer.forget(jobset_id, job_keys)
+        self.querier.forget(jobset_id, job_keys)
 
     def _emit_summary(self, jobset_id: str) -> None:
         try:

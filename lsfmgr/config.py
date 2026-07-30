@@ -165,22 +165,25 @@ class LsfConfig:
                     f"glob (got {pattern!r})")
             validate_cmd_path(cmd, "test_submit_wrapper_pattern_cmd의 명령")
             self.test_submit_wrapper_pattern_cmd = (pattern, cmd)
-        # poll_interval_s/submit_timeout_s도 여기서 검증한다 — 안 하면
-        # LsfConfig(poll_interval_s=0) 같은 값이 통과해, auto_poll 시
-        # start_polling(0.0)이 큐드 Qt slot 안에서 ValueError를 던져 앱이 죽는다.
+        # 주기/타임아웃도 여기서 검증한다 — 안 하면 LsfConfig(poll_interval_s=0)
+        # 같은 값이 통과해, auto_poll 시 start_polling(0.0)이 큐드 Qt slot 안에서
+        # ValueError를 던져 앱이 죽는다.
         # 단, LsfConfig는 저수준 dataclass이므로 **구조적 불변식(양수)만** 강제한다
         # — runtime 가드(start_polling의 `if eff <= 0`)와 정합. 5~60 같은 UX 정책
         # 범위는 상위 options/manager-kwarg 계층(options._validate_option)의 몫이다.
         # 여기서 5~60을 강제하면 poll_interval_s=2(빠른 로컬 폴링) 같은 정당한
         # 저수준 사용을 막고, 이전에 통과하던 config를 생성 시점에 죽인다(회귀).
-        if self.poll_interval_s is None or float(self.poll_interval_s) <= 0:
-            raise ValueError(
-                f"poll_interval_s는 양수 (got {self.poll_interval_s!r})")
-        self.poll_interval_s = float(self.poll_interval_s)
-        if self.submit_timeout_s is None or float(self.submit_timeout_s) <= 0:
-            raise ValueError(
-                f"submit_timeout_s는 양수 (got {self.submit_timeout_s!r})")
-        self.submit_timeout_s = float(self.submit_timeout_s)
+        # subprocess timeout 3형제도 같이 본다 — query/kill은 manager kwarg가
+        # 없어 LsfConfig로만 주는데(검증 계층이 여기뿐), 0/음수면 subprocess.run이
+        # 매번 TimeoutExpired를 던진다. 특히 query_timeout_s는 증상이 조용하다:
+        # 전 chunk가 '조회 실패'로 귀속되고 monitor는 설계대로 판단을 보류해
+        # (LOST 확정 안 함) 폴링이 영영 상태를 못 올린 채 PEND에 고착된다.
+        for name in ("poll_interval_s", "submit_timeout_s",
+                     "query_timeout_s", "kill_timeout_s"):
+            value = getattr(self, name)
+            if value is None or float(value) <= 0:
+                raise ValueError(f"{name}는 양수 (got {value!r})")
+            setattr(self, name, float(value))
 
 
 def cmd_tokens(path: CmdPath) -> List[str]:
