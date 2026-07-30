@@ -336,7 +336,7 @@ JobSetStore(ABC) ── InMemoryStore
   - **FR-4.4** MC forward 정보(`collect_clusters`), LSF 실행정보(run_time/start/
     finish)를 `bjobs -o`로 수집. 사이트가 확장 필드를 모르면 3단 강등
     (FULL+MC → FULL → CORE)으로 그 필드만 포기한다. 작업 디렉토리는 조회하지
-    않는다 — 제출 시점에 `submit_cwd`로 확정된다(구 `exec_cwd` 수집 삭제).
+    않는다 — 제출 요청값 `submit_cwd`로 본다(구 `exec_cwd` 수집 삭제).
 - **FR-5 JobSet 관리**:
   - **FR-5.1** 요약(불변식 합계==intended_count), **FR-5.2** intended_count 정합,
   - **FR-5.3** 손실 감지(`detect_lost` — ID 미확보 SUBMITTING → LOST 확정),

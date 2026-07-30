@@ -80,8 +80,9 @@ class JobStatus:
     run_time_s: Optional[int] = None       # LSF run_time(초)
     start_time: Optional[datetime] = None  # LSF start_time
     finish_time: Optional[datetime] = None # LSF finish_time
-    # 작업 디렉토리는 조회하지 않는다 — 제출 시점에 확정돼 JobRecord.submit_cwd에
-    # 이미 들어 있다. exec_cwd는 RUN 이후에야 채워지고 조회 포맷만 무겁게 했다.
+    # 작업 디렉토리는 조회하지 않는다 — JobRecord.submit_cwd(제출 요청값)가
+    # 같은 경로를 가리켰고, exec_cwd는 RUN 이후에야 채워지면서 조회 포맷만
+    # 무겁게 했다. submit_cwd가 None이면 부모 프로세스 cwd라는 뜻이다.
     source_cluster: Optional[str] = None   # MC: 제출(로컬) 클러스터
     forward_cluster: Optional[str] = None  # MC: 포워딩된 실행(원격) 클러스터
 
@@ -378,8 +379,9 @@ class LsfCommand:
     _DELIM = "delimiter=';'"
     # job_name은 요청하지 않는다 — 파서가 쓰지 않고, 이 필드를 넣으면 조회
     # 결과가 통째로 비는 사이트가 있다(실환경 관측). 되살리지 말 것.
-    # exec_cwd도 요청하지 않는다 (v10.4) — 작업 디렉토리는 제출 시점에
-    # JobRecord.submit_cwd로 확정된다. 되살리지 말 것.
+    # exec_cwd도 요청하지 않는다 (v10.4) — 작업 디렉토리는 제출 요청값
+    # JobRecord.submit_cwd로 본다. 되살리지 말 것
+    # (회귀 가드: tests/test_bjobs_no_exec_cwd.py).
     _CORE_FIELDS = "jobid stat exit_code"
     _FULL_FIELDS = _CORE_FIELDS + " run_time start_time finish_time"
     _BJOBS_CORE_FMT = f"{_CORE_FIELDS} {_DELIM}"

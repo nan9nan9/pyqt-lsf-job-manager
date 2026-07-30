@@ -92,8 +92,9 @@ _STATE_COLOR = {
 
 def parse_job_output(ctx):
     """[worker] JobSet handler 본체 — RUN 중 폴링마다 + 종료 시 최종 1회.
-    mocklsf 의 job 출력 파일을 파싱한다 (실제라면 ctx.working_dir 아래
-    시뮬레이션 로그를 파싱). blocking I/O 여도 GUI 를 안 막는다."""
+    mocklsf 의 job 출력 파일을 파싱한다 (실제라면
+    `ctx.submit_cwd or os.getcwd()` 아래 시뮬레이션 로그를 파싱).
+    blocking I/O 여도 GUI 를 안 막는다."""
     out = os.path.join(os.environ.get("MOCKLSF_HOME", ""), "jobout",
                        f"{ctx.job_id}.out")
     try:
@@ -463,7 +464,8 @@ class Dashboard(QWidget):
                   ("exit_code", rec.exit_code), ("run_time_s", rec.run_time_s),
                   ("start", rec.start_time), ("finish", rec.finish_time),
                   ("cluster", rec.forward_cluster or rec.source_cluster),
-                  ("cwd", rec.working_dir), ("command", rec.command),
+                  ("cwd", rec.submit_cwd or os.getcwd()),
+                  ("command", rec.command),
                   ("fail", rec.fail_message)]
         body = "\n".join(f"  {k}={v}" for k, v in fields if v not in (None, ""))
         self._log(js.id, f"상세 {key}:\n{body}")
