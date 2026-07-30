@@ -24,7 +24,7 @@ from .store.base import JobSetStore
 log = logging.getLogger("lsfmgr.monitor")
 
 #: 관측값이 None이면 저장값을 보존하는 병합 대상 확장 필드 (리뷰 M6)
-_PRESERVE_ON_NONE = ("run_time_s", "start_time", "finish_time", "working_dir")
+_PRESERVE_ON_NONE = ("run_time_s", "start_time", "finish_time")
 
 
 def _brief(items: List[str], head: int = 5) -> str:
@@ -252,7 +252,6 @@ def _aggregate_elements(rec: JobRecord,
     starts = [e.start_time for e in elems if e.start_time is not None]
     finishes = [e.finish_time for e in elems if e.finish_time is not None]
     rts = [e.run_time_s for e in elems if e.run_time_s is not None]
-    cwds = [e.working_dir for e in elems if e.working_dir]
     srcs = [e.source_cluster for e in elems if e.source_cluster]
     fwds = [e.forward_cluster for e in elems if e.forward_cluster]
     return JobStatus(
@@ -262,7 +261,6 @@ def _aggregate_elements(rec: JobRecord,
         start_time=min(starts) if starts else None,
         # 실행 중 element가 남았으면 종료 시각은 아직 실측이 아니다
         finish_time=(max(finishes) if finishes and not on else None),
-        working_dir=cwds[0] if cwds else None,
         # MC — 한 array의 element들은 같은 클러스터로 forward된다(대표값)
         source_cluster=srcs[0] if srcs else None,
         forward_cluster=fwds[0] if fwds else None)

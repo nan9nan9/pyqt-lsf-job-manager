@@ -65,8 +65,10 @@ js = mgr.create_jobset(
 - 존재하지 않는 디렉토리를 주면 그 job 은 `SUBMIT_FAILED`(fail_reason
   `BSUB_OSERROR`) 로 분류돼 마무리된다(불투명 크래시 아님).
 
-> 참고: 레코드의 읽기 전용 `working_dir` 은 bjobs 가 알려주는 **실제 실행
-> 디렉토리(exec_cwd)** 로, 제출 시 지정하는 `submit_cwd`(work_dir 요청값)와는 별개다.
+> 참고: 구 `working_dir` 필드는 **삭제됐다** — bjobs `exec_cwd` 관측값이라
+> RUN 이후에야 채워지는데, 결국 `submit_cwd` 와 같은 경로를 가리키면서 조회
+> 포맷만 무겁게 하고 둘이 헷갈리기만 했다. 작업 디렉토리는 이제 `submit_cwd`
+> 하나로 본다(`None` 이면 부모 프로세스 cwd). 쓰던 곳은 `submit_cwd` 로 바꾼다.
 
 ---
 
@@ -172,8 +174,8 @@ JobSet 에 **이름 있는 handler** 를 붙여, 지정한 state 구간 동안 *
 
 ```python
 def collect(ctx):                        # worker 스레드에서 실행됨 (GUI freeze 없음)
-    # ctx.job_id / ctx.job_key / ctx.working_dir / ctx.record(JobRecord 전체) / ctx.final
-    return parse_outputs(ctx.working_dir)   # 반환값이 그대로 Signal 로 전달됨
+    # ctx.job_id / ctx.job_key / ctx.submit_cwd / ctx.record(JobRecord 전체) / ctx.final
+    return parse_outputs(ctx.submit_cwd)    # 반환값이 그대로 Signal 로 전달됨
 
 # 결과 구독 — handler 이름으로 필터
 mgr.handler_finished.connect(
@@ -204,13 +206,14 @@ mgr.remove_handler(js, "collect")        # 해제
   (main 으로 위임). `add_handler` 는 main 스레드 전용.
 - handler 인자 `ctx`(`HandlerContext`)는 job 참조 포인트다 — `ctx.record`(JobRecord:
   `job_id`/`command`/`state`/`run_time_s`/…), 편의 프로퍼티 `ctx.job_id` ·
-  `ctx.working_dir`(LSF `exec_cwd`) · `ctx.final`.
+  `ctx.submit_cwd`(작업 디렉토리 절대경로) · `ctx.final`.
 - 반환값·예외는 `HandlerResult` 로 전달된다 — `res.data`(반환값), `res.error`(예외
   repr, 정상이면 None), `res.final`, `res.job_key`, `res.job_id`.
 
-> 참고 — `working_dir`/`run_time_s`/`start_time`/`finish_time` 은 **LSF bjobs 에서
-> 폴링으로 채워지는** `JobRecord` 필드다(사용자 입력 아님). 실행 시작 후 값이 생기며,
-> `mgr.get_jobs()` 로도 조회할 수 있다.
+> 참고 — `run_time_s`/`start_time`/`finish_time` 은 **LSF bjobs 에서 폴링으로
+> 채워지는** `JobRecord` 필드다(사용자 입력 아님). 실행 시작 후 값이 생기며,
+> `mgr.get_jobs()` 로도 조회할 수 있다. 작업 디렉토리는 여기 없다 — 폴링이
+> 아니라 제출 시 지정하는 `submit_cwd`(`work_dir`/`work_dirs`) 다.
 >
 > `run_time_s`(경과 실행시간)는 RUN 중 매 폴링마다 갱신돼 **`jobs_updated` Signal 로
 > live 발행**된다 — UI 가 받은 `JobRecord.run_time_s` 로 경과시간을 실시간 표시하면
@@ -231,7 +234,7 @@ mgr.remove_handler(js, "collect")        # 해제
 >   (예: `LSF error: queue unavailable`). 재시도 성공·재제출 리셋 시 지워진다.
 >   `js.failed_jobs` 나 `jobs_failed` Signal 레코드에서 바로 읽는다.
 > - **EXIT 원인** 은 LSF 이력을 따로 조회하지 않는다(폴링 오버헤드 0). 레코드 필드
->   (`exit_code`/`run_time_s`/`working_dir`/`start_time`/`finish_time`)로 보여 주면
+>   (`exit_code`/`run_time_s`/`submit_cwd`/`start_time`/`finish_time`)로 보여 주면
 >   된다 — 전부 로컬 스냅샷이라 LSF 호출이 0이다.
 
 ---

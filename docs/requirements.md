@@ -334,8 +334,9 @@ JobSetStore(ABC) ── InMemoryStore
     연속 2회 실패 시 회로 차단(남은 chunk 즉시 실패, 전면 장애에서 스레드 블록 방지).
     보류 경고는 사이클당 1줄 집계.
   - **FR-4.4** MC forward 정보(`collect_clusters`), LSF 실행정보(run_time/start/
-    finish/exec_cwd)를 `bjobs -o`로 수집. 사이트가 확장 필드를 모르면 3단 강등
-    (FULL+MC → FULL → CORE)으로 그 필드만 포기한다.
+    finish)를 `bjobs -o`로 수집. 사이트가 확장 필드를 모르면 3단 강등
+    (FULL+MC → FULL → CORE)으로 그 필드만 포기한다. 작업 디렉토리는 조회하지
+    않는다 — 제출 시점에 `submit_cwd`로 확정된다(구 `exec_cwd` 수집 삭제).
 - **FR-5 JobSet 관리**:
   - **FR-5.1** 요약(불변식 합계==intended_count), **FR-5.2** intended_count 정합,
   - **FR-5.3** 손실 감지(`detect_lost` — ID 미확보 SUBMITTING → LOST 확정),
@@ -351,7 +352,7 @@ JobSetStore(ABC) ── InMemoryStore
   없이 `poll_interval_s`에 tie — bjobs 갱신 직후) job별로 worker 스레드에서 실행.
   `start_states`(기본 `{RUN}`)부터 시작, `end_states`(기본 `{DONE,EXIT}`) 도달 시
   `final=True`로 최종 1회 후 종결. 결과는 `handler_finished(name, HandlerResult)`.
-  재제출 시 자동 재무장. 인자는 `HandlerContext`(record/job_id/working_dir/final).
+  재제출 시 자동 재무장. 인자는 `HandlerContext`(record/job_id/submit_cwd/final).
   실행은 QThreadPool worker(GUI freeze 금지), 예외 격리(`HandlerResult.error`).
   폴링이 돌고 있어야 동작.
 - **FR-9 pre_submit 게이트**: `mgr.submit(js, pre_submit=fn)` — 실제 제출 전에

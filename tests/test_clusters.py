@@ -119,19 +119,20 @@ def test_cluster_degradation_is_permanent(qtbot, fake_lsf, config):
 # sqlite 영속 — 클러스터 필드 저장/복원
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
-# 파서 단위 — delimiter 행: 9필드(FULL+MC) / 7필드(FULL) / 3필드(CORE)
+# 파서 단위 — delimiter 행: 8필드(FULL+MC) / 6필드(FULL) / 3필드(CORE)
 # (v10.3: job_name 필드 제거 — 이 필드를 넣으면 조회 결과가 비는 사이트가
-#  있고, 파서도 쓰지 않았다)
+#  있고, 파서도 쓰지 않았다. v10.4: exec_cwd 제거 — 작업 디렉토리는 제출
+#  시점의 submit_cwd로 확정된다)
 # ----------------------------------------------------------------------
 def test_parse_bjobs_cluster_fields():
-    line9 = "1000;RUN;-;120 second(s);-;-;/work;seoul;busan"
-    (st,) = LsfCommand._parse_bjobs(line9 + "\n")
+    line8 = "1000;RUN;-;120 second(s);-;-;seoul;busan"
+    (st,) = LsfCommand._parse_bjobs(line8 + "\n")
     assert st.source_cluster == "seoul" and st.forward_cluster == "busan"
-    assert st.run_time_s == 120 and st.working_dir == "/work"
+    assert st.run_time_s == 120
 
-    line7 = "1000;RUN;-;120 second(s);-;-;/work"
-    (st7,) = LsfCommand._parse_bjobs(line7 + "\n")
-    assert st7.source_cluster is None and st7.run_time_s == 120
+    line6 = "1000;RUN;-;120 second(s);-;-"
+    (st6,) = LsfCommand._parse_bjobs(line6 + "\n")
+    assert st6.source_cluster is None and st6.run_time_s == 120
 
     line3 = "1000;RUN;-"
     (st3,) = LsfCommand._parse_bjobs(line3 + "\n")
@@ -173,8 +174,8 @@ def test_double_field_error_degrades_to_core():
         fmt = argv[argv.index("-o") + 1]
         if "source_cluster" in fmt:
             return CommandResult(255, "", "bad field name: source_cluster\n")
-        if "exec_cwd" in fmt:
-            return CommandResult(255, "", "Unknown field: exec_cwd\n")
+        if "run_time" in fmt:
+            return CommandResult(255, "", "Unknown field: run_time\n")
         return CommandResult(0, "111;RUN;-;j0\n", "")
 
     cmd = LsfCommand(LsfConfig(collect_clusters=True), runner)

@@ -29,7 +29,6 @@ class FakeJob:
     run_time_s: Optional[int] = None     # LSF run_time(초)
     start_time: Optional[str] = None     # bjobs -o 시각 원문
     finish_time: Optional[str] = None
-    working_dir: Optional[str] = None    # LSF exec_cwd
     source_cluster: Optional[str] = None   # MC 제출 클러스터
     forward_cluster: Optional[str] = None  # MC 포워딩된 실행 클러스터
 
@@ -233,7 +232,6 @@ class FakeLsf:
                          else f"{j.run_time_s} second(s)"),
             "start_time": j.start_time or "",
             "finish_time": j.finish_time or "",
-            "exec_cwd": j.working_dir or "",
             "source_cluster": j.source_cluster or "",
             "forward_cluster": j.forward_cluster or "",
         }

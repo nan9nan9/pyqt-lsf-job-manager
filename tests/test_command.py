@@ -132,8 +132,8 @@ def test_bjobs_downgrades_on_unsupported_field():
 
     def runner(argv, timeout, cwd=None):
         fmt = argv[argv.index("-o") + 1]
-        if "exec_cwd" in fmt:            # 확장 포맷 거부
-            return CommandResult(255, "", "bjobs: Unknown field: exec_cwd\n")
+        if "run_time" in fmt:            # 확장 포맷 거부
+            return CommandResult(255, "", "bjobs: Unknown field: run_time\n")
         return CommandResult(0, core, "")
 
     cmd = LsfCommand(LsfConfig(), runner)

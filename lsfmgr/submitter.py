@@ -223,9 +223,10 @@ class BulkSubmitter(QObject):
             # 도달 못 하면 started도 없어 'started만 나가고 finished가 영영 안 오는'
             # 고아를 원천 차단한다 (started/finished 짝 계약).
             self._safe_emit(self.started, jobset_id)
-            # 기존 레코드 리셋 — 이전 실행의 흔적(job_id/exit_code/실행시간/
-            # 위치)을 지우고 새 command 반영. 지우지 않으면 재제출 실패 시
-            # 죽은 옛 job_id·이전 실행의 start/finish/working_dir가 잔존한다.
+            # 기존 레코드 리셋 — 이전 실행의 흔적(job_id/exit_code/실행시간)을
+            # 지우고 새 command 반영. 지우지 않으면 재제출 실패 시 죽은 옛
+            # job_id·이전 실행의 start/finish가 잔존한다. submit_cwd는 job
+            # 단위 속성이라 리셋 대상이 아니다(아래에서 그대로 재사용).
             # 상태는 곧장 SUBMITTING으로 — 재제출은 즉시 제출 착수라,
             # EXIT(kill) → SUBMITTING → PEND로 자연스럽게 보인다.
             launch = []
@@ -238,7 +239,7 @@ class BulkSubmitter(QObject):
                         fail_message=None, killed=False,
                         retry_count=0, command=self._item_command(item),
                         submit_time=None, run_time_s=None, start_time=None,
-                        finish_time=None, working_dir=None,
+                        finish_time=None,
                         source_cluster=None, forward_cluster=None)
                 except Exception:                # noqa: BLE001
                     # 키 소실(remove_job 경합)·store 장애 어느 쪽이든 이

@@ -97,17 +97,20 @@ class JobRecord:
     submit_time: Optional[datetime] = None
     command: str = ""                # retry 재submit용
     updated_at: Optional[datetime] = None
-    # --- 실행 시간/위치 (LSF bjobs 기준) ---
+    # --- 실행 시간 (LSF bjobs 기준) ---
     run_time_s: Optional[int] = None     # LSF run_time(초) — 종료 job은 최종 실행시간
     start_time: Optional[datetime] = None    # LSF start_time (실행 시작)
     finish_time: Optional[datetime] = None   # LSF finish_time (종료)
-    working_dir: Optional[str] = None    # LSF exec_cwd (실제 실행 디렉토리)
     # LSF MultiCluster(job forwarding) — collect_clusters=True일 때 폴링이 채운다
     source_cluster: Optional[str] = None     # 제출(로컬) 클러스터
     forward_cluster: Optional[str] = None    # 포워딩된 실행(원격) 클러스터
-    # 제출 시 subprocess를 실행할 작업 디렉토리(요청값). None이면 부모(GUI)
-    # 프로세스의 cwd에서 실행(스레드 안전 — os.chdir 금지). job 단위 속성이라
-    # merge/재제출에도 보존된다. 관측값 working_dir(bjobs exec_cwd)과는 별개다.
+    # 제출 시 subprocess를 실행할 작업 디렉토리(create_jobset의 work_dir(s)
+    # 요청값). None이면 부모(GUI) 프로세스의 cwd에서 실행(스레드 안전 —
+    # os.chdir 같은 프로세스 전역 변경 금지). job 단위 속성이라 merge/재제출
+    # 에도 보존된다.
+    # v10.4: 관측값 working_dir(bjobs exec_cwd) 삭제 — RUN 이후에야 채워지는
+    # 데다 이 값과 사실상 같은 경로를 가리켜 헷갈리기만 했다. 작업 디렉토리는
+    # 이 필드 하나로 본다. exec_cwd 조회를 되살리지 말 것.
     submit_cwd: Optional[str] = None
     # --- 논리 정체성/사용자 데이터 (GUI 직접 제어용, v9) ---
     # merge_id: job의 논리 키 — merge 시 같은 merge_id의 기존 job을 이

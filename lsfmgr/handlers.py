@@ -59,9 +59,12 @@ class HandlerContext:
         return self.record.job_key
 
     @property
-    def working_dir(self) -> Optional[str]:
-        """LSF 실행 디렉토리(exec_cwd) — 실행 시작 후 채워진다."""
-        return self.record.working_dir
+    def submit_cwd(self) -> Optional[str]:
+        """이 job의 작업 디렉토리 — create_jobset의 work_dir(s) 요청값이다.
+        None이면 부모 프로세스 cwd에서 실행됐다는 뜻(`os.getcwd()`로 보완).
+        (v10.4: bjobs exec_cwd 관측값이던 working_dir을 대체 — 같은 경로를
+        가리키면서 RUN 전에는 비어 있어 헷갈리기만 했다.)"""
+        return self.record.submit_cwd
 
 
 @dataclass(frozen=True)

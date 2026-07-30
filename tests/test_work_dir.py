@@ -80,6 +80,7 @@ def test_submit_uses_work_dir_as_subprocess_cwd(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_no_work_dir_is_none(qtbot, manager, fake_lsf):
     js = manager.create_jobset(["customwrapper_sub run.sp"])   # work_dirs 없음
+    assert all(r.submit_cwd is None for r in js.jobs())        # 요청값 그대로
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
     subs = _wrapper_calls(fake_lsf)

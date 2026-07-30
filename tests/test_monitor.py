@@ -73,7 +73,6 @@ def test_runtime_captured_from_bjobs(qtbot, manager, fake_lsf, submitted):
     j.run_time_s = 125
     j.start_time = "2026-07-05 14:00:00"
     j.finish_time = "2026-07-05 14:02:05"
-    j.working_dir = "/proj/run/job0"
 
     with qtbot.waitSignal(manager.jobset_updated, timeout=10000):
         manager.query_once(submitted)
@@ -83,7 +82,6 @@ def test_runtime_captured_from_bjobs(qtbot, manager, fake_lsf, submitted):
     assert after.run_time_s == 125                       # LSF run_time(초)
     assert after.start_time == datetime(2026, 7, 5, 14, 0, 0)
     assert after.finish_time == datetime(2026, 7, 5, 14, 2, 5)
-    assert after.working_dir == "/proj/run/job0"         # LSF exec_cwd
     # 실행시간이 안 실린 job은 None 유지 (파싱 실패 없음)
     others = [r for r in manager.get_jobs(submitted)
               if r.job_key != rec0.job_key]
@@ -93,14 +91,13 @@ def test_runtime_captured_from_bjobs(qtbot, manager, fake_lsf, submitted):
 def test_core_downgrade_preserves_runtime_fields(qtbot, manager, fake_lsf,
                                                   submitted):
     """리뷰 M6 회귀 — 포맷이 CORE로 강등돼 확장 필드가 안 오는 사이클이
-    이미 저장된 run_time/start/finish/cwd를 None으로 덮지 않고, 무의미한
+    이미 저장된 run_time/start/finish를 None으로 덮지 않고, 무의미한
     재전이(jobs_updated 스팸)도 만들지 않는다."""
     from datetime import datetime
     rec0 = manager.get_jobs(submitted)[0]
     j = fake_lsf.jobs[str(rec0.job_id)]
     j.stat, j.run_time_s = "RUN", 42
     j.start_time = "2026-07-28 09:00:00"
-    j.working_dir = "/proj/run"
     manager.query_once(submitted)
     qtbot.waitUntil(lambda: manager.store.get_job(
         submitted, rec0.job_key).run_time_s == 42, timeout=10000)
@@ -116,7 +113,6 @@ def test_core_downgrade_preserves_runtime_fields(qtbot, manager, fake_lsf,
     after = manager.store.get_job(submitted, rec0.job_key)
     assert after.run_time_s == 42                       # 보존 (None 덮기 금지)
     assert after.start_time == datetime(2026, 7, 28, 9, 0, 0)
-    assert after.working_dir == "/proj/run"
     # 상태·값 무변화 사이클 — 재전이/발행 없음 (스팸 방지)
     assert not any(any(r.job_key == rec0.job_key for r in rs) for rs in got)
 

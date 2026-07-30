@@ -477,7 +477,7 @@ mgr.jobset(jobset_id)      # ID로 핸들 재획득
 >   재제출 시 자동으로 지워집니다. `rec.fail_reason`은 분류 코드
 >   (`BSUB_EXIT_<rc>` / `NO_JOBID_PARSED` / `BSUB_TIMEOUT` / `BSUB_OSERROR`).
 > - **EXIT**: LSF 이력을 따로 조회하지 않습니다(폴링 오버헤드 0). 레코드 필드
->   (`exit_code` / `run_time_s` / `working_dir` / `start_time` / `finish_time`)로
+>   (`exit_code` / `run_time_s` / `submit_cwd` / `start_time` / `finish_time`)로
 >   보여 주면 됩니다 — 전부 로컬 스냅샷이라 LSF 호출이 0입니다.
 > - **"내가 죽인 EXIT"인지**는 `rec.killed`로 구분합니다. `mgr.kill()`/`kill_jobs()`가
 >   bkill 수용을 확인한 job에만 `True`이고, 자연 종료·외부 `bkill`(관리자/다른
@@ -510,8 +510,8 @@ JobSet에 **이름 있는 handler**를 붙이면, 각 job이 지정한 state 구
 
 ```python
 def collect(ctx):                          # worker 스레드 — GUI 안 막음
-    # ctx.job_id / ctx.working_dir(LSF exec_cwd) / ctx.record / ctx.final
-    return parse_outputs(ctx.working_dir)  # 반환값이 Signal로 전달됨
+    # ctx.job_id / ctx.submit_cwd(작업 디렉토리) / ctx.record / ctx.final
+    return parse_outputs(ctx.submit_cwd)   # 반환값이 Signal로 전달됨
 
 js.handler_finished.connect(
     lambda name, res: print(name, res.job_key, res.data, res.final))

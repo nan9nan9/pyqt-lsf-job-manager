@@ -80,7 +80,8 @@ class JobStatus:
     run_time_s: Optional[int] = None       # LSF run_time(초)
     start_time: Optional[datetime] = None  # LSF start_time
     finish_time: Optional[datetime] = None # LSF finish_time
-    working_dir: Optional[str] = None      # LSF exec_cwd (실행 디렉토리)
+    # 작업 디렉토리는 조회하지 않는다 — 제출 시점에 확정돼 JobRecord.submit_cwd에
+    # 이미 들어 있다. exec_cwd는 RUN 이후에야 채워지고 조회 포맷만 무겁게 했다.
     source_cluster: Optional[str] = None   # MC: 제출(로컬) 클러스터
     forward_cluster: Optional[str] = None  # MC: 포워딩된 실행(원격) 클러스터
 
@@ -102,7 +103,7 @@ _LSF_TIME_FORMATS = ("%Y-%m-%d %H:%M:%S", "%b %d %H:%M:%S %Y",
 # 되돌려주는 '필드명 자체'이고(대부분 에러에 echo됨), 그 외 format/field 류
 # 특정 문구를 보조로 쓴다. "unknown host"/"invalid ..." 같은 일시장애 문구가
 # 오판되지 않도록 광범위 단독 단어("unknown"/"invalid"/"no such")는 제외한다.
-_BJOBS_FIELD_ERR = ("run_time", "start_time", "finish_time", "exec_cwd",
+_BJOBS_FIELD_ERR = ("run_time", "start_time", "finish_time",
                     "source_cluster", "forward_cluster",
                     "unknown field", "bad field", "field name", "illegal",
                     "not a valid", "unrecognized", "output format",
@@ -373,12 +374,14 @@ class LsfCommand:
     #       맨 앞 단계로 쓰고, 미지원 사이트면 FULL로 강등돼 run_time 등은 유지된다.
     # v10.2: -json → -noheader + delimiter=';' 복귀 (사용자 결정). 폭 지정은
     # 두지 않는다 — LSF는 폭 미지정 시 필드별 **기본 폭으로 truncation**할 수
-    # 있으므로(특히 exec_cwd 긴 경로), 잘림이 관측되면 그 필드에만 폭을 준다.
+    # 있으므로, 잘림이 관측되면 그 필드에만 폭을 준다.
     _DELIM = "delimiter=';'"
     # job_name은 요청하지 않는다 — 파서가 쓰지 않고, 이 필드를 넣으면 조회
     # 결과가 통째로 비는 사이트가 있다(실환경 관측). 되살리지 말 것.
+    # exec_cwd도 요청하지 않는다 (v10.4) — 작업 디렉토리는 제출 시점에
+    # JobRecord.submit_cwd로 확정된다. 되살리지 말 것.
     _CORE_FIELDS = "jobid stat exit_code"
-    _FULL_FIELDS = _CORE_FIELDS + " run_time start_time finish_time exec_cwd"
+    _FULL_FIELDS = _CORE_FIELDS + " run_time start_time finish_time"
     _BJOBS_CORE_FMT = f"{_CORE_FIELDS} {_DELIM}"
     _BJOBS_FULL_FMT = f"{_FULL_FIELDS} {_DELIM}"
     _BJOBS_FULL_MC_FMT = (f"{_FULL_FIELDS} source_cluster forward_cluster "
@@ -533,7 +536,7 @@ class LsfCommand:
         """bjobs delimiter(';') 출력 파싱 (v10.2: -json에서 복귀).
 
         필드 순서는 _BJOBS_*_FMT 정의 순서 그대로다. 확장 필드는 **필드 수가
-        정확히 포맷과 맞을 때만** 신뢰한다 — 3=CORE, 7=FULL, 9=FULL+MC. 그 외
+        정확히 포맷과 맞을 때만** 신뢰한다 — 3=CORE, 6=FULL, 8=FULL+MC. 그 외
         (구형 열 누락, 값에 ';' 혼입으로 필드 밀림)는 오염을 피해 확장
         필드를 버린다. 파싱 불가 행은 그 행만 버린다 — 부재 확정은
         호출자(monitor의 LOST 판정)의 몫이다."""
@@ -560,19 +563,18 @@ class LsfCommand:
                     exit_code = int(parts[2])
                 except ValueError:
                     pass
-            run_time_s = start_time = finish_time = working_dir = None
+            run_time_s = start_time = finish_time = None
             source_cluster = forward_cluster = None
-            if len(parts) in (7, 9):
+            if len(parts) in (6, 8):
                 run_time_s = _parse_run_time(parts[3])
                 start_time = _parse_lsf_time(parts[4])
                 # RUN 중 finish_time은 예상치(estimated)일 수 있다 —
                 # 실측만 저장하도록 종료 상태에서만 채운다
                 if state in (JobState.DONE, JobState.EXIT):
                     finish_time = _parse_lsf_time(parts[5])
-                working_dir = _clean_field(parts[6])
-                if len(parts) == 9:       # MultiCluster forwarding
-                    source_cluster = _clean_field(parts[7])
-                    forward_cluster = _clean_field(parts[8])
+                if len(parts) == 8:       # MultiCluster forwarding
+                    source_cluster = _clean_field(parts[6])
+                    forward_cluster = _clean_field(parts[7])
             elif len(parts) != 3:
                 log.debug("bjobs 필드 수 이상(%d) — 확장 필드 무시: %r",
                           len(parts), line)
@@ -581,7 +583,7 @@ class LsfCommand:
                 array_index=int(m.group(2)) if m.group(2) else None,
                 state=state, exit_code=exit_code,
                 run_time_s=run_time_s, start_time=start_time,
-                finish_time=finish_time, working_dir=working_dir,
+                finish_time=finish_time,
                 source_cluster=source_cluster,
                 forward_cluster=forward_cluster))
         return out
