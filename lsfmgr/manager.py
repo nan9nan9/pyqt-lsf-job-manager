@@ -373,8 +373,11 @@ class LsfJobManager(QObject):
     def stop_polling(self, jobset_id: str) -> None:
         """[async→Signal] polling 중지."""
         jobset_id = self._jsid(jobset_id)
-        # 재개 기억도 지운다 — 사용자가 일부러 끈 polling이 merge 이관 등으로
-        # 마음대로 되살아나지 않게
+        # 재개 기억도 지운다 — 재제출(_on_records_reset)이 옛 interval로
+        # 마음대로 되살리지 않게.
+        # ※ merge는 예외다: 흡수 후 target에 관찰할 job이 남으면 기본 interval
+        #   로라도 폴링을 다시 켠다(관찰 대상이 있는데 멈춰 있으면 handler가
+        #   조용히 죽는다). 껐다는 사실보다 볼 것이 있다는 사실이 우선한다.
         self._poll_intervals.pop(jobset_id, None)
         self.polling.stop_polling(jobset_id)
 
@@ -756,10 +759,26 @@ class LsfJobManager(QObject):
         self.polling.stop_polling(sid)
         self.handlers.remove_all(sid)
         self._invalidate_handle(sid)
-        tgt_iv = self._poll_intervals.get(tid)
-        if src_iv is not None:
-            self.start_polling(tid,
-                               min(src_iv, tgt_iv) if tgt_iv else src_iv)
+        # 폴링 재개 — 판단 기준은 **"target에 아직 관찰할 job이 있는가"**다.
+        # (src_iv 유무로 판단하면 결함이 된다: target이 전원 terminal이 돼
+        #  폴링이 자동 중지된 뒤 — monitor._maybe_auto_stop은 서비스 타이머만
+        #  끄고 아래 기억은 남긴다 — CREATED jobset을 흡수하면 src_iv가 None
+        #  이라 start_polling이 아예 안 불린다. 관찰할 일이 다시 생겼는데도
+        #  폴링이 죽은 채라, 폴링 tick에 tie된 handler가 흡수분에 영영
+        #  침묵한다.)
+        # interval은 src/tgt의 기억 중 짧은 쪽, 둘 다 없으면 기본값.
+        # ※ 이 재개는 "사용자가 stop_polling으로 끈 폴링은 되살리지 않는다"는
+        #   기존 계약보다 우선한다 — 관찰 대상이 있는데 조용히 멈춰 있는 쪽이
+        #   더 나쁜 실패이기 때문. 볼 것이 없어지면 _maybe_auto_stop이 다시 끈다.
+        try:
+            watchable = any(not r.state.is_terminal
+                            for r in self.store.get_jobs(tid))
+        except LsfmgrError:                      # target 소멸(있을 수 없음)
+            watchable = False
+        if watchable:
+            tgt_iv = self._poll_intervals.get(tid)
+            ivs = [v for v in (src_iv, tgt_iv) if v is not None]
+            self.start_polling(tid, min(ivs) if ivs else None)
         if changed:
             self._relay_jobs_changed(tid, list(changed))
         return changed
