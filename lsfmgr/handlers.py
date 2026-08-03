@@ -91,8 +91,10 @@ class _Handler:
     start_states: FrozenSet[JobState]
     end_states: FrozenSet[JobState]
     status: Dict[str, str] = field(default_factory=dict)   # job_key → 진행 상태
-    inflight: set = field(default_factory=set)             # 실행 중인 job_key
     lock: threading.Lock = field(default_factory=threading.Lock)
+    # 실행 중(inflight) 표식은 이 객체가 아니라 **서비스**가 들고 있다
+    # (JobSetHandlerService._inflight) — remove_handler로 이 객체가 버려져도
+    # "같은 job에 handler가 겹쳐 돌지 않는다"는 불변식이 유지돼야 하기 때문.
 
 
 class JobSetHandlerService(QObject):
@@ -110,6 +112,13 @@ class JobSetHandlerService(QObject):
         self._pool = QThreadPool()
         self._pool.setMaxThreadCount(4)
         self._handlers: Dict[Tuple[str, str], _Handler] = {}
+        # 실행 중인 (jobset_id, handler_name, job_key) — _Handler 밖에 둔다.
+        # _Handler 안에 있으면 remove_handler → add_handler 재등록 때 이 표식이
+        # 옛 객체와 함께 버려져, worker에서 아직 도는 job을 새 handler가 다시
+        # 실행한다(같은 job에 사용자 코드가 동시 2회 진입). 이름을 키에 포함해
+        # 서로 다른 handler는 여전히 독립적으로 돈다.
+        self._inflight: set = set()
+        self._inflight_lock = threading.Lock()
         self._remove_requested.connect(self.remove_handler)
         self._recheck.connect(self._on_recheck)
 
@@ -168,7 +177,9 @@ class JobSetHandlerService(QObject):
 
     def shutdown(self) -> None:
         self._handlers.clear()
-        self._pool.waitForDone(-1)
+        self._pool.waitForDone(-1)       # 도는 task가 각자 표식을 해제한다
+        with self._inflight_lock:
+            self._inflight.clear()       # 혹시 남은 잔재까지 정리
 
     # ------------------------------------------------------------------
     # tick (main 스레드) — 폴링 갱신 직후 호출됨. 실행 여부만 판단, 호출은 worker
@@ -201,7 +212,7 @@ class JobSetHandlerService(QObject):
     def _eval_record(self, h: _Handler, rec) -> None:
         """레코드 1건 평가 — h.lock 보유 상태에서 호출한다."""
         st = h.status.get(rec.job_key, _PENDING)
-        if st == _FINISHED or rec.job_key in h.inflight:
+        if st == _FINISHED or self._is_inflight(h, rec.job_key):
             return
         in_end = rec.state in h.end_states
         in_start = rec.state in h.start_states
@@ -218,8 +229,27 @@ class JobSetHandlerService(QObject):
             return
         final = in_end
         h.status[rec.job_key] = _FINISHED if final else _RUNNING
-        h.inflight.add(rec.job_key)
+        self._mark_inflight(h, rec.job_key)
         self._pool.start(_HandlerTask(self, h, rec, final))
+
+    # ------------------------------------------------------------------
+    # inflight 표식 — handler 객체 수명과 분리 (재등록에도 새지 않는다).
+    # lock 순서는 항상 h.lock → _inflight_lock (역순 취득 경로 없음).
+    # ------------------------------------------------------------------
+    def _inflight_key(self, h: "_Handler", job_key: str):
+        return (h.jobset_id, h.name, job_key)
+
+    def _is_inflight(self, h: "_Handler", job_key: str) -> bool:
+        with self._inflight_lock:
+            return self._inflight_key(h, job_key) in self._inflight
+
+    def _mark_inflight(self, h: "_Handler", job_key: str) -> None:
+        with self._inflight_lock:
+            self._inflight.add(self._inflight_key(h, job_key))
+
+    def _clear_inflight(self, h: "_Handler", job_key: str) -> None:
+        with self._inflight_lock:
+            self._inflight.discard(self._inflight_key(h, job_key))
 
     def _on_recheck(self, jobset_id: str, name: str, job_key: str) -> None:
         """[main] handler 실행 종료 직후 그 job 1건 재평가 — 실행 중(inflight)에
@@ -250,8 +280,7 @@ class JobSetHandlerService(QObject):
             result = HandlerResult(h.name, h.jobset_id, rec.job_key,
                                    rec.job_id, final, error=repr(e))
         finally:
-            with h.lock:
-                h.inflight.discard(rec.job_key)
+            self._clear_inflight(h, rec.job_key)
         self.finished.emit(h.jobset_id, h.name, result)
         if not final:
             # 실행 사이 job이 종료됐을 수 있다 — main에서 재평가해 final 보충

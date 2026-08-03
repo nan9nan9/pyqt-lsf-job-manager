@@ -744,6 +744,15 @@ class LsfJobManager(QObject):
                     f"{jsid}: submit/kill 진행 중에는 merge할 수 없습니다",
                     jobset_id=jsid)
         changed = self.jobsets.merge_from(tid, sid, force=force)
+        # 흡수분의 handler 장부를 무효화한다. merge는 같은 merge_id면 물리 키
+        # (job_key)를 유지한 채 **내용만 교체**하므로(테이블 행 연속성), 장부를
+        # 그대로 두면 그 키의 옛 _FINISHED가 남아 새 job에 handler가 영영
+        # 침묵한다. 신규 추가분은 장부가 없어 no-op이다.
+        # (지금은 CREATED가 되는 흡수분을 어차피 재제출해야 하고 그 rearm이
+        #  덮어주지만, 그건 우연한 은폐다 — pacer/querier 보류분을
+        #  _forget_paced로 정리하는 것과 같은 이유로 여기서 정리한다.)
+        if changed:
+            self.handlers.rearm(tid, [r.job_key for r in changed])
         # source 정리 — 삭제된 jobset을 계속 polling하면 error 폭주.
         # 폴링 연속성: target이 폴링을 안 쓰는데 source가 쓰고 있었다면
         # 가장 짧은 interval로 target에 이어받는다.
