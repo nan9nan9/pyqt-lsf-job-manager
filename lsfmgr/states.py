@@ -130,7 +130,11 @@ class JobSetRecord:
     (v10.1: 사장 필드 일괄 삭제 — 부착물(lsf_group_paths/name_patterns/
     array_job_ids)은 v10부터 생성 자체가 없고, session_id(세션복원)/
     parent_jobset_id/created_by는 쓰기만 되고 어디서도 읽지 않았다.
-    영속 저장소가 v9에서 제거돼 과거 데이터 호환 부담도 없다.)"""
+    영속 저장소가 v9에서 제거돼 과거 데이터 호환 부담도 없다.
+
+    closed 플래그도 삭제됐다 — 종결은 mgr.remove_jobset()이 레코드를 실제로
+    지우므로(merge source와 동일), '닫혔지만 목록에 남아있는' 중간 상태가
+    아예 없다.)"""
     jobset_id: str
     intended_count: int                          # 손실 감지 기준
     label: str = ""
@@ -138,4 +142,3 @@ class JobSetRecord:
     description: str = ""
     created_at: Optional[datetime] = None        # search_jobsets(since=) 필터
     merged_from: List[str] = field(default_factory=list)
-    closed: bool = False

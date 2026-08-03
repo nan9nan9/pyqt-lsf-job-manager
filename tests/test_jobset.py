@@ -5,7 +5,7 @@ import pytest
 
 from lsfmgr import JobState
 from tests.conftest import submit_cmds
-from lsfmgr.errors import LsfmgrError
+from lsfmgr.errors import JobSetNotFoundError, LsfmgrError
 
 
 @pytest.fixture
@@ -93,19 +93,23 @@ def test_merge_name_collision_is_atomic(qtbot, manager, fake_lsf):
 # merge된 jobset kill — 부착물 전부 순회 (§1.1)
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
-# close
+# remove_jobset (jobset 자체 삭제)
 # ----------------------------------------------------------------------
-def test_close_requires_all_terminal(qtbot, manager, fake_lsf, submitted):
+def test_remove_jobset_requires_all_terminal(qtbot, manager, fake_lsf,
+                                            submitted):
     with pytest.raises(LsfmgrError):
-        manager.close(submitted)        # 전원 PEND — 불가
+        manager.remove_jobset(submitted)        # 전원 PEND — 불가
 
 
-def test_close_after_terminal(qtbot, manager, fake_lsf, submitted):
+def test_remove_jobset_after_terminal(qtbot, manager, fake_lsf, submitted):
     fake_lsf.set_all("DONE", 0)
     with qtbot.waitSignal(manager.jobset_updated, timeout=10000):
         manager.query_once(submitted)
-    manager.close(submitted)
-    assert manager.store.get_jobset(submitted).closed is True
+    jsid = submitted
+    manager.remove_jobset(submitted)
+    with pytest.raises(JobSetNotFoundError):       # 레코드째 삭제
+        manager.store.get_jobset(jsid)
+    assert [r for r in manager.list_jobsets() if r.jobset_id == jsid] == []
     # v10: 부착물이 없으므로 bgdel 정리도 없다
     assert not fake_lsf.calls_of("bgdel")
 

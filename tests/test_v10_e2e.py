@@ -10,7 +10,8 @@ import threading
 
 import pytest
 
-from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager, JobState
+from lsfmgr import (InMemoryStore, JobSetNotFoundError, JobState,
+                    LsfConfig, LsfJobManager)
 from tests.conftest import submit_cmds
 from tests.fake_lsf import FakeLsf
 
@@ -44,8 +45,10 @@ def test_bulk_1000_roundtrip(qtbot, manager, fake_lsf):
     s = _summary_invariant(manager, js.id)
     assert s["DONE"] == 963 and s["EXIT"] == 37
 
-    manager.close(js)                                   # 전원 terminal — 성공
-    assert manager.store.get_jobset(js.id).closed
+    jsid = js.id
+    manager.remove_jobset(js)                        # 전원 terminal — 성공
+    with pytest.raises(JobSetNotFoundError):                    # 레코드째 삭제
+        manager.store.get_jobset(jsid)
 
 
 # ----------------------------------------------------------------------

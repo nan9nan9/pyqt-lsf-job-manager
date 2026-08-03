@@ -5,7 +5,9 @@ array element 개별 kill의 verify가 parent job_id로 형제 element를 잔존
 """
 from __future__ import annotations
 
-from lsfmgr import JobRecord, JobState
+import pytest
+
+from lsfmgr import JobRecord, JobSetNotFoundError, JobState
 
 
 def _array_jobset(manager, fake_lsf, n=10):
@@ -168,7 +170,7 @@ def test_nongate_launch_failure_finalizes(qtbot, manager, fake_lsf, monkeypatch)
 # C3-7 (fix 4): 게이트(제출) 진행 중 close(force=True) — 예외 없이 종결되고
 #               bgdel이 제출 정지 후 수행된다 (고아 방지)
 # ----------------------------------------------------------------------
-def test_force_close_during_active_submit_quiesces(qtbot, fake_lsf, config):
+def test_force_remove_during_active_submit_quiesces(qtbot, fake_lsf, config):
     from lsfmgr import InMemoryStore, LsfJobManager
 
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf)
@@ -189,8 +191,9 @@ def test_force_close_during_active_submit_quiesces(qtbot, fake_lsf, config):
 
         mgr.submit(js, pre_submit=slow_gate, auto_poll=False)
         assert gate_entered.wait(3)
-        mgr.close(js, force=True)                # 진행 중 강제 종결 — 예외 없이
-        assert mgr.store.get_jobset(jsid).closed is True
+        mgr.remove_jobset(js, force=True)                # 진행 중 강제 삭제 — 예외 없이
+        with pytest.raises(JobSetNotFoundError):
+            mgr.store.get_jobset(jsid)
         release.set()
         qtbot.wait(300)                          # quiesce+bgdel worker 완료 대기
     finally:

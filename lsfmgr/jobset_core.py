@@ -1,11 +1,13 @@
-"""JobSetManager — JobSet CRUD / 요약 / 손실 감지 / merge / close.
+"""JobSetManager — JobSet CRUD / 요약 / 손실 감지 / merge / 삭제.
 
 Store만 사용 (Qt 비의존). v10: LSF 호출(부착물 name 역조회·bgdel)이
 전부 제거되어 이 계층은 순수 Store 연산이다.
 
-이름 규약(계층이 이름에 드러나게): 공개 API=mgr.create_jobset/remove_job/close,
+이름 규약(계층이 이름에 드러나게): 삭제 3형제는 **대상이 이름에 드러난다** —
+job 1건=remove_job, job 전부=clear_jobs, jobset 자체=remove_jobset.
+공개 API=mgr.create_jobset/remove_job/clear_jobs/remove_jobset,
 도메인=local_* (local_create_jobset/local_create_jobs, local_remove_jobs/
-local_clear_jobs, local_close_jobset, merge_from), 저장소=store_*
+local_clear_jobs, local_remove_jobset, merge_from), 저장소=store_*
 (store_insert_jobset/store_add_jobs/store_delete_job/store_dispose).
 """
 from __future__ import annotations
@@ -18,9 +20,9 @@ from datetime import datetime
 from typing import Iterable, List, Optional, Sequence
 
 from .errors import (
-    CloseNotAllowedError,
     JobNotFoundError,
     MergeNotAllowedError,
+    RemoveJobSetNotAllowedError,
     RemoveNotAllowedError,
 )
 from .states import JobRecord, JobSetRecord, JobState
@@ -56,7 +58,7 @@ class JobSetManager:
         record = JobSetRecord(
             jobset_id=jsid, intended_count=intended_count,
             label=label, tags=list(tags), description=description,
-            created_at=datetime.now(), merged_from=[], closed=False)
+            created_at=datetime.now(), merged_from=[])
         return self.store.store_insert_jobset(record)
 
     # ------------------------------------------------------------------
@@ -176,6 +178,9 @@ class JobSetManager:
         intended_count도 함께 줄여 유령 CREATED가 남지 않는다."""
         given = [x for x in (job_id, merge_id, job_key) if x is not None]
         if len(given) != 1:
+            # selector 없음을 "전부"로 해석하지 않는다 — merge_id가 None으로
+            # 새는 GUI 실수 한 번이 jobset을 통째로 비우게 된다.
+            # 전량 삭제는 local_clear_jobs라는 **명시적 철자**로만 도달한다.
             raise ValueError("job_id/merge_id/job_key 중 정확히 하나를 지정")
         with self._meta_lock:
             jobs = self.store.get_jobs(jobset_id)
@@ -186,41 +191,46 @@ class JobSetManager:
             else:
                 targets = [r for r in jobs if r.job_key == job_key]
             if not targets:
+                # 지정한 대상이 없으면 호출자 실수 — clear_jobs의 "빈 jobset은
+                # 정상 no-op"과 갈리는 지점이라 공용 몸통 밖에 둔다.
                 raise JobNotFoundError(
                     f"{jobset_id}: 대상 없음 (job_id={job_id}, "
                     f"merge_id={merge_id}, job_key={job_key})")
-            busy = [r.job_key for r in targets if not r.state.is_inactive]
-            if busy and not force:
-                raise RemoveNotAllowedError(
-                    f"삭제 불가 — 활성(진행 중) job: {busy[:5]} "
-                    f"(force=True로 레코드만 강제 삭제 가능)",
-                    jobset_id=jobset_id, job_keys=busy)
-            for r in targets:
-                self.store.store_delete_job(jobset_id, r.job_key)
-            js = self.store.get_jobset(jobset_id)
-            n = len(self.store.get_jobs(jobset_id))
-            if js.intended_count != n:
-                self.store.update_jobset(replace(js, intended_count=n))
-        return targets
+            return self._delete_jobs(jobset_id, targets, force=force,
+                                     what="remove_job")
 
     def local_clear_jobs(self, jobset_id: str, *,
-                   force: bool = False) -> List[JobRecord]:
-        """전 job 삭제 — remove_jobs와 동일 가드 (활성이 있으면 예외,
-        force로 강제). intended_count는 0이 된다."""
+                         force: bool = False) -> List[JobRecord]:
+        """전 job 삭제 — local_remove_jobs와 **같은 몸통**(_delete_jobs)이라
+        가드/intended_count 규칙이 갈릴 수 없다. 빈 jobset이면 정상 no-op."""
         with self._meta_lock:
             jobs = self.store.get_jobs(jobset_id)
-            busy = [r.job_key for r in jobs if not r.state.is_inactive]
-            if busy and not force:
-                raise RemoveNotAllowedError(
-                    f"clear 불가 — 활성(진행 중) job {len(busy)}건: "
-                    f"{busy[:5]} (force=True로 강제 가능)",
-                    jobset_id=jobset_id, job_keys=busy)
-            for r in jobs:
-                self.store.store_delete_job(jobset_id, r.job_key)
-            js = self.store.get_jobset(jobset_id)
-            if js.intended_count != 0:
-                self.store.update_jobset(replace(js, intended_count=0))
-        return jobs
+            return self._delete_jobs(jobset_id, jobs, force=force,
+                                     what="clear_jobs")
+
+    def _delete_jobs(self, jobset_id: str, targets: List[JobRecord], *,
+                     force: bool, what: str) -> List[JobRecord]:
+        """[_meta_lock 보유 상태에서 호출] job 레코드 삭제의 공용 몸통 —
+        remove_job(선택분)과 clear_jobs(전부)의 유일한 차이는 targets뿐이다.
+
+        비활성(CREATED/terminal)만 삭제 가능 — 활성이면 RemoveNotAllowedError,
+        force=True면 레코드만 강제 삭제(LSF job 정리는 caller 책임).
+        intended_count는 **남은 실제 개수**로 재동기화한다 — 유령 CREATED가
+        남지 않고, 전량 삭제면 자연히 0이 된다(규칙이 한 벌뿐)."""
+        busy = [r.job_key for r in targets if not r.state.is_inactive]
+        if busy and not force:
+            raise RemoveNotAllowedError(
+                f"{what} 불가 — 활성(진행 중) job {len(busy)}건: "
+                f"{busy[:5]} (force=True로 레코드만 강제 삭제 가능)",
+                jobset_id=jobset_id, job_keys=busy)
+        _warn_orphans(jobset_id, targets, what)
+        for r in targets:
+            self.store.store_delete_job(jobset_id, r.job_key)
+        js = self.store.get_jobset(jobset_id)
+        n = len(self.store.get_jobs(jobset_id))
+        if js.intended_count != n:
+            self.store.update_jobset(replace(js, intended_count=n))
+        return targets
 
     # ------------------------------------------------------------------
     # 손실 감지
@@ -251,28 +261,52 @@ class JobSetManager:
         return lost
 
     # ------------------------------------------------------------------
-    # 종결
+    # 삭제 (jobset 자체)
     # ------------------------------------------------------------------
-    def local_close_jobset(self, jobset_id: str, *,
-                           force: bool = False) -> JobSetRecord:
-        """전원 terminal이면 close. (v10: bgdel group 정리 제거 — 부착물이
-        생성되지 않으므로 정리할 group도 없다.)"""
-        # 이 클래스의 다른 JobSetRecord 갱신 경로와 같이 _meta_lock 아래에서
-        # 읽고-고쳐-쓴다. 지금은 JobSetRecord 갱신이 전부 main 스레드(manager
-        # 공개 API)라 경합이 없지만, 여기만 lock 밖이면 갱신 하나가 off-main으로
-        # 옮겨지는 순간 close가 그 사이 바뀐 intended_count를 옛 값으로 되돌려
-        # summary 불변식(합계==intended_count)이 영구 파손된다.
+    def local_remove_jobset(self, jobset_id: str, *,
+                            force: bool = False) -> JobSetRecord:
+        """전원 terminal이면 jobset을 **레코드째 삭제**한다 (merge source와
+        같은 경로). 반환은 삭제 직전 스냅샷 — 삭제 후에는 store에서 조회할
+        수 없으므로 caller가 결과를 기록해야 하면 이 값을 쓴다.
+        (v10: bgdel group 정리 제거 — 부착물이 생성되지 않으므로 정리할
+        group도 없다.)"""
+        # 이 클래스의 다른 JobSetRecord 접근 경로와 같이 _meta_lock 아래에서
+        # 검사-후-삭제를 한 덩어리로 처리한다. 지금은 JobSetRecord 갱신이 전부
+        # main 스레드(manager 공개 API)라 경합이 없지만, 여기만 lock 밖이면
+        # 갱신 하나가 off-main으로 옮겨지는 순간 "terminal 검사 통과 → 그 사이
+        # 새 job 추가/전이 → 삭제"로 살아있는 job이 조용히 사라진다.
         with self._meta_lock:
             js = self.store.get_jobset(jobset_id)
             records = self.store.get_jobs(jobset_id)
             not_terminal = [r for r in records if not r.state.is_terminal]
             if not_terminal and not force:
-                raise CloseNotAllowedError(
-                    f"terminal이 아닌 job {len(not_terminal)}개 — close 불가 "
-                    f"(force=True로 강제 가능)",
+                raise RemoveJobSetNotAllowedError(
+                    f"terminal이 아닌 job {len(not_terminal)}개 — "
+                    f"remove_jobset 불가 (force=True로 강제 가능)",
                     jobset_id=jobset_id,
                     job_keys=[r.job_key for r in not_terminal])
-            return self.store.update_jobset(replace(js, closed=True))
+            _warn_orphans(jobset_id, records, "remove_jobset")
+            self.store.store_delete_jobset(jobset_id)
+            return js
+
+
+def _warn_orphans(jobset_id: str, targets: List[JobRecord],
+                  what: str) -> None:
+    """LSF에 살아있는 job의 레코드를 지우기 직전 — job_id를 로그에 남긴다.
+
+    force 삭제의 계약은 "레코드만 지운다, LSF job 정리는 caller 책임"인데,
+    레코드가 사라지면 caller가 그 job_id를 **조회할 방법이 없다**. 그래서
+    지우기 전 마지막 순간의 이 로그가 유일한 흔적이 된다.
+    (force가 아니면 on-LSF job은 애초에 가드에 걸려 여기 못 온다 — 즉 이
+    경고는 force 경로에서만 나온다.)"""
+    alive = [r for r in targets if r.state.is_on_lsf and r.job_id is not None]
+    if not alive:
+        return
+    log.warning(
+        "%s: LSF에 살아있는 job %d건의 레코드를 강제 삭제합니다 — "
+        "job_id=%s%s (정리는 caller 책임, 삭제 후에는 조회 불가)",
+        what, len(alive), [r.job_id for r in alive[:20]],
+        " …" if len(alive) > 20 else "")
 
 
 def _dedup(items: Iterable) -> list:

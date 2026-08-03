@@ -22,7 +22,7 @@ from typing import Callable, Dict, List, Optional, Sequence
 
 from .command import LsfCommand
 from .config import LsfConfig
-from .errors import SubmitError
+from .errors import JobNotFoundError, JobSetNotFoundError, SubmitError
 from .jobset_core import JobSetManager
 from .lifecycle import SubmitGate
 from .options import Options
@@ -33,6 +33,12 @@ from .store.base import JobSetStore
 from .util import EmitThrottler, TokenBucketLimiter
 
 log = logging.getLogger("lsfmgr.submit")
+
+#: 제출 도중 대상 레코드가 사라졌다는 신호 — main 스레드의 동시 삭제
+#: (remove_job / clear_jobs / remove_jobset, 전부 force 경로)는 **정상 동작**
+#: 이지 INTERNAL_ERROR가 아니다. killer(_mark_exited)·monitor(_poll)·
+#: handlers(tick)가 이미 같은 소실 방어를 하고 있고, submitter만 빠져 있었다.
+_RECORD_GONE = (JobNotFoundError, JobSetNotFoundError)
 
 
 @dataclass
@@ -104,7 +110,9 @@ class _SubmitTask(QRunnable):
         try:
             self._run()
         except Exception as e:          # noqa: BLE001 — worker 스레드 보호
-            log.exception("submit worker 예외: %s", self.job_key)
+            if not isinstance(e, _RECORD_GONE):
+                # 소실(동시 삭제)은 정상 경로 — traceback을 찍지 않는다
+                log.exception("submit worker 예외: %s", self.job_key)
             self.submitter._task_crashed(self.ctx, self.job_key, e)
 
     def _run(self):
@@ -112,7 +120,14 @@ class _SubmitTask(QRunnable):
         if ctx.cancel_event.is_set():
             sub._task_cancelled(ctx, self.job_key)
             return
-        sub.store.transition(ctx.jobset_id, self.job_key, JobState.SUBMITTING)
+        try:
+            sub.store.transition(ctx.jobset_id, self.job_key,
+                                 JobState.SUBMITTING)
+        except _RECORD_GONE:
+            # 착수 직전에 레코드가 지워졌다 — 아직 wrapper를 안 돌렸으므로
+            # LSF에 흔적이 없다. 조용히 1단위 계상하고 끝낸다.
+            sub._task_vanished(ctx, self.job_key, job_id=None)
+            return
         if not ctx.limiter.acquire(ctx.cancel_event):   # rate limit
             sub._task_cancelled(ctx, self.job_key)
             return
@@ -420,10 +435,35 @@ class BulkSubmitter(QObject):
     # ------------------------------------------------------------------
     def _task_succeeded(self, ctx: _SubmitContext, job_key: str,
                         job_id: int) -> None:
-        rec = self.store.transition(ctx.jobset_id, job_key, JobState.PEND,
-                                    job_id=job_id, submit_time=datetime.now(),
-                                    fail_reason=None, fail_message=None)
+        try:
+            rec = self.store.transition(
+                ctx.jobset_id, job_key, JobState.PEND,
+                job_id=job_id, submit_time=datetime.now(),
+                fail_reason=None, fail_message=None)
+        except _RECORD_GONE:
+            # 제출은 **이미 성공**했는데 기록할 레코드가 없다 — job_id를
+            # 여기서 놓치면 LSF의 살아있는 job이 아무 흔적 없이 남는다.
+            self._task_vanished(ctx, job_key, job_id=job_id)
+            return
         self._count(ctx, succeeded=True, changed=rec)
+
+    def _task_vanished(self, ctx: _SubmitContext, job_key: str, *,
+                       job_id: Optional[int]) -> None:
+        """[worker] 대상 레코드가 사라진 채로 task가 끝났다 — 동시 삭제는
+        정상 경로이므로 error Signal도 SUBMIT_FAILED도 만들지 않는다.
+
+        단 job_id가 이미 잡힌 뒤라면 그 id의 **유일한 흔적**이 이 로그다 —
+        레코드가 없어 caller가 조회로 찾을 방법이 없으므로 WARNING으로
+        남긴다(force 삭제 계약: LSF job 정리는 caller 책임).
+        계상은 cancelled — 실패가 아니고, 살아남은 레코드도 없다."""
+        if job_id is None:
+            log.info("삭제된 job 건너뜀: %s/%s", ctx.jobset_id, job_key)
+        else:
+            log.warning(
+                "삭제된 job의 제출이 이미 성공 — LSF job %s가 추적 없이 "
+                "남습니다 (%s/%s, 정리는 caller 책임)",
+                job_id, ctx.jobset_id, job_key)
+        self._count(ctx, cancelled=True)
 
     def _task_failed(self, ctx: _SubmitContext, job_key: str, attempt: int,
                      err: SubmitError,
@@ -437,10 +477,17 @@ class BulkSubmitter(QObject):
             # RETRY_WAIT → QTimer 스케줄 (스레드 sleep 점유 금지, §3.2)
             # fail_message: 재시도 대기 중에도 마지막 시도의 터미널 메시지를
             # 표에 보여줄 수 있고, 포기 확정(_finalize_retry) 시에도 잔존한다
-            self.store.transition(ctx.jobset_id, job_key, JobState.RETRY_WAIT,
-                                  retry_count=attempt + 1,
-                                  fail_reason=err.fail_reason,
-                                  fail_message=err.diagnostic()[:4000])
+            try:
+                self.store.transition(ctx.jobset_id, job_key,
+                                      JobState.RETRY_WAIT,
+                                      retry_count=attempt + 1,
+                                      fail_reason=err.fail_reason,
+                                      fail_message=err.diagnostic()[:4000])
+            except _RECORD_GONE:
+                # 재시도할 레코드가 사라졌다 — 타이머를 걸면 발화 때 또 같은
+                # 소실을 만난다. 여기서 1단위 계상하고 끝낸다.
+                self._task_vanished(ctx, job_key, job_id=None)
+                return
             with ctx.lock:
                 ctx.retried_keys.add(job_key)
             self._schedule_retry(
@@ -449,11 +496,16 @@ class BulkSubmitter(QObject):
             return
         log.error("SUBMIT_FAILED 확정 [%s] %s (%d회 시도)",
                   err.fail_reason, job_key, attempt + 1)      # ERROR
-        rec = self.store.transition(ctx.jobset_id, job_key,
-                                    JobState.SUBMIT_FAILED,
-                                    retry_count=attempt,
-                                    fail_reason=err.fail_reason,
-                                    fail_message=err.diagnostic()[:4000])
+        try:
+            rec = self.store.transition(ctx.jobset_id, job_key,
+                                        JobState.SUBMIT_FAILED,
+                                        retry_count=attempt,
+                                        fail_reason=err.fail_reason,
+                                        fail_message=err.diagnostic()[:4000])
+        except _RECORD_GONE:
+            # 실패를 기록할 레코드가 없다 — 제출도 안 됐으니 LSF 흔적 없음
+            self._task_vanished(ctx, job_key, job_id=None)
+            return
         self._count(ctx, failed=True, reason=err.fail_reason, changed=rec)
 
     def _task_cancelled(self, ctx: _SubmitContext, job_key: str) -> None:
@@ -488,12 +540,21 @@ class BulkSubmitter(QObject):
         guard(리뷰 B3): 제출 자체는 성공(job_id 확보)했는데 성공 처리 도중
         예외가 난 경우, 실제 LSF에 살아있는 job을 SUBMIT_FAILED로 덮어
         고아화하지 않는다 — job_id 없는(진짜 미제출) 레코드만 확정한다."""
+        if isinstance(err, _RECORD_GONE):
+            # 소실은 위 경로들이 이미 다 흡수한다 — 여기까지 왔다면 방어를
+            # 빠뜨린 store 접근이 새로 생겼다는 뜻이므로, 그대로 삼키지 말고
+            # 소실 계상으로 정직하게 끝낸다(INTERNAL_ERROR로 오분류 금지).
+            log.info("삭제된 job에서 예외 흡수: %s/%s", ctx.jobset_id, job_key)
+            self._task_vanished(ctx, job_key, job_id=None)
+            return
         try:
             self.store.transition(ctx.jobset_id, job_key,
                                   JobState.SUBMIT_FAILED,
                                   fail_reason="INTERNAL_ERROR",
                                   fail_message=repr(err)[:4000],
                                   guard=lambda cur: cur.job_id is None)
+        except _RECORD_GONE:
+            pass                                # 소실 — 남길 레코드가 없다
         except Exception:                       # noqa: BLE001
             log.exception("crash 후 전이 실패: %s", job_key)
         self._safe_emit(self.error, ctx.jobset_id, f"{job_key}: {err!r}")
@@ -550,6 +611,9 @@ class BulkSubmitter(QObject):
                                             or default_reason)
                 if new is not None:
                     changed.append(new)
+        except _RECORD_GONE:
+            # 소실(merge/동시 삭제)은 정상 — 카운터 확정만 하고 넘어간다
+            log.info("삭제된 job의 retry 포기: %s/%s", ctx.jobset_id, key)
         except Exception:                        # noqa: BLE001
             # store 장애여도 _count까지는 반드시 도달해야 한다 — 여기서
             # 전파되면 done<total 고착 → finished 미발행

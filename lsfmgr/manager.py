@@ -21,12 +21,11 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 from .command import LsfCommand, Runner
 from .config import LsfConfig
 from .errors import (
-    CloseNotAllowedError,
     JobNotFoundError,
-    JobSetClosedError,
     JobSetNotFoundError,
     LsfmgrError,
     MergeNotAllowedError,
+    RemoveJobSetNotAllowedError,
     SubmitNotAllowedError,
 )
 from .handle import JobSet
@@ -57,7 +56,7 @@ class LsfJobManager(QObject):
     # --- Low-level Facade Signal (v6 유지, 모두 jobset_id 포함) ---
     #
     # [submit 신호 계약] submit 시도 1건은 반드시 submit_finished로 끝난다
-    # (shutdown/closed 등 접수 자체가 거부된 경우는 제외 — 아무 신호도 없다).
+    # (shutdown/삭제된 jobset 등 접수 자체가 거부된 경우는 제외 — 신호 없음).
     # 하지만 submit_started는 **실제 착수(게이트 통과 후 do_launch)에서만** 발화
     # 하므로, finished 앞에 submit_started가 항상 오지는 않는다:
     #   - 정상 착수:        submit_started → … → submit_finished
@@ -310,14 +309,12 @@ class LsfJobManager(QObject):
 
     def jobset(self, jobset_id: str) -> JobSet:
         """[sync, snapshot] JobSet 핸들 재획득 (복원/검색 결과에서).
-        close된 jobset은 JobSetClosedError — 닫힌 jobset에 새 열린 핸들을
-        발급하면 close 계약이 우회된다."""
+        삭제된(remove_jobset/merge source) jobset은 레코드가 없으므로
+        JobSetNotFoundError — 새 열린 핸들이 발급될 여지가 없다."""
         handle = self._handles.get(jobset_id)
         if handle is not None:
             return handle
-        rec = self.store.get_jobset(jobset_id)    # 존재 검증
-        if rec.closed:
-            raise JobSetClosedError(f"닫힌 jobset: {jobset_id}")
+        self.store.get_jobset(jobset_id)         # 존재 검증
         handle = JobSet(self, jobset_id)
         self._handles[jobset_id] = handle
         return handle
@@ -399,7 +396,7 @@ class LsfJobManager(QObject):
         읽으므로, 최신 LSF 상태는 각 jobset이 폴링되고 있어야 반영된다.
 
         list_jobsets() 스냅샷과 이후 summary() 사이에 다른 스레드가 그 jobset을
-        close/merge로 지울 수 있다(find_jobs와 동일한 경합) — 사라진 jobset은
+        remove_jobset/merge로 지울 수 있다(find_jobs와 동일한 경합) — 사라진 것은
         건너뛴다."""
         agg: Counter = Counter()
         for js in self.store.list_jobsets():
@@ -738,10 +735,7 @@ class LsfJobManager(QObject):
         tid = self._jsid(target_id)
         sid = self._jsid(source_id)
         for jsid in (tid, sid):
-            if self.store.get_jobset(jsid).closed:
-                raise MergeNotAllowedError(
-                    f"{jsid}: 닫힌(close) jobset은 merge할 수 없습니다",
-                    jobset_id=jsid)
+            self.store.get_jobset(jsid)      # 존재 검증 (삭제분이면 예외)
             if self.submitter.is_active(jsid) or self.killer.is_active(jsid):
                 raise MergeNotAllowedError(
                     f"{jsid}: submit/kill 진행 중에는 merge할 수 없습니다",
@@ -778,9 +772,8 @@ class LsfJobManager(QObject):
         try:
             if target_id == source_id:
                 return False
-            if (self.store.get_jobset(target_id).closed
-                    or self.store.get_jobset(source_id).closed):
-                return False              # merge()는 closed면 예외 — 술어 일치
+            # 삭제된 jobset은 아래 get_jobs가 JobSetNotFoundError —
+            # except LsfmgrError로 떨어져 False가 된다(merge()의 예외와 일치)
             if (self.submitter.is_active(target_id)
                     or self.submitter.is_active(source_id)
                     or self.killer.is_active(target_id)
@@ -808,9 +801,14 @@ class LsfJobManager(QObject):
         self._emit_summary(jobset_id)
         return removed
 
-    def clear(self, jobset_id, *, force: bool = False
-                   ) -> List[JobRecord]:
-        """[sync] 전 job 삭제 — remove_jobs와 동일 가드."""
+    def clear_jobs(self, jobset_id, *,
+                   force: bool = False) -> List[JobRecord]:
+        """[sync] jobset의 **job 전부** 삭제 — remove_job과 동일 가드.
+
+        jobset 자체는 남는다 — id/label/tags/handler/폴링/GUI 행이 그대로
+        유지되므로 새 batch jobset을 만들어 merge()로 흡수시키면 **같은
+        jobset을 그대로 재사용**할 수 있다(v9: job 추가는 merge 전용).
+        jobset 자체를 없애려면 remove_jobset()."""
         jobset_id = self._jsid(jobset_id)
         removed = self.jobsets.local_clear_jobs(jobset_id, force=force)
         self._forget_paced(jobset_id)
@@ -844,8 +842,8 @@ class LsfJobManager(QObject):
         submit/kill이 없으면 True. GUI 버튼 활성화 판단용."""
         jobset_id = self._jsid(jobset_id)
         try:
-            if self.store.get_jobset(jobset_id).closed:
-                return False              # submit()은 closed면 예외 — 술어 일치
+            # 삭제된 jobset은 아래 get_jobs가 JobSetNotFoundError —
+            # except LsfmgrError로 떨어져 False가 된다(submit()의 예외와 일치)
             if (self.submitter.is_active(jobset_id)
                     or self.killer.is_active(jobset_id)):
                 return False
@@ -867,10 +865,7 @@ class LsfJobManager(QObject):
             raise SubmitNotAllowedError(
                 f"{jobset_id}: shutdown 이후에는 submit할 수 없습니다",
                 jobset_id=jobset_id)
-        if self.store.get_jobset(jobset_id).closed:
-            raise SubmitNotAllowedError(
-                f"{jobset_id}: 닫힌(close) jobset에는 submit할 수 없습니다",
-                jobset_id=jobset_id)
+        self.store.get_jobset(jobset_id)     # 존재 검증 (삭제분이면 예외)
         if (self.submitter.is_active(jobset_id)
                 or self.killer.is_active(jobset_id)):
             raise SubmitNotAllowedError(
@@ -982,36 +977,46 @@ class LsfJobManager(QObject):
         """[sync, snapshot] 세션 범위 검색."""
         return self.store.search(tag=tag, label=label, since=since)
 
-    def close(self, jobset_id, *, force: bool = False) -> None:
-        """[sync] 종결 (전원 terminal일 때) — 핸들도 파괴.
-        전원 terminal이 아니면 예외 — polling/핸들은 건드리지 않고 유지."""
+    def remove_jobset(self, jobset_id, *,
+                      force: bool = False) -> JobSetRecord:
+        """[sync] jobset **자체를 삭제** (전원 terminal일 때) — 핸들도 파괴.
+
+        레코드가 실제로 지워지므로 이후 list_jobsets/search_jobsets/get_jobs
+        어디에도 남지 않는다(merge source와 동일). **결과를 나중에 다시 볼
+        수 없으니** 필요하면 삭제 전에 스냅샷을 떠 둘 것 — 반환값이 삭제
+        직전의 JobSetRecord다.
+        job만 비우고 jobset은 재사용하려면 clear_jobs()."""
         jobset_id = self._jsid(jobset_id)
         if (self.submitter.is_active(jobset_id)
                 or self.killer.is_active(jobset_id)):
             # pre_submit 게이트 대기 중엔 레코드가 아직 전원 terminal이라
-            # 아래 local_close_jobset 검사를 통과해 버린다 — 게이트가 통과하면
-            # '닫힌 jobset'에 실제 LSF job이 제출되므로(merge와 동일 가드)
-            # 진행 중 submit/kill이 있으면 close를 거부한다.
-            # force=True(강제 종결 계약)면 거부 대신 진행 중 제출을 취소시키고
+            # 아래 local_remove_jobset 검사를 통과해 버린다 — 게이트가 통과하면
+            # 이미 사라진 jobset에 실제 LSF job이 제출되므로(merge와 동일 가드)
+            # 진행 중 submit/kill이 있으면 삭제를 거부한다.
+            # force=True(강제 삭제 계약)면 거부 대신 진행 중 제출을 취소시키고
             # 진행한다 — RETRY_WAIT 장기 backoff 중에도 강제 정리가 가능해야
             # 한다 (LSF에 이미 제출된 job의 정리는 caller 책임).
             if not force:
-                raise CloseNotAllowedError(
-                    f"{jobset_id}: submit/kill 진행 중에는 close할 수 없습니다"
-                    f" (force=True로 강제 가능 — 진행 중 제출은 취소됨)",
+                raise RemoveJobSetNotAllowedError(
+                    f"{jobset_id}: submit/kill 진행 중에는 remove_jobset할 수"
+                    f" 없습니다 (force=True로 강제 가능 — 진행 중 제출은 취소됨)",
                     jobset_id=jobset_id)
             self.submitter.cancel_submit(jobset_id)
             self.submitter.abort_retries(jobset_id)
-        self.jobsets.local_close_jobset(jobset_id, force=force)  # 실패 시 예외
+        # 실패 시 예외 — 아래 정리는 하지 않는다(polling/핸들 그대로 유지)
+        removed = self.jobsets.local_remove_jobset(jobset_id, force=force)
+        # 사라진 jobset에 매달린 것들을 merge source와 같은 순서로 정리한다 —
+        # 남기면 매 주기 JobSetNotFoundError가 터진다.
         self.polling.stop_polling(jobset_id)
         self.handlers.remove_all(jobset_id)
-        self._forget_paced(jobset_id)    # dwell 보류분 — 닫힌 jobset의
+        self._forget_paced(jobset_id)    # dwell 보류분 — 삭제된 jobset의
                                          # 늦은 발행 방지 (merge/remove 대칭)
         self._poll_intervals.pop(jobset_id, None)
         self._post_process.pop(jobset_id, None)
         self._pending_arm.pop(jobset_id, None)
         self._finished_latch.discard(jobset_id)
         self._invalidate_handle(jobset_id)
+        return removed
 
     def list_jobsets(self) -> List[JobSetRecord]:
         """[sync, snapshot] 현재 세션의 JobSet 목록."""
@@ -1173,7 +1178,7 @@ class LsfJobManager(QObject):
         try:
             summary = self.store.summary(jsid)
         except LsfmgrError:
-            return                       # jobset이 이미 사라짐(merge/close 등)
+            return                    # jobset이 이미 사라짐(merge/remove 등)
         self.jobset_updated.emit(jsid, summary)
         # 제출 시점에 이미 전원 terminal인 경우(예: bsub 전량 거부 → 전원
         # SUBMIT_FAILED)는 폴링 tick의 _maybe_finish가 ctx.finished
@@ -1228,12 +1233,12 @@ class LsfJobManager(QObject):
 
     def _handle_of(self, jobset_id: str) -> Optional[JobSet]:
         h = self._handles.get(jobset_id)
-        return h if (h is not None and not h._closed) else None
+        return h if (h is not None and not h._removed) else None
 
     def _invalidate_handle(self, jobset_id: str) -> None:
         h = self._handles.pop(jobset_id, None)
         if h is not None:
-            h._mark_closed()
+            h._mark_removed()
 
     def _handle_relay(self, signal_name: str):
         """Facade Signal(jsid, ...)을 해당 핸들의 Signal(...)로 중계하는 slot."""

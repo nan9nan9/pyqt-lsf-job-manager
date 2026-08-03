@@ -162,7 +162,7 @@ class JobSetHandlerService(QObject):
                     h.status.pop(key, None)     # → _PENDING (기본값)
 
     def remove_all(self, jobset_id: str) -> None:
-        """[main] jobset의 모든 handler 해제 (close/merge 시)."""
+        """[main] jobset의 모든 handler 해제 (remove_jobset/merge 시)."""
         for name in [n for (j, n) in self._handlers if j == jobset_id]:
             self.remove_handler(jobset_id, name)
 

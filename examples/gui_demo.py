@@ -231,7 +231,7 @@ class Dashboard(QWidget):
                          ("Rerun failed", self.rerun_failed),
                          ("Refresh", self.refresh),
                          ("detect_lost", self.detect_lost),
-                         ("Close", self.close_jobset)]:
+                         ("Remove jobset", self.remove_jobset)]:
             b = QPushButton(text)
             b.clicked.connect(fn)
             ctrl.addWidget(b)
@@ -305,6 +305,14 @@ class Dashboard(QWidget):
         self._items[jsid] = item
         self.tree.setCurrentItem(item)
 
+    def _drop_row(self, jsid):
+        """삭제된 jobset의 행 제거 — 남겨두면 선택 시 JobSetNotFoundError."""
+        item = self._items.pop(jsid, None)
+        if item is not None:
+            idx = self.tree.indexOfTopLevelItem(item)
+            if idx >= 0:
+                self.tree.takeTopLevelItem(idx)
+
     # ------------------------------------------------------------------
     # submit / merge 추가 / 실패 재실행
     # ------------------------------------------------------------------
@@ -337,7 +345,7 @@ class Dashboard(QWidget):
             cmds, merge_ids=[f"run_{n + i}" for i in range(len(cmds))])
         if not self.mgr.can_merge(js, batch):
             # 임시 batch 폐기 — CREATED 는 terminal 이 아니라 force 필요
-            self.mgr.close(batch, force=True)
+            self.mgr.remove_jobset(batch, force=True)
             self._log(js.id, "추가 불가 — 활성 job 존재 (먼저 완료/kill)")
             return
         self.mgr.merge(js, batch)
@@ -411,15 +419,18 @@ class Dashboard(QWidget):
             lost = self.mgr.detect_lost(js)
             self._log(js.id, f"detect_lost: LOST 확정 {len(lost)}건")
 
-    def close_jobset(self):
+    def remove_jobset(self):
         js = self._handle()
         if not js:
             return
+        jsid = js.id
         try:
-            self.mgr.close(js)
-            self._log(js.id, "closed")
+            self.mgr.remove_jobset(js)
         except Exception as e:               # 전원 terminal 아니면 거부
-            self._log(js.id, f"close 거부: {e}")
+            self._log(jsid, f"remove_jobset 거부: {e}")
+            return
+        self._drop_row(jsid)                 # 레코드가 사라졌으니 행도 제거
+        self._log(jsid, "removed — 이 jobset은 더 이상 조회할 수 없습니다")
 
     # ------------------------------------------------------------------
     # 후처리 / handler / 상세

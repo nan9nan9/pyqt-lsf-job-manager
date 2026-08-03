@@ -128,12 +128,12 @@ def test_merge_from_adds_new_and_none_merge_ids(manager):
 
 
 def test_merge_from_destroys_source(qtbot, manager, fake_lsf):
-    from lsfmgr import JobSetClosedError
+    from lsfmgr import JobSetRemovedError
 
     a = manager.create_jobset()
     b = manager.create_jobset(["customwrapper_sub x.sp"])
     manager.merge(a, b)
-    with pytest.raises(JobSetClosedError):
+    with pytest.raises(JobSetRemovedError):
         b.jobs()                                # source 핸들 파괴
     with pytest.raises(LsfmgrError):
         manager.summary(b.id)                   # jobset 자체 삭제
@@ -206,16 +206,67 @@ def test_remove_job_active_requires_force(qtbot, manager, fake_lsf):
         manager.remove_job(js, merge_id="없는것")
 
 
+def test_remove_job_without_selector_never_means_all(qtbot, manager):
+    """selector 누락은 **전량 삭제가 아니라 즉시 오류**다.
+
+    remove_job과 clear_jobs를 굳이 둘로 나눠 둔 이유 그 자체 — merge_id가
+    None으로 새는 GUI 실수 한 번이 jobset을 통째로 비우면 안 된다.
+    (전량 삭제는 clear_jobs라는 명시적 철자로만 도달한다.)"""
+    js = manager.create_jobset(["customwrapper_sub a.sp",
+                                "customwrapper_sub b.sp"],
+                               merge_ids=["m1", "m2"])
+    for bad in (lambda: manager.remove_job(js),                  # 아무것도 없음
+                lambda: manager.remove_job(js, merge_id=None),   # None으로 샘
+                lambda: manager.remove_job(js, job_id=1, merge_id="m1")):
+        with pytest.raises(ValueError, match="정확히 하나"):
+            bad()
+    assert len(js.jobs()) == 2                   # 한 건도 안 지워졌다
+
+
+def test_clear_jobs_on_empty_jobset_is_noop(qtbot, manager):
+    """빈 jobset의 clear_jobs는 정상 no-op — remove_job의 JobNotFoundError와
+    갈리는 지점(멱등 vs 호출자 실수)이라 한 함수로 합칠 수 없다."""
+    js = manager.create_jobset([])
+    assert manager.clear_jobs(js) == []
+    assert manager.clear_jobs(js) == []          # 몇 번을 불러도 동일
+    assert js.summary["total"] == 0
+
+
 def test_clear_guard_and_force(qtbot, manager, fake_lsf):
     js = manager.create_jobset(["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
 
     with pytest.raises(LsfmgrError, match="활성"):
-        manager.clear(js)
+        manager.clear_jobs(js)
     _finish_all(manager, fake_lsf, js)
-    manager.clear(js)                                  # 전원 종료 — 허용
+    manager.clear_jobs(js)                                  # 전원 종료 — 허용
     assert js.jobs() == [] and js.summary["total"] == 0
+
+
+def test_clear_jobs_keeps_jobset_reusable(qtbot, manager, fake_lsf):
+    """clear_jobs는 **내용물만** 비운다 — 같은 핸들/id로 이어서 쓸 수 있다.
+    (remove_jobset과의 차이: 그쪽은 jobset 자체가 사라져 재사용 불가.)"""
+    js = manager.create_jobset(["customwrapper_sub a.sp"], label="sweep",
+                               tags=["t1"])
+    jsid = js.id
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        manager.submit(js, auto_poll=False)
+    _finish_all(manager, fake_lsf, js)
+    manager.clear_jobs(js)
+
+    # 핸들은 살아있고 메타(label/tags)도 그대로 — id도 안 바뀐다
+    assert js.id == jsid and js.summary["total"] == 0
+    rec = manager.store.get_jobset(jsid)
+    assert rec.label == "sweep" and rec.tags == ["t1"]
+
+    # 새 batch를 merge로 흡수 → 같은 jobset으로 재제출 (v9: 추가는 merge 전용)
+    batch = manager.create_jobset(["customwrapper_sub b.sp"], merge_ids=["b"])
+    manager.merge(js, batch)
+    assert manager.can_submit(jsid) is True
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        manager.submit(js, auto_poll=False)
+    assert js.summary["total"] == 1
 
 
 # ----------------------------------------------------------------------

@@ -56,7 +56,7 @@ def test_failed_close_keeps_polling_and_handle(qtbot, manager, fake_lsf):
     qtbot.waitUntil(lambda: len(updates) >= 1, timeout=10000)
 
     with pytest.raises(LsfmgrError):
-        manager.close(js)                                   # 전원 PEND — 거부
+        manager.remove_jobset(js)                    # 전원 PEND — 거부
 
     # 핸들 살아있고 polling도 계속 돈다
     assert js.summary["total"] == 5

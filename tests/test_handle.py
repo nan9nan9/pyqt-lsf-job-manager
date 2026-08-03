@@ -6,7 +6,8 @@ import pytest
 from lsfmgr import (
     InMemoryStore,
     JobSet,
-    JobSetClosedError,
+    JobSetNotFoundError,
+    JobSetRemovedError,
     JobState,
     LsfJobManager,
 )
@@ -115,26 +116,25 @@ def test_handle_reacquire_same_instance(qtbot, manager, fake_lsf):
     assert manager.jobset(js.id) is js
 
 
-def test_closed_handle_raises(qtbot, manager, fake_lsf):
+def test_removed_handle_raises(qtbot, manager, fake_lsf):
     js = submit_cmds(manager, ["x"], auto_poll=False)
     with qtbot.waitSignal(js.submit_finished, timeout=10000):
         pass
     fake_lsf.set_all("DONE", 0)
     with qtbot.waitSignal(js.jobset_updated, timeout=10000):
         manager.query_once(js)
-    manager.close(js)
-    with pytest.raises(JobSetClosedError):
+    manager.remove_jobset(js)
+    with pytest.raises(JobSetRemovedError):
         _ = js.summary
-    with pytest.raises(JobSetClosedError):
+    with pytest.raises(JobSetRemovedError):
         manager.kill(js)
-    # 재획득도 거부 — 닫힌 jobset에 새 열린 핸들을 발급하면 close 계약이
-    # 우회된다 (LSF group 부착물은 이미 bgdel로 정리됨)
-    with pytest.raises(JobSetClosedError):
+    # 재획득도 불가 — 레코드 자체가 없다
+    with pytest.raises(JobSetNotFoundError):
         manager.jobset(js.id)
 
 
 def test_merge_from_invalidates_source(qtbot, manager, fake_lsf):
-    """merge_from 후 source 핸들은 파괴(JobSetClosedError), target은 유지."""
+    """merge_from 후 source 핸들은 파괴(JobSetRemovedError), target은 유지."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         a = submit_cmds(manager, ["echo a"], auto_poll=False)
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
@@ -146,7 +146,7 @@ def test_merge_from_invalidates_source(qtbot, manager, fake_lsf):
     manager.merge(a, b)
 
     assert a.summary["total"] == 2               # target 핸들 유지
-    with pytest.raises(JobSetClosedError):
+    with pytest.raises(JobSetRemovedError):
         b.jobs()                                 # source 핸들 파괴
 
 

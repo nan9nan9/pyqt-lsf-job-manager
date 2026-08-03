@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from lsfmgr import (
-    CloseNotAllowedError,
+    RemoveJobSetNotAllowedError,
     JobSetStateError,
     LsfmgrError,
     MergeNotAllowedError,
@@ -27,7 +27,7 @@ def _finish(manager, fake_lsf, js):
 # ----------------------------------------------------------------------
 def test_hierarchy():
     for exc in (SubmitNotAllowedError, MergeNotAllowedError,
-                RemoveNotAllowedError, CloseNotAllowedError):
+                RemoveNotAllowedError, RemoveJobSetNotAllowedError):
         assert issubclass(exc, JobSetStateError)
         assert issubclass(exc, LsfmgrError)
 
@@ -77,7 +77,7 @@ def test_remove_not_allowed_active(qtbot, manager, fake_lsf):
     with pytest.raises(RemoveNotAllowedError):
         manager.remove_job(js, merge_id="m1")
     with pytest.raises(RemoveNotAllowedError):
-        manager.clear(js)
+        manager.clear_jobs(js)
 
 
 # ----------------------------------------------------------------------
@@ -87,8 +87,8 @@ def test_close_not_allowed_active(qtbot, manager, fake_lsf):
     js = manager.create_jobset(["customwrapper_sub a.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)          # PEND
-    with pytest.raises(CloseNotAllowedError) as ei:
-        manager.close(js)
+    with pytest.raises(RemoveJobSetNotAllowedError) as ei:
+        manager.remove_jobset(js)
     assert ei.value.job_keys
     _finish(manager, fake_lsf, js)
-    manager.close(js)                                # 전원 terminal — 허용
+    manager.remove_jobset(js)                                # 전원 terminal — 허용

@@ -3,13 +3,13 @@
 명령(submit/kill/merge/…)은 전부 manager 한 곳에 있다 —
 `mgr.submit(js, ...)` / `mgr.kill(js)` / `mgr.merge(a, b)` 처럼 이 핸들을
 인자로 넘긴다. 핸들은 GUI 위젯이 바인딩할 상태 스냅샷과 신호만 제공한다.
-close/삭제된 핸들 접근 시 JobSetClosedError.
+삭제된(remove_jobset / merge source) 핸들 접근 시 JobSetRemovedError.
 """
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, List, Optional, Set
 
-from .errors import JobSetClosedError
+from .errors import JobSetRemovedError
 from .qt import QObject, Signal
 from .states import JobRecord, JobState
 
@@ -44,21 +44,21 @@ class JobSet(QObject):
         super().__init__(manager)
         self._manager = manager
         self._jobset_id = jobset_id
-        self._closed = False
+        self._removed = False
 
     # ------------------------------------------------------------------
     # 내부
     # ------------------------------------------------------------------
     def _check_open(self) -> None:
-        if self._closed:
-            raise JobSetClosedError(
+        if self._removed:
+            raise JobSetRemovedError(
                 f"파괴된 JobSet 핸들 접근: {self._jobset_id}")
 
-    def _mark_closed(self) -> None:
-        self._closed = True
+    def _mark_removed(self) -> None:
+        self._removed = True
 
     def __repr__(self) -> str:
-        state = "closed" if self._closed else "open"
+        state = "removed" if self._removed else "open"
         return f"<JobSet {self._jobset_id} ({state})>"
 
     # ------------------------------------------------------------------

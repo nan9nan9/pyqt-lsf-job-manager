@@ -102,10 +102,10 @@ mgr.create_jobset(commands=(), *, merge_ids=None, user_datas=None,
 mgr.merge(target, source, *, force=False) -> list[JobRecord]  # in-place 흡수
 mgr.can_merge(target, source) -> bool
 mgr.remove_job(js, *, job_id=None, merge_id=None, job_key=None, force=False)
-mgr.clear(js, *, force=False)
+mgr.clear_jobs(js, *, force=False)               # job만 전부 삭제 (jobset은 남음)
 mgr.set_user_data(js, ref, user_data)            # ref = job_key | merge_id | job_id
 mgr.can_submit(js) -> bool
-mgr.close(js, *, force=False)                    # 종결 (전원 terminal일 때)
+mgr.remove_jobset(js, *, force=False)            # jobset 자체 삭제 (전원 terminal)
 
 # --- 실행 (async→Signal) ---
 mgr.submit(js, *, pre_submit=None, post_process=None, **opts) -> JobSet  # 전 job (재)제출
@@ -155,7 +155,7 @@ class JobSet(QObject):
 ```
 
 - **핸들에 명령 메서드는 없다** — kill/merge/submit 등은 전부 `mgr.*`.
-- JobSet 재획득: `mgr.jobset(jobset_id)`. 파괴된 핸들 접근 시 `JobSetClosedError`.
+- JobSet 재획득: `mgr.jobset(jobset_id)`. 파괴된 핸들 접근 시 `JobSetRemovedError`.
 
 ---
 
@@ -216,8 +216,8 @@ class JobState(Enum):
 Exception
 ├── ValueError / TypeError            # 잘못된 인자 (OPT-2/3, create_jobset 검증 등)
 └── LsfmgrError                       # lsfmgr 모든 예외의 base
-    ├── JobSetNotFoundError           # 존재하지 않는 jobset_id 접근
-    ├── JobSetClosedError             # close/삭제된 JobSet 핸들 접근
+    ├── JobSetNotFoundError           # 존재하지 않는(삭제 포함) jobset_id 접근
+    ├── JobSetRemovedError            # 삭제된 JobSet 핸들 접근
     ├── JobNotFoundError              # jobset 내 없는 job(job_id/merge_id/job_key)
     ├── LsfCommandError               # LSF 명령 실행 실패 (제출 제외)
     │       .returncode / .stderr
@@ -228,8 +228,8 @@ Exception
             .jobset_id / .job_keys    #   막은 원인을 구조화(메시지 파싱 불필요)
         ├── SubmitNotAllowedError     # 활성 job / 제출할 job 없음 / submit·kill 진행 중
         ├── MergeNotAllowedError      # 양쪽 활성 job / submit·kill 진행 중
-        ├── RemoveNotAllowedError     # remove_job·clear 대상이 활성 (force=True로 강제)
-        └── CloseNotAllowedError      # 전원 terminal 아님 (force=True로 강제)
+        ├── RemoveNotAllowedError     # remove_job·clear_jobs 대상이 활성 (force로 강제)
+        └── RemoveJobSetNotAllowedError  # 전원 terminal 아님 (force=True로 강제)
 ```
 
 - **ERR-1 단일 base**: 모든 예외는 `LsfmgrError` 하위 — `except LsfmgrError`로
@@ -285,8 +285,9 @@ JobSetStore(ABC) ── InMemoryStore
 | 개념 | 공개 API (`mgr.*`) | 도메인 (`jobsets.*`) | 저장소 (`store.*`) |
 |---|---|---|---|
 | jobset 생성 | `create_jobset(commands)` → JobSet 핸들 | `local_create_jobset(...)` → Record | `store_insert_jobset(record)` → Record |
-| job 삭제 | `remove_job(js, ...)` (가드) | `local_remove_jobs(...)`/`local_clear_jobs()` | `store_delete_job(...)` / `store_delete_jobset()` |
-| 종결/해제 | `close(js)` (jobset 종결) | `local_close_jobset(jsid)` | `store_dispose()` (저장소 자원 해제) |
+| job 삭제 | `remove_job(js, ...)`/`clear_jobs(js)` (가드) | `local_remove_jobs(...)`/`local_clear_jobs()` | `store_delete_job(...)` |
+| jobset 삭제 | `remove_jobset(js)` (레코드째 삭제) | `local_remove_jobset(jsid)` | `store_delete_jobset(jsid)` |
+| 저장소 해제 | (매니저 `shutdown()`) | — | `store_dispose()` (저장소 자원 해제) |
 
 - 읽기 통과(`get_jobs`/`summary`/`list_jobsets`)는 세 계층 동일 이름을 유지한다 —
   **의미가 같은 facade read-through**라 혼동 없음.
@@ -345,9 +346,11 @@ JobSetStore(ABC) ── InMemoryStore
   - **FR-5.5** merge: in-place 흡수(target 핸들/테이블 유지, source 소멸),
     merge_id 일치=replace(물리 키 유지)/불일치·None=추가, 가드=양쪽 전원 비활성
     (`can_merge`), `force`=레코드만 강제(LSF 정리는 앱 책임), 폴링 source→target 이관,
-  - **FR-5.6** remove_job(job_id/merge_id/job_key, force)·clear(force) — 비활성만,
+  - **FR-5.6** remove_job(job_id/merge_id/job_key, force)·clear_jobs(force) — 비활성만,
     force로 레코드만 강제 삭제, intended_count 함께 감소,
-  - **FR-5.7** close — 전원 terminal일 때 종결(force로 강제).
+  - **FR-5.7** remove_jobset — 전원 terminal일 때 jobset을 **레코드째 삭제**
+    (force로 강제). 삭제분은 list/search/get_jobs 어디에도 남지 않는다 —
+    결과가 필요하면 삭제 전에 스냅샷을 뜬다(반환값=삭제 직전 JobSetRecord).
 - **FR-7 JobSet Handler**: 이름 있는 handler를 등록해 **폴링 사이클마다**(별도 타이머
   없이 `poll_interval_s`에 tie — bjobs 갱신 직후) job별로 worker 스레드에서 실행.
   `start_states`(기본 `{RUN}`)부터 시작, `end_states`(기본 `{DONE,EXIT}`) 도달 시

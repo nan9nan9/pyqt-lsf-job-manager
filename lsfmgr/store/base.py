@@ -81,7 +81,7 @@ class JobSetStore(ABC):
         out: List[JobRecord] = []
         for js in self.list_jobsets():
             # list_jobsets() 스냅샷과 get_jobs() 사이에 main 스레드가 그 jobset을
-            # close/merge로 지우면 get_jobs가 JobSetNotFoundError를 던진다 —
+            # remove_jobset/merge로 지우면 get_jobs가 JobSetNotFoundError를 던진다 —
             # 전역 kill worker에서 이게 전파되면 이미 성공한 bkill이 내부 오류로
             # 오보된다. 사라진 jobset은 건너뛴다(그 job은 어차피 대상 밖).
             try:

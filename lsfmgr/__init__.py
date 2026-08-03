@@ -6,18 +6,18 @@ qtpy 기반 (PyQt5/PySide2/PyQt6/PySide6 호환). 모든 LSF 호출은 백그라
 from .config import LsfConfig
 from .errors import (
     ArgMaxExceededError,
-    CloseNotAllowedError,
     JobNotFoundError,
     JobSetNotFoundError,
     JobSetStateError,
     LsfCommandError,
     LsfmgrError,
     MergeNotAllowedError,
+    RemoveJobSetNotAllowedError,
     RemoveNotAllowedError,
     SubmitError,
     SubmitNotAllowedError,
 )
-from .errors import JobSetClosedError
+from .errors import JobSetRemovedError
 from .handle import JobSet
 from .handlers import HandlerContext, HandlerResult
 from .manager import LsfJobManager
@@ -38,7 +38,7 @@ __all__ = [
     "LsfJobManager",
     "JobSet",
     "Options",
-    "JobSetClosedError",
+    "JobSetRemovedError",
     "LsfConfig",
     "JobState",
     "JobRecord",
@@ -61,5 +61,5 @@ __all__ = [
     "SubmitNotAllowedError",
     "MergeNotAllowedError",
     "RemoveNotAllowedError",
-    "CloseNotAllowedError",
+    "RemoveJobSetNotAllowedError",
 ]

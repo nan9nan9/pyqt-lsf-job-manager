@@ -356,12 +356,12 @@ mgr.submit(js)                 # 전체 재실행
 |---|---|---|
 | `mgr.submit(js)` | 전 job 비활성 + 1건 이상 (`can_submit`) | — (활성은 먼저 kill) |
 | `mgr.merge(js, src)` | 양쪽 전 job 비활성 (`can_merge`) | 레코드만 강제 교체 (LSF 정리는 앱 책임) |
-| `mgr.remove_job(js, ...)` / `mgr.clear(js)` | 대상 비활성 | 레코드만 강제 삭제 (〃) |
-| `mgr.close(js)` | 전원 terminal | 레코드만 강제 종결 |
+| `mgr.remove_job(js, ...)` / `mgr.clear_jobs(js)` | 대상 비활성 | 레코드만 강제 삭제 (〃) |
+| `mgr.remove_jobset(js)` | 전원 terminal | 레코드만 강제 삭제 (〃) |
 | `mgr.kill(js)` | 예외 — 활성(RUN/PEND/SUBMITTING)만 대상, 종료분은 자동 skip | — |
 
 > 가드 위반 시 명령별 **전용 예외**가 납니다 — `SubmitNotAllowedError` /
-> `MergeNotAllowedError` / `RemoveNotAllowedError` / `CloseNotAllowedError`
+> `MergeNotAllowedError` / `RemoveNotAllowedError` / `RemoveJobSetNotAllowedError`
 > (전부 `JobSetStateError` → `LsfmgrError` 하위라 `except LsfmgrError`로도 잡힘).
 > 예외 객체의 `.jobset_id` · `.job_keys`(막은 job들)로 메시지 파싱 없이 원인을
 > 알 수 있습니다. 사전 확인은 `mgr.can_submit(js)` / `mgr.can_merge(a, b)`.
@@ -378,7 +378,7 @@ mgr.kill_jobs(js, [job_key, ...])      # 선택 job만 kill (테이블 선택 �
 mgr.kill(js, only_state=JobState.PEND, cancel_submit=True)  # 부분 kill에도 제출 우선권
 mgr.query_once(js)                     # 지금 즉시 1회 조회 요청
 mgr.stop_polling(js); mgr.start_polling(js, 30)
-mgr.close(js)                          # 종결 (전원 terminal일 때)
+mgr.remove_jobset(js)                  # jobset 자체 삭제 (전원 terminal일 때)
 ```
 
 **kill은 진행 중 submit에 우선권**을 갖습니다 — 전체 kill이면 진행 중 제출을 취소하고
@@ -497,10 +497,31 @@ mgr.merge(js_a, js_b)                  # b를 a에 흡수(merge_id 규칙) — b
 mgr.can_merge(js_a, js_b)              # 흡수 가능 여부 (전원 비활성)
 mgr.remove_job(js, merge_id="m1")      # 삭제 — job_id/merge_id/job_key 기준
 mgr.remove_job(js, job_id=12345, force=True)  # 활성이면 force 필요 (레코드만)
-mgr.clear(js)                          # 전 job 삭제 (동일 가드)
+mgr.clear_jobs(js)                     # job만 전부 삭제 — jobset은 남아 재사용 가능
+mgr.remove_jobset(js)                  # jobset 자체 삭제 — 목록에서도 사라짐
 mgr.set_user_data(js, "m1", {"note": "..."})  # 사용자 데이터 교체
 mgr.shutdown()                         # 스레드 정리 (멱등 — 앱 종료 시 자동 호출)
 ```
+
+> **삭제 3형제 — 이름에 대상이 드러납니다.**
+>
+> | 명령 | 지우는 것 | 남는 것 |
+> |---|---|---|
+> | `remove_job(js, ...)` | job 1건 | 나머지 job + jobset |
+> | `clear_jobs(js)` | job 전부 | **jobset** — id·label·tags·handler·폴링·GUI 행이 그대로. 새 batch를 `merge`로 흡수시키면 그대로 **재사용** |
+> | `remove_jobset(js)` | jobset 자체 | 없음 — `list_jobsets`/`search_jobsets`/`get_jobs` 어디에도 안 남음 |
+>
+> `remove_jobset`은 merge source와 똑같이 레코드를 실제로 지웁니다. **결과를
+> 나중에 다시 볼 수 없으니** 필요하면 삭제 전에 스냅샷을 뜨세요 — 반환값이
+> 삭제 직전의 `JobSetRecord`입니다. 삭제된 jobset의 핸들을 만지면
+> `JobSetRemovedError`, id로 접근하면 `JobSetNotFoundError`입니다.
+>
+> ⚠️ **`force=True`로 살아있는 job을 지우면 그 `job_id`는 조회로 못 찾습니다.**
+> 계약상 LSF job 정리는 앱 책임인데 레코드가 사라져 조회할 방법이 없으므로,
+> 삭제 직전에 `lsfmgr.jobset` 로거가 해당 `job_id`들을 WARNING으로 남깁니다 —
+> 그게 유일한 흔적입니다. 제출이 진행 중이었다면 그 사이 확보된 `job_id`는
+> `lsfmgr.submit` 로거에 남습니다. 정리할 생각이면 **먼저 `mgr.kill(js)`로
+> 정리한 뒤 삭제**하는 편이 안전합니다.
 
 ### 5.7 job별 handler — 폴링 사이클마다 실행
 

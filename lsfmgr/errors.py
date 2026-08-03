@@ -36,20 +36,21 @@ class MergeNotAllowedError(JobSetStateError):
 
 
 class RemoveNotAllowedError(JobSetStateError):
-    """remove_job/clear 불가 — 활성(진행 중) job은 삭제 거부.
+    """remove_job/clear_jobs 불가 — 활성(진행 중) job은 삭제 거부.
     force=True면 레코드만 강제 삭제(LSF job 정리는 caller 책임)."""
 
 
-class CloseNotAllowedError(JobSetStateError):
-    """close 불가 — 전원 terminal이 아님. force=True면 강제 종결."""
+class RemoveJobSetNotAllowedError(JobSetStateError):
+    """remove_jobset 불가 — 전원 terminal이 아님. force=True면 강제 삭제."""
 
 
 class JobSetNotFoundError(LsfmgrError):
-    """존재하지 않는 jobset_id 접근."""
+    """존재하지 않는 jobset_id 접근 — 삭제된(remove_jobset/merge source)
+    jobset도 여기에 해당한다."""
 
 
-class JobSetClosedError(LsfmgrError):
-    """close/삭제되어 파괴된 JobSet 핸들 접근 (v7 §1.3)."""
+class JobSetRemovedError(LsfmgrError):
+    """삭제되어 파괴된 JobSet 핸들 접근 (remove_jobset / merge source)."""
 
 
 class JobNotFoundError(LsfmgrError):

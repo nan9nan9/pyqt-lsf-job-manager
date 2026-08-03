@@ -10,7 +10,8 @@ import threading
 
 import pytest
 
-from lsfmgr import InMemoryStore, JobState, LsfJobManager
+from lsfmgr import (InMemoryStore, JobSetNotFoundError, JobState,
+                    LsfJobManager)
 
 
 def _finish(manager, fake_lsf, js, state="DONE", code=0):
@@ -89,22 +90,22 @@ def test_stale_gate_rejected_does_not_destroy_new_cycle(qtbot, manager, fake_lsf
 
 
 # ----------------------------------------------------------------------
-# C2-3: closed jobset — can_submit/can_merge도 False (술어-명령 일치)
+# C2-3: 삭제된 jobset — can_submit/can_merge도 False (술어-명령 일치)
 # ----------------------------------------------------------------------
-def test_predicates_false_for_closed_jobset(qtbot, manager, fake_lsf):
+def test_predicates_false_for_removed_jobset(qtbot, manager, fake_lsf):
     js = _submit_done(qtbot, manager, fake_lsf, ["customwrapper_sub a.sp"])
     jsid = js.id
     other = manager.create_jobset(["customwrapper_sub b.sp"])
-    manager.close(js)
+    manager.remove_jobset(js)
     assert manager.can_submit(jsid) is False     # 명령은 예외 — 술어는 False
     assert manager.can_merge(jsid, other) is False
     assert manager.can_merge(other, jsid) is False
 
 
 # ----------------------------------------------------------------------
-# C2-4: 진행 중(게이트 대기)에도 close(force=True)는 강제 종결 — 제출은 취소됨
+# C2-4: 진행 중(게이트 대기)에도 remove_jobset(force=True)는 강제 삭제 — 제출 취소
 # ----------------------------------------------------------------------
-def test_force_close_during_gate_cancels_submit(qtbot, manager, fake_lsf):
+def test_force_remove_during_gate_cancels_submit(qtbot, manager, fake_lsf):
     js = _submit_done(qtbot, manager, fake_lsf, ["customwrapper_sub a.sp"])
     jsid = js.id
     n_lsf = len(fake_lsf.jobs)
@@ -118,11 +119,12 @@ def test_force_close_during_gate_cancels_submit(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, pre_submit=slow_gate, auto_poll=False)
         assert gate_entered.wait(3)
-        manager.close(js, force=True)            # 강제 종결 — 제출 취소 예약
+        manager.remove_jobset(js, force=True)            # 강제 삭제 — 제출 취소 예약
         release.set()
 
-    assert manager.store.get_jobset(jsid).closed is True
-    assert len(fake_lsf.jobs) == n_lsf           # 닫힌 jobset에 새 제출 없음
+    with pytest.raises(JobSetNotFoundError):     # 레코드째 삭제
+        manager.store.get_jobset(jsid)
+    assert len(fake_lsf.jobs) == n_lsf           # 삭제된 jobset에 새 제출 없음
 
 
 # ----------------------------------------------------------------------

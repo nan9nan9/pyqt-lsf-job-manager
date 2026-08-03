@@ -10,12 +10,11 @@ import threading
 import pytest
 
 from lsfmgr import (
-    CloseNotAllowedError,
     InMemoryStore,
-    JobSetClosedError,
+    JobSetNotFoundError,
     JobState,
     LsfJobManager,
-    MergeNotAllowedError,
+    RemoveJobSetNotAllowedError,
     SubmitNotAllowedError,
 )
 
@@ -47,13 +46,13 @@ def test_close_rejected_while_gate_pending(qtbot, manager, fake_lsf):
 
     manager.submit(js, pre_submit=slow_gate, auto_poll=False)
     assert gate_entered.wait(3)
-    with pytest.raises(CloseNotAllowedError):
-        manager.close(js)                    # 게이트(제출) 진행 중 — 거부
+    with pytest.raises(RemoveJobSetNotAllowedError):
+        manager.remove_jobset(js)                    # 게이트(제출) 진행 중 — 거부
     release.set()
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         pass
     _finish(manager, fake_lsf, js)
-    manager.close(js)                        # 완주 후에는 정상 close
+    manager.remove_jobset(js)                        # 완주 후에는 정상 close
 
 
 # ----------------------------------------------------------------------
@@ -171,19 +170,19 @@ def test_poll_updated_after_shutdown_ignored(qtbot, fake_lsf, config):
 
 
 # ----------------------------------------------------------------------
-# F8: closed 계약 — 재획득/재제출/merge 전부 거부
+# F8: 삭제 계약 — 재획득/재제출/merge 전부 거부 (레코드가 없다)
 # ----------------------------------------------------------------------
-def test_closed_jobset_cannot_be_reused(qtbot, manager, fake_lsf):
+def test_removed_jobset_cannot_be_reused(qtbot, manager, fake_lsf):
     js = _submit_done(qtbot, manager, fake_lsf, ["customwrapper_sub a.sp"])
     jsid = js.id
-    manager.close(js)
-    with pytest.raises(JobSetClosedError):
+    manager.remove_jobset(js)
+    with pytest.raises(JobSetNotFoundError):
         manager.jobset(jsid)                 # 재획득 거부
-    with pytest.raises(SubmitNotAllowedError):
+    with pytest.raises(JobSetNotFoundError):
         manager.submit(jsid)                 # 문자열 id 직접 제출도 거부
     other = manager.create_jobset(["customwrapper_sub b.sp"])
-    with pytest.raises(MergeNotAllowedError):
-        manager.merge(jsid, other)           # 닫힌 target으로 merge 거부
+    with pytest.raises(JobSetNotFoundError):
+        manager.merge(jsid, other)           # 사라진 target으로 merge 거부
 
 
 # ----------------------------------------------------------------------
