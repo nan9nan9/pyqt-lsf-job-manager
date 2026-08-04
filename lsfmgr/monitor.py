@@ -308,9 +308,20 @@ class _PollWorker(QObject):
 
     @Slot(str, float)
     def start_polling(self, jobset_id: str, interval_s: float) -> None:
+        ms = int(interval_s * 1000)
+        cur = self._timers.get(jobset_id)
+        if cur is not None and cur.interval() == ms:
+            # 같은 주기로 이미 돌고 있다 — 재시작하지 않는다.
+            # 아래가 매번 타이머를 갈아끼우고 즉시 1회 조회까지 하므로,
+            # 그냥 두면 start_polling을 자주 부르는 경로(job 편집마다 부르는
+            # _resume_polling_if_watchable)가 ① 편집 1회당 bjobs 1회를 쏘고
+            # ② interval을 계속 리셋해 주기 tick이 영영 안 오게 하며
+            # ③ _idle_counts를 지워 auto-stop 조건 ②가 성립하지 않게 만든다.
+            # 즉시 갱신이 필요하면 poll_now(query_once)가 따로 있다.
+            return
         self.stop_polling(jobset_id)
         timer = QTimer(self)                 # 소속: polling 스레드
-        timer.setInterval(int(interval_s * 1000))
+        timer.setInterval(ms)
         timer.timeout.connect(lambda: self._poll(jobset_id))
         timer.start()
         self._timers[jobset_id] = timer

@@ -927,7 +927,11 @@ class LsfJobManager(QObject):
                 return False
             jobs = self._submit_targets(jobset_id, only)
             return bool(jobs) and all(r.state.is_inactive for r in jobs)
-        except LsfmgrError:
+        except (LsfmgrError, ValueError):
+            # ValueError까지 잡는다 — 술어는 "이 인자로 submit이 되겠는가"에
+            # 답하는 것이고, 잘못된 only(없는 ref·array element)면 답은 False다.
+            # 여기서 예외가 새면 버튼 갱신 루프에서 부르는 GUI가 죽는다
+            # (앱 버그 자체는 실제 submit 호출이 예외로 드러낸다).
             return False
 
     def _submit_targets(self, jobset_id: str,
@@ -943,13 +947,22 @@ class LsfJobManager(QObject):
             return [r for r in jobs if r.array_index is None]
         by_key = {r.job_key: r for r in jobs}
         by_mid = {r.merge_id: r for r in jobs if r.merge_id is not None}
-        by_jid = {r.job_id: r for r in jobs if r.job_id is not None}
+        # job_id 색인은 **parent만** 담는다 — array element는 parent와 job_id를
+        # 공유하므로 전부 넣으면 마지막 element가 parent를 덮어, job_id로 지정한
+        # parent가 "element는 개별 제출 불가"로 엉뚱하게 거부된다.
+        by_jid = {r.job_id: r for r in jobs
+                  if r.job_id is not None and r.array_index is None}
         out: List[JobRecord] = []
         seen = set()
         for ref in only:
             rec = (by_jid.get(ref) if isinstance(ref, int)
                    else (by_key.get(ref) or by_mid.get(ref)))
             if rec is None:
+                if isinstance(ref, int) and any(r.job_id == ref for r in jobs):
+                    # 그 id는 있는데 element뿐 — 정확한 이유를 알린다
+                    raise ValueError(
+                        f"array element는 개별 제출할 수 없습니다:"
+                        f" job_id={ref} (parent job을 제출하세요)")
                 raise JobNotFoundError(f"{jobset_id}/{ref}")
             if rec.array_index is not None:
                 raise ValueError(
