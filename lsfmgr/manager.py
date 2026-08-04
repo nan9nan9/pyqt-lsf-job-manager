@@ -726,15 +726,12 @@ class LsfJobManager(QObject):
         return new
 
     def _find_job(self, jobset_id: str, ref) -> JobRecord:
-        """job_key(str) / job_id(int) 로 단일 job 찾기."""
-        jobs = self.get_jobs(jobset_id)
-        if isinstance(ref, int):
-            hits = [r for r in jobs if r.job_id == ref]
-        else:
-            hits = [r for r in jobs if r.job_key == ref]
-        if not hits:
-            raise JobNotFoundError(f"{jobset_id}/{ref}")
-        return hits[0]
+        """job_key(str) / job_id(int) 로 단일 job 찾기.
+
+        해석은 _resolve_refs 하나로 통일한다 — 직접 훑으면 job_id가 array
+        parent와 element에 겹칠 때 '먼저 나온 것'을 골라, 같은 ref가 API마다
+        다른 job을 가리킨다(레코드 삽입 순서에 좌우된다)."""
+        return self._resolve_refs(jobset_id, [ref])[0]
 
     def add_handler(self, jobset_id: str, name: str,
                     fn: "Callable[[HandlerContext], Any]", *,
@@ -983,10 +980,14 @@ class LsfJobManager(QObject):
                    else by_key.get(ref))
             if rec is None:
                 if isinstance(ref, int) and any(r.job_id == ref for r in jobs):
-                    # 그 id는 있는데 element뿐 — 정확한 이유를 알린다
+                    # 그 id는 있는데 element뿐 — 정확한 이유를 알린다.
+                    # "job_key로 지정하라"고 단정하지 않는다: 삭제는 element를
+                    # job_key로 지정할 수 있지만 제출은 그래도 거부되므로,
+                    # 안내대로 했다가 또 막히는 모순이 된다. 사실만 말하고
+                    # 무엇이 가능한지는 각 명령의 오류가 이어서 알린다.
                     raise ValueError(
-                        f"job_id={ref}는 array element뿐입니다"
-                        f" (element는 job_key로 지정하세요)")
+                        f"job_id={ref}에 해당하는 job이 array element뿐입니다"
+                        f" (그 id의 parent 레코드가 없음)")
                 raise JobNotFoundError(f"{jobset_id}/{ref}")
             if rec.job_key in seen:              # 같은 job을 두 형태로 지정
                 continue

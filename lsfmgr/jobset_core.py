@@ -151,12 +151,16 @@ class JobSetManager:
                     jobset_id=jobset_id, job_keys=busy)
             _warn_orphans(jobset_id, olds, f"{policy}_jobs")
 
-            # 적용 — 교체는 같은 job_key 자리를 갈아끼운다
+            # 적용 — 교체는 **제자리**(update_job)로 한다. delete+add로 하면
+            # 그 job이 목록 끝으로 밀려, 키는 같은데 get_jobs() 순서가 바뀐다
+            # — 순서로 렌더링하는 표에서는 행이 점프해 "교체해도 행이
+            # 이어진다"는 계약이 깨진다.
             changed: List[JobRecord] = []
             for rec, old in plan:
-                if old is not None:                  # 같은 키 자리에 새 내용
-                    self.store.store_delete_job(jobset_id, old.job_key)
-                self.store.store_add_job(rec)
+                if old is not None:
+                    self.store.update_job(rec)
+                else:
+                    self.store.store_add_job(rec)
                 changed.append(rec)
             js = self.store.get_jobset(jobset_id)
             n = len(self.store.get_jobs(jobset_id))
