@@ -11,7 +11,7 @@ from .errors import (
     JobSetStateError,
     LsfCommandError,
     LsfmgrError,
-    MergeNotAllowedError,
+    JobEditNotAllowedError,
     RemoveJobSetNotAllowedError,
     RemoveNotAllowedError,
     SubmitError,
@@ -59,7 +59,7 @@ __all__ = [
     "ArgMaxExceededError",
     "JobSetStateError",
     "SubmitNotAllowedError",
-    "MergeNotAllowedError",
+    "JobEditNotAllowedError",
     "RemoveNotAllowedError",
     "RemoveJobSetNotAllowedError",
 ]

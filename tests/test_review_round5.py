@@ -55,16 +55,16 @@ def test_merge_during_active_submit_rejected(qtbot, config):
                                workers=1, auto_poll=False)
         assert mgr.submitter.is_active(js_active.id)
         with pytest.raises(LsfmgrError):
-            mgr.merge(js_done.id, js_active.id)
+            mgr.add_jobs(js_active.id, ["echo c"], merge_ids=["c"])
         lsf.gate.set()
         qtbot.waitUntil(lambda: not mgr.submitter.is_active(js_active.id),
                         timeout=10000)
-        # 소스가 온전해야 완료 후 merge는 정상 동작 (v9: 전원 비활성 필요)
+        # 사이클이 끝나면 편집이 다시 열린다
         for js in (js_done, js_active):
             lsf.set_all("DONE", 0)
             mgr.querier.query(js.id)
-        mgr.merge(js_done.id, js_active.id)
-        assert mgr.summary(js_done.id)["total"] == 3
+        mgr.add_jobs(js_active.id, ["echo c"], merge_ids=["c"])
+        assert mgr.summary(js_active.id)["total"] == 3
     finally:
         lsf.gate.set()
         mgr.shutdown()

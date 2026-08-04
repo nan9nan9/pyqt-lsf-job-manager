@@ -120,18 +120,16 @@ def test_overlapping_kills_keep_snapshot_registered(qtbot, manager, fake_lsf):
     assert manager.killer.is_active(jsid) is False # 전부 끝나면 해제
 
 
-def test_merge_during_active_kill_rejected(qtbot, manager, fake_lsf):
-    """kill 진행 중인 jobset은 merge를 거부한다 — 소스 삭제로 optimistic
-    EXIT 전이가 옛 jobset id로 실패하고, 복사된 레코드가 kill 결과를 반영
-    못 받는 것을 막는다 (submit 중 merge 거부와 대칭)."""
+def test_job_edit_during_active_kill_rejected(qtbot, manager, fake_lsf):
+    """kill 진행 중인 jobset은 job 목록 편집을 거부한다 — kill worker가 착수
+    시점 스냅샷으로 도는데 그 사이 목록이 바뀌면 결과가 어긋난다
+    (submit 중 편집 거부와 대칭)."""
     import pytest
 
     from lsfmgr.errors import LsfmgrError
 
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         a = submit_cmds(manager, ["echo a"], auto_poll=False)
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        b = submit_cmds(manager, ["echo b"], auto_poll=False)
 
     gate = threading.Event()
     try:
@@ -139,17 +137,14 @@ def test_merge_during_active_kill_rejected(qtbot, manager, fake_lsf):
         assert manager.killer.is_active(a.id)      # kill 진행 중
 
         with pytest.raises(LsfmgrError):
-            manager.merge(a.id, b.id)
+            manager.add_jobs(a.id, ["echo c"], merge_ids=["c"])
     finally:
         gate.set()
     with qtbot.waitSignal(manager.kill_finished, timeout=10000):
         pass                                       # kill 완료
 
-    # kill 완료 후: b(PEND=활성)가 남아 있으면 여전히 거부 (v9 비활성 가드)
-    assert manager.can_merge(a.id, b.id) is False
-    fake_lsf.set_all("DONE", 0)
-    manager.querier.query(b.id)                    # b 종료 반영 → 전원 비활성
-    manager.merge(a.id, b.id)                 # 이제 흡수 가능
+    # kill 완료 후에는 편집이 다시 열린다
+    manager.add_jobs(a.id, ["echo c"], merge_ids=["c"])
     assert manager.summary(a.id)["total"] == 2
 
 

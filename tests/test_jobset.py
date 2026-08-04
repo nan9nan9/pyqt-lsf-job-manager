@@ -62,31 +62,31 @@ def test_detect_lost_marks_lost(qtbot, manager, fake_lsf, submitted):
 # ----------------------------------------------------------------------
 # merge
 # ----------------------------------------------------------------------
-def test_merge_name_collision_is_atomic(qtbot, manager, fake_lsf):
-    """이름 충돌 merge는 **아무것도 반영하지 않고** 실패한다 (리뷰 H1 회귀 —
-    이전엔 충돌 전 job이 이미 target에 들어가 중복+summary 불변식 파손)."""
-    import pytest
-    from lsfmgr import JobRecord
-    tgt = manager.create_jobset(intended_count=0)
-    src = manager.create_jobset(intended_count=0)
-    manager.store.store_add_jobs([JobRecord(
-        job_id=None, array_index=None, jobset_id=tgt.id,
-        job_key="shared", state=JobState.CREATED, command="x")])
-    manager.store.store_add_jobs([
-        JobRecord(job_id=None, array_index=None, jobset_id=src.id,
-                  job_key="aaa_first", state=JobState.CREATED,
-                  command="a"),
-        JobRecord(job_id=None, array_index=None, jobset_id=src.id,
-                  job_key="shared", state=JobState.CREATED,
-                  command="b")])
-    with pytest.raises(ValueError, match="이름 충돌"):
-        manager.jobsets.merge_from(tgt.id, src.id)
-    # 원자성 — target/source 모두 원상 그대로
-    assert sorted(r.job_key for r in manager.store.get_jobs(tgt.id))         == ["shared"]
-    assert sorted(r.job_key for r in manager.store.get_jobs(src.id))         == ["aaa_first", "shared"]
-    s = manager.store.summary(tgt.id)
-    assert sum(v for k, v in s.items() if k != "total") <= max(s["total"], 1)
+def test_edit_jobs_validation_failure_is_atomic(qtbot, manager, fake_lsf):
+    """검증 실패 편집은 **아무것도 반영하지 않는다** (리뷰 H1 회귀 — 이전엔
+    충돌 전 job이 이미 들어가 중복+summary 불변식이 파손됐다).
 
+    배치 앞쪽은 멀쩡하고 뒤쪽만 위반하는 경우가 함정이다 — 루프 도중
+    예외면 앞쪽이 이미 반영된 채 중단된다."""
+    import pytest
+    js = manager.create_jobset(["customwrapper_sub keep.sp"],
+                               merge_ids=["keep"])
+
+    with pytest.raises(ValueError, match="이미 있습니다"):
+        manager.add_jobs(js,
+                         ["customwrapper_sub ok.sp", "customwrapper_sub bad.sp"],
+                         merge_ids=["fresh", "keep"])    # 두 번째만 위반
+    assert [r.merge_id for r in js.jobs()] == ["keep"]   # 앞쪽도 안 들어갔다
+
+    from lsfmgr.errors import JobNotFoundError
+    with pytest.raises(JobNotFoundError):
+        manager.replace_jobs(js,
+                             ["customwrapper_sub a.sp", "customwrapper_sub b.sp"],
+                             merge_ids=["keep", "nope"])  # 두 번째만 부재
+    assert js.jobs()[0].command == "customwrapper_sub keep.sp"
+
+    s = manager.store.summary(js.id)
+    assert sum(v for k, v in s.items() if k != "total") <= max(s["total"], 1)
 
 
 # ----------------------------------------------------------------------

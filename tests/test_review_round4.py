@@ -28,14 +28,11 @@ def test_kill_merged_wrapper_and_bsub_jobset(qtbot, manager, fake_lsf):
     """group 전략이 bsub job을 커버해도, 부착물이 없는 wrapper job은
     chunk fallback으로 반드시 죽여야 한다."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js_w = submit_cmds(manager, 
-            ["customwrapper_sub -i a.sp", "customwrapper_sub -i b.sp"], auto_poll=False, wrapper=True)
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js_b = submit_cmds(manager, ["echo x", "echo y"],
-                              auto_poll=False)
-    merged = js_b
-    manager.merge(js_b, js_w, force=True)   # 활성 — force 레코드 흡수
+        js_w = submit_cmds(manager, [                # 혼합 job 한 jobset
+            "customwrapper_sub -i a.sp", "customwrapper_sub -i b.sp",
+            "echo x", "echo y"], auto_poll=False)
     assert len(fake_lsf.alive_jobs()) == 4
+    merged = js_w
 
     with qtbot.waitSignal(manager.kill_finished, timeout=10000):
         manager.kill(merged)
@@ -49,12 +46,9 @@ def test_kill_merged_optimistic_no_false_exit(qtbot, manager, fake_lsf):
     """optimistic 정책이 LSF에 살아있는 job을 EXIT로 오표시하면 안 된다 —
     kill이 wrapper job까지 실제로 커버해야 store가 거짓말하지 않는다."""
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js_w = submit_cmds(manager, ["customwrapper_sub -i a.sp"], wrapper=True,
-                                      auto_poll=False)
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        js_b = submit_cmds(manager, ["echo x"], auto_poll=False)
-    merged = js_b
-    manager.merge(js_b, js_w, force=True)            # 활성 — force 레코드 흡수
+        merged = submit_cmds(manager,
+                             ["customwrapper_sub -i a.sp", "echo x"],
+                             auto_poll=False)        # 혼합 job 한 jobset
 
     with qtbot.waitSignal(manager.kill_finished, timeout=10000):
         manager.kill(merged)

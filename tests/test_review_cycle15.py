@@ -1,26 +1,23 @@
-"""전체 정독 리뷰 사이클 15 — merge 시점 폴링 재개 조건의 결함.
+"""전체 정독 리뷰 사이클 15 — job 추가 시점 폴링 재개 조건.
 
-C15-1 (live 결함): merge가 **source가 폴링 중이었을 때만** 폴링을 재개했다.
+C15-1 (live 결함): 당시 merge가 **source가 폴링 중이었을 때만** 폴링을
+재개했다 — target 자신의 폴링 기억은 min()의 피연산자로만 쓰이고 재개의
+근거로는 쓰이지 않았다. 그래서:
 
-    tgt_iv = self._poll_intervals.get(tid)
-    if src_iv is not None:                      # ← 결함
-        self.start_polling(tid, min(src_iv, tgt_iv) if tgt_iv else src_iv)
-
-target 자신의 폴링 기억(tgt_iv)이 min()의 피연산자로만 쓰이고 재개의 근거로는
-쓰이지 않는다. 그래서:
-
-  ① target 제출 → 폴링 시작 (_poll_intervals[tid]에 interval 기억)
+  ① jobset 제출 → 폴링 시작 (_poll_intervals에 interval 기억)
   ② 전원 terminal → monitor._maybe_auto_stop이 **서비스 타이머만** 끈다.
      manager의 기억은 남는다(재제출 시 되살리기 위한 설계).
-  ③ CREATED 상태의 신규 jobset을 merge → src_iv=None(그 batch는 폴링한 적
-     없음)이라 start_polling이 아예 안 불린다.
-  ④ target에 관찰할 일(비terminal job)이 다시 생겼는데 폴링은 죽은 채다.
+  ③ CREATED job이 새로 들어옴 → 재개 판단이 엉뚱한 근거를 보고 건너뛴다.
+  ④ 관찰할 일(비terminal job)이 다시 생겼는데 폴링은 죽은 채다.
      handler는 폴링 tick에 tie돼 있으므로(handlers.tick ← _on_poll_updated)
-     흡수된 신규 job에 대해 **영영 침묵**한다.
+     새 job에 대해 **영영 침묵**한다.
 
-사용자가 명시적으로 끈 폴링은 stop_polling이 기억까지 지우므로(둘 다 None)
-이 수정으로도 되살아나지 않는다 — "일부러 끈 폴링은 merge 이관으로 마음대로
-되살아나지 않는다"는 기존 계약은 그대로다.
+판단 기준은 "이 jobset에 아직 관찰할 job이 있는가" 하나다
+(manager._resume_polling_if_watchable). merge가 삭제되고 job 추가가
+add_jobs/upsert_jobs로 바뀐 뒤에도 같은 지점이 그 역할을 한다.
+
+※ 이 재개는 "사용자가 stop_polling으로 끈 폴링은 되살리지 않는다"는 계약보다
+  우선한다 — 관찰 대상이 있는데 조용히 멈춰 있는 쪽이 더 나쁜 실패이기 때문.
 """
 from __future__ import annotations
 
@@ -44,8 +41,8 @@ def _polling_on(mgr, jsid):
     return jsid in mgr.polling._worker._timers
 
 
-def test_merge_resumes_target_polling_after_auto_stop(qtbot):
-    """C15-1: 자동 중지된 target 폴링이 merge로 되살아난다."""
+def test_add_jobs_resumes_polling_after_auto_stop(qtbot):
+    """C15-1: 자동 중지된 폴링이 job 추가로 되살아난다."""
     fake = FakeLsf()
     mgr = _mgr(fake)
     try:
@@ -57,10 +54,9 @@ def test_merge_resumes_target_polling_after_auto_stop(qtbot):
         assert not _polling_on(mgr, js.id)
         assert mgr._poll_intervals.get(js.id) == 5.0     # 기억은 남는다
 
-        batch = mgr.create_jobset(["customwrapper_sub b.sp"], merge_ids=["b"])
-        mgr.merge(js, batch)                     # source는 폴링한 적 없음
+        mgr.add_jobs(js, ["customwrapper_sub b.sp"], merge_ids=["b"])
         qtbot.wait(150)
-        assert _polling_on(mgr, js.id), "흡수분이 있는데 폴링이 재개되지 않았다"
+        assert _polling_on(mgr, js.id), "추가분이 있는데 폴링이 재개되지 않았다"
     finally:
         mgr.shutdown()
 
@@ -93,11 +89,10 @@ def test_merged_job_handler_runs(qtbot):
         qtbot.waitUntil(lambda: not _polling_on(mgr, js.id), timeout=5000)
         assert js.is_done                        # 자동 중지는 전원 terminal로
 
-        batch = mgr.create_jobset(["customwrapper_sub b.sp"], merge_ids=["b"])
-        new_key = batch.jobs()[0].job_key
-        mgr.merge(js, batch)
+        added = mgr.add_jobs(js, ["customwrapper_sub b.sp"], merge_ids=["b"])
+        new_key = added[0].job_key
 
-        # 재제출은 흡수분 포함 전 job — 이후는 **타이머만** 관찰에 쓴다
+        # 재제출은 추가분 포함 전 job — 이후는 **타이머만** 관찰에 쓴다
         seen.clear()
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             mgr.submit(js, auto_poll=False)
@@ -109,10 +104,10 @@ def test_merged_job_handler_runs(qtbot):
         mgr.shutdown()
 
 
-def test_merge_resumes_even_if_polling_was_explicitly_stopped(qtbot):
+def test_add_resumes_even_if_polling_was_explicitly_stopped(qtbot):
     """판단 기준은 "볼 것이 있는가" — 기억(interval) 유무가 아니다.
 
-    사용자가 stop_polling으로 껐어도(= 기억까지 삭제) 흡수 후 관찰 대상이
+    사용자가 stop_polling으로 껐어도(= 기억까지 삭제) 추가 후 관찰 대상이
     남으면 기본 interval로 재개한다. "껐다"보다 "볼 것이 있다"가 우선한다 —
     관찰 대상이 있는데 조용히 멈춰 있으면 handler가 죽기 때문.
     """
@@ -128,57 +123,50 @@ def test_merge_resumes_even_if_polling_was_explicitly_stopped(qtbot):
 
         fake.set_all("DONE", 0)
         _poll(qtbot, mgr, js)
-        batch = mgr.create_jobset(["customwrapper_sub b.sp"], merge_ids=["b"])
-        mgr.merge(js, batch)                     # 흡수분(CREATED)이 남는다
+        mgr.add_jobs(js, ["customwrapper_sub b.sp"],
+                     merge_ids=["b"])            # 추가분(CREATED)이 남는다
         qtbot.waitUntil(lambda: _polling_on(mgr, js.id), timeout=5000)
     finally:
         mgr.shutdown()
 
 
-def test_merge_of_finished_sets_does_not_start_polling(qtbot):
-    """반대로 볼 것이 없으면 켜지 않는다 — 완료본 둘을 합친 경우
+def test_replace_of_finished_jobs_does_not_start_polling(qtbot):
+    """반대로 볼 것이 없으면 켜지 않는다 — 편집해도 결과가 전원 terminal이면
     쓸데없는 bjobs 호출이 나가면 안 된다."""
     fake = FakeLsf()
     mgr = _mgr(fake)
     try:
-        tgt = mgr.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
-        src = mgr.create_jobset(["customwrapper_sub b.sp"], merge_ids=["b"])
-        for js in (tgt, src):
-            with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-                mgr.submit(js, auto_poll=True, poll_interval_s=5)
+        js = mgr.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            mgr.submit(js, auto_poll=True, poll_interval_s=5)
         fake.set_all("DONE", 0)
-        _poll(qtbot, mgr, tgt)
-        _poll(qtbot, mgr, src)                   # 양쪽 다 전원 terminal
+        _poll(qtbot, mgr, js)                    # 전원 terminal → 자동 중지
+        qtbot.waitUntil(lambda: not _polling_on(mgr, js.id), timeout=5000)
 
-        mgr.merge(tgt, src)
+        # job을 지우면 남는 것도 없다 — 관찰 대상 0
+        mgr.clear_jobs(js)
         qtbot.wait(300)
-        assert not _polling_on(mgr, tgt.id), "볼 것이 없는데 폴링이 켜졌다"
+        assert not _polling_on(mgr, js.id), "볼 것이 없는데 폴링이 켜졌다"
     finally:
         mgr.shutdown()
 
 
-def test_source_polling_interval_still_transfers(qtbot):
-    """기존 계약 유지 — target이 폴링을 안 쓰는데 source가 쓰고 있었다면
-    그 interval을 target이 이어받는다. (재개 **여부**는 관찰 대상 유무로
-    판단하지만, 재개할 때 쓰는 **interval**은 여전히 src/tgt 중 짧은 쪽.)"""
+def test_resume_uses_remembered_interval(qtbot):
+    """재개 시 이 jobset의 기억된 interval을 쓴다 (없으면 기본값)."""
     fake = FakeLsf()
     mgr = _mgr(fake)
     try:
-        tgt = mgr.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
+        js = mgr.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
-            mgr.submit(tgt, auto_poll=False)     # target은 폴링 없음
+            mgr.submit(js, auto_poll=True, poll_interval_s=7)
         fake.set_all("DONE", 0)
-        _poll(qtbot, mgr, tgt)
-        assert mgr._poll_intervals.get(tgt.id) is None
+        _poll(qtbot, mgr, js)
+        qtbot.waitUntil(lambda: not _polling_on(mgr, js.id), timeout=5000)
+        assert mgr._poll_intervals.get(js.id) == 7.0     # 기억은 남는다
 
-        # source는 폴링 중(interval 7) + 아직 CREATED — 흡수 후 관찰 대상이 된다
-        src = mgr.create_jobset(["customwrapper_sub b.sp"], merge_ids=["b"])
-        mgr.start_polling(src, 7)
-        qtbot.wait(150)
-
-        mgr.merge(tgt, src)
+        mgr.add_jobs(js, ["customwrapper_sub b.sp"], merge_ids=["b"])
         qtbot.wait(200)
-        assert mgr._poll_intervals.get(tgt.id) == 7.0    # source에서 이관
-        assert _polling_on(mgr, tgt.id)
+        assert mgr._poll_intervals.get(js.id) == 7.0     # 그 값으로 재개
+        assert _polling_on(mgr, js.id)
     finally:
         mgr.shutdown()

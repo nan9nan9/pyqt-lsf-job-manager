@@ -6,8 +6,8 @@
   - create_jobset → submit: wrapper 커맨드 그대로 실행, `Job <id>` 캡처 관리
     (진행률 바 / 취소 / rate limit / retry)
   - 다중 JobSet 트리 + 요약 실시간 갱신 + job 테이블 증분 upsert (README §5)
-  - job 추가는 **merge**: 별도 batch jobset 생성 후 흡수 (v9 규칙)
-  - 실패 재실행: 같은 merge_id 로 교체(merge) 후 전체 재제출
+  - job 추가는 **add_jobs**: 기존 jobset 에 직접 추가
+  - 실패 재실행: 같은 merge_id 로 **replace_jobs** 교체 후 전체 재제출
   - kill: 전체(verify, **MC-aware** — 생성자 cluster_envpaths 로 분류 kill) /
     PEND만 / 선택 행만 (job_id chunk 단일 경로)
   - JobSet handler: RUN 중 폴링마다 job 출력 파싱 + 종료 시 최종 1회
@@ -39,7 +39,7 @@ from qtpy.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from lsfmgr import JobState
+from lsfmgr import JobState, LsfmgrError
 from lsfmgr.command import default_runner
 from common import (
     WRAPPERS, cluster_env_path, configure_mocklsf, install_logging,
@@ -137,7 +137,7 @@ class SubmitForm(QGroupBox):
         self.run_max = QSpinBox(minimum=0, maximum=3600, value=10)
         btn = QPushButton("Submit (새 JobSet)")
         btn.clicked.connect(on_submit)
-        btn_add = QPushButton("Add to selected (merge)")
+        btn_add = QPushButton("Add to selected")
         btn_add.clicked.connect(on_add)
 
         def _range(lo, hi):
@@ -335,21 +335,19 @@ class Dashboard(QWidget):
         self.mgr.start_polling(js, 1)        # 데모: 촘촘한 폴링(기본 10s)
 
     def add_to_selected(self):
-        """job 추가는 merge 로만 (v9) — batch jobset 을 만들어 흡수한다."""
+        """선택 jobset 에 job 을 직접 추가한다 (add_jobs)."""
         js = self._handle()
         if js is None:
             return
         n = len(js.jobs())
         cmds = self.form.commands(start=n)
-        batch = self.mgr.create_jobset(
-            cmds, merge_ids=[f"run_{n + i}" for i in range(len(cmds))])
-        if not self.mgr.can_merge(js, batch):
-            # 임시 batch 폐기 — CREATED 는 terminal 이 아니라 force 필요
-            self.mgr.remove_jobset(batch, force=True)
-            self._log(js.id, "추가 불가 — 활성 job 존재 (먼저 완료/kill)")
+        try:
+            self.mgr.add_jobs(
+                js, cmds, merge_ids=[f"run_{n + i}" for i in range(len(cmds))])
+        except LsfmgrError as e:
+            self._log(js.id, f"추가 불가: {e}")
             return
-        self.mgr.merge(js, batch)
-        self._log(js.id, f"{len(cmds)}건 merge 추가 — 총 {len(js.jobs())}건 "
+        self._log(js.id, f"{len(cmds)}건 추가 — 총 {len(js.jobs())}건 "
                          f"(미제출, Submit 은 전체 재제출)")
 
     def rerun_failed(self):
@@ -361,11 +359,12 @@ class Dashboard(QWidget):
         if not failed or not self.mgr.can_submit(js):
             self._log(js.id, "rerun 불가 — 실패분 없음 또는 활성 job 존재")
             return
-        fix = self.mgr.create_jobset(
-            [shlex.split(r.command) for r in failed],
+        # 같은 merge_id 로 교체 — job_key 가 유지돼 표의 행이 이어진다.
+        # (실무에선 여기서 커맨드를 고쳐 넣는다. 데모는 원본 그대로 재실행)
+        self.mgr.replace_jobs(
+            js, [shlex.split(r.command) for r in failed],
             merge_ids=[r.merge_id for r in failed],
             user_datas=[r.user_data for r in failed])
-        self.mgr.merge(js, fix)              # 같은 merge_id → 교체
         self.mgr.submit(js, post_process=self._summarize_results,
                         auto_poll=False)
         self.mgr.start_polling(js, 1)

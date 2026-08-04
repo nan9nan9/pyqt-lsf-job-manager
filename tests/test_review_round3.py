@@ -54,7 +54,7 @@ def test_real_loss_still_detected_after_recovery(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 # (R3-3: 부착물 일부 실패 fallback — v10에서 kill tier 삭제로 시나리오 소멸)
 # ----------------------------------------------------------------------
-# R3-4: merge 후 삭제된 원본 jobset을 영구 polling
+# R3-4: 삭제된 jobset을 영구 polling (merge source였던 시나리오 → remove_jobset)
 # ----------------------------------------------------------------------
 def test_merge_stops_polling_of_originals(qtbot, manager, fake_lsf):
     a = submit_cmds(manager, [f"a {i}" for i in range(3)])   # auto_poll 기본
@@ -67,10 +67,10 @@ def test_merge_stops_polling_of_originals(qtbot, manager, fake_lsf):
 
     errors = []
     manager.error_occurred.connect(lambda j, m: errors.append((j, m)))
-    manager.merge(a, b, force=True)                  # source(b) 삭제 + 핸들 파괴
+    manager.remove_jobset(b, force=True)         # b 삭제 + 핸들 파괴
     qtbot.wait(600)                              # 몇 polling 주기 경과
-    assert errors == [], f"삭제된 원본 polling으로 error 발생: {errors}"
-    assert a.summary["total"] == 6
+    assert errors == [], f"삭제된 jobset polling으로 error 발생: {errors}"
+    assert a.summary["total"] == 3
 
 
 # ----------------------------------------------------------------------
@@ -114,25 +114,6 @@ def test_polling_autostops_on_empty_jobset(qtbot, manager, fake_lsf):
     n = len(updates)
     qtbot.wait(400)
     assert len(updates) == n, "빈 jobset polling이 자동 중지되지 않음"
-
-
-# ----------------------------------------------------------------------
-# R3-9: merge job_key 충돌 시 silent overwrite → 선검사로 거부
-# ----------------------------------------------------------------------
-def test_merge_rejects_duplicate_job_keys(qtbot, manager, fake_lsf):
-    a = submit_cmds(manager, ["a 1", "a 2"], auto_poll=False)
-    b = submit_cmds(manager, ["b 1"], auto_poll=False)
-    qtbot.waitUntil(lambda: not manager.submitter.is_active(a.id)
-                    and not manager.submitter.is_active(b.id), timeout=10000)
-    # b에 a의 job_key와 동명인 레코드를 수동 편입 — 충돌 시나리오
-    dup_key = a.jobs()[0].job_key
-    manager.store.store_add_job(JobRecord(
-        job_id=None, array_index=None, jobset_id=b.id,
-        job_key=dup_key, state=JobState.CREATED, command=""))
-    with pytest.raises(ValueError, match="충돌"):
-        # dup_key(merge_id 없음 → 신규 추가 경로)가 양쪽에 존재 — force로
-        # 활성 가드를 지나도 key 충돌은 거부된다
-        manager.merge(a.id, b.id, force=True)
 
 
 # ----------------------------------------------------------------------

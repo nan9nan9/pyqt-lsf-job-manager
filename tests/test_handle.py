@@ -133,23 +133,6 @@ def test_removed_handle_raises(qtbot, manager, fake_lsf):
         manager.jobset(js.id)
 
 
-def test_merge_from_invalidates_source(qtbot, manager, fake_lsf):
-    """merge_from 후 source 핸들은 파괴(JobSetRemovedError), target은 유지."""
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        a = submit_cmds(manager, ["echo a"], auto_poll=False)
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        b = submit_cmds(manager, ["echo b"], auto_poll=False)
-    fake_lsf.set_all("DONE", 0)
-    manager.querier.query(a.id)
-    manager.querier.query(b.id)                  # 전원 비활성化
-
-    manager.merge(a, b)
-
-    assert a.summary["total"] == 2               # target 핸들 유지
-    with pytest.raises(JobSetRemovedError):
-        b.jobs()                                 # source 핸들 파괴
-
-
 def test_manager_kwargs_removed_option_ignored(qtbot, fake_lsf, config):
     """v10: default_queue/queue 등 bsub 조립 옵션은 제거 — 경고 후 무시되고
     생성/제출은 정상 동작한다 (기존 앱 하위 호환)."""

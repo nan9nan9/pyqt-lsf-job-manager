@@ -217,16 +217,18 @@ def test_merge_of_finished_jobsets_does_not_refire(qtbot, manager, fake_lsf):
         _finish(manager, fake_lsf, b)
     assert fired == [a.id, b.id]
 
-    manager.merge(a, b)                 # 완료본 흡수 — 전이 없음
+    manager.upsert_jobs(a, ["customwrapper_sub b.sp"], merge_ids=["b"],
+                        force=True)     # 완료본 교체 — 전이 없음
+    manager.remove_job(a, merge_id="b")  # 다시 완료 상태로
     manager.query_once(a)
     qtbot.wait(200)
     assert fired == [a.id, b.id]        # a 재발화 없음
 
 
 # ----------------------------------------------------------------------
-# merge로 **미완료** job이 들어오면 재무장 — 그 job이 끝날 때 다시 발화
+# **미완료** job이 추가되면 재무장 — 그 job이 끝날 때 다시 발화
 # ----------------------------------------------------------------------
-def test_merge_of_created_jobs_rearms(qtbot, manager, fake_lsf):
+def test_added_created_jobs_rearm(qtbot, manager, fake_lsf):
     fired = []
     manager.jobset_finished.connect(lambda j, s: fired.append(j))
 
@@ -236,8 +238,8 @@ def test_merge_of_created_jobs_rearms(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(a.jobset_finished, timeout=10000):
         _finish(manager, fake_lsf, a)
 
-    add = manager.create_jobset(["customwrapper_sub c.sp"], merge_ids=["c"])
-    manager.merge(a, add)               # CREATED 1건 추가 — 다시 미완료
+    manager.add_jobs(a, ["customwrapper_sub c.sp"],
+                     merge_ids=["c"])   # CREATED 1건 추가 — 다시 미완료
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(a, auto_poll=False)
     with qtbot.waitSignal(a.jobset_finished, timeout=10000) as blk:

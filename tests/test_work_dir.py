@@ -50,16 +50,15 @@ def test_work_dir_and_work_dirs_mutually_exclusive(qtbot, manager):
 
 
 # ----------------------------------------------------------------------
-# merge: merge_id 일치 job은 work_dir도 신규(source) 것으로 교체된다
+# replace_jobs: 교체되는 job은 work_dir도 새것으로 바뀐다
 # ----------------------------------------------------------------------
-def test_merge_replaces_work_dir_by_merge_id(qtbot, manager):
+def test_replace_jobs_replaces_work_dir(qtbot, manager):
     tgt = manager.create_jobset(["customwrapper_sub a.sp"],
                                 merge_ids=["a"], work_dir="/old")
-    src = manager.create_jobset(["customwrapper_sub a.sp"],
-                                merge_ids=["a"], work_dir="/new")
-    manager.merge(tgt, src)
+    manager.replace_jobs(tgt, ["customwrapper_sub a.sp"],
+                         merge_ids=["a"], work_dir="/new")
     rec = next(r for r in tgt.jobs() if r.merge_id == "a")
-    assert rec.submit_cwd == "/new"      # 신규 source work_dir로 교체(교체 규칙)
+    assert rec.submit_cwd == "/new"      # 새 work_dir로 교체(교체 규칙)
 
 
 # ----------------------------------------------------------------------

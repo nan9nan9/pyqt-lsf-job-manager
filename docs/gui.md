@@ -368,15 +368,14 @@ def on_rerun_failed(self):
     failed = [r for r in js.jobs() if r.state.is_failed]
     if not failed or not self.mgr.can_submit(js):
         return                                 # 활성 job 있으면 먼저 kill
-    fix = self.mgr.create_jobset(
-        [shlex.split(r.command) for r in failed],
+    self.mgr.replace_jobs(                     # 같은 merge_id → CREATED 교체
+        js, [shlex.split(r.command) for r in failed],
         merge_ids=[r.merge_id for r in failed],
-        user_datas=[r.user_data for r in failed], label="rerun")
-    self.mgr.merge(js, fix)                    # 같은 merge_id → CREATED 교체
+        user_datas=[r.user_data for r in failed])
     self.mgr.submit(js)                        # 전 job 재제출
 ```
 
-- `mgr.merge`의 replace는 **물리 key(job_key)를 유지**하므로 테이블 행이 그대로
+- `replace_jobs`는 **물리 key(job_key)를 유지**하므로 테이블 행이 그대로
   이어진다(§7의 upsert 맵이 안 깨진다).
 - 살아있는 job이 남았으면 `mgr.submit`이 거부한다 — `mgr.kill(js)` 후
   `kill_finished`에서 이어가거나 `can_submit`으로 버튼을 비활성화한다.

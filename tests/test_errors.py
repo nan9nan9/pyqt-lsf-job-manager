@@ -11,7 +11,7 @@ from lsfmgr import (
     RemoveJobSetNotAllowedError,
     JobSetStateError,
     LsfmgrError,
-    MergeNotAllowedError,
+    JobEditNotAllowedError,
     RemoveNotAllowedError,
     SubmitNotAllowedError,
 )
@@ -26,7 +26,7 @@ def _finish(manager, fake_lsf, js):
 # 계층 — 전부 JobSetStateError → LsfmgrError 하위
 # ----------------------------------------------------------------------
 def test_hierarchy():
-    for exc in (SubmitNotAllowedError, MergeNotAllowedError,
+    for exc in (SubmitNotAllowedError, JobEditNotAllowedError,
                 RemoveNotAllowedError, RemoveJobSetNotAllowedError):
         assert issubclass(exc, JobSetStateError)
         assert issubclass(exc, LsfmgrError)
@@ -57,13 +57,12 @@ def test_submit_not_allowed_empty(manager):
 # ----------------------------------------------------------------------
 # merge 불가 — 활성 job
 # ----------------------------------------------------------------------
-def test_merge_not_allowed_active(qtbot, manager, fake_lsf):
+def test_job_edit_not_allowed_active(qtbot, manager, fake_lsf):
     a = manager.create_jobset(["customwrapper_sub a.sp"], merge_ids=["m1"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(a, auto_poll=False)
-    b = manager.create_jobset(["customwrapper_sub v2.sp"], merge_ids=["m1"])
-    with pytest.raises(MergeNotAllowedError) as ei:
-        manager.merge(a, b)
+    with pytest.raises(JobEditNotAllowedError) as ei:
+        manager.replace_jobs(a, ["customwrapper_sub v2.sp"], merge_ids=["m1"])
     assert ei.value.job_keys
 
 

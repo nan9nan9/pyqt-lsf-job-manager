@@ -41,13 +41,13 @@ GUI 앱이 직접 갖고**, 라이브러리는 그 결정을 실행하는 CRUD +
 **명령은 전부 `mgr.*` 한 곳**이고, **JobSet 핸들은 조회(pull) + Signal 전용 뷰**다.
 
 ```
-명령 (전부 async→Signal)   mgr.submit(js) / mgr.kill(js) / mgr.merge(a,b) / ...
+명령 (전부 async→Signal)   mgr.submit(js) / mgr.kill(js) / mgr.add_jobs(js,…) / ...
                           인자는 JobSet 핸들 또는 jobset_id 문자열 (_jsid 정규화)
 조회 (전부 sync, snapshot)  js.jobs() / js.summary / js.is_* / mgr.get_jobs(js) ...
 Signal                    js.<signal> (해당 JobSet만) 또는 mgr.<signal>(jsid, ...) (전역)
 ```
 
-### 1.1 기본 흐름 — 생성 → (필요 시 merge) → submit
+### 1.1 기본 흐름 — 생성 → (필요 시 편집) → submit
 
 ```python
 mgr = LsfJobManager()
@@ -55,7 +55,7 @@ mgr = LsfJobManager()
 # job 생성은 create_jobset 한 곳 — 생성 시 job까지 함께 만든다
 js = mgr.create_jobset(
     ["customwrapper_sub -i a.sp", "customwrapper_sub -i b.sp"],
-    merge_ids=["case-a", "case-b"],            # 논리 키 (merge 시 replace 기준)
+    merge_ids=["case-a", "case-b"],            # 논리 키 (교체 대상 기준)
     user_datas=[{"rev": 3}, None],             # job별 사용자 데이터 (보존만)
     label="sweep")
 
@@ -65,8 +65,9 @@ if mgr.can_submit(js):
     mgr.submit(js, workers=8)                  # 전 job (재)제출
 ```
 
-- **생성 후 job 추가는 오직 merge** — 별도 jobset을 만들어 `mgr.merge(js, src)`로
-  흡수한다.
+- **생성 후 job 목록 편집은 3형제** — `add_jobs`(추가) / `replace_jobs`(교체) /
+  `upsert_jobs`(있으면 교체, 없으면 추가). 인자는 `create_jobset`과 같은 모양이고,
+  교체는 물리 키(job_key)를 유지해 테이블 행이 이어진다.
 - 라이프사이클 자동화:
   - **AUTO-1**: `submit()` 시 polling 자동 시작 (`auto_poll=False`로 해제)
   - **AUTO-2**: JobSet 전원 terminal(또는 활동 없음 2사이클) 도달 시 polling 자동 중지
@@ -99,8 +100,10 @@ if mgr.can_submit(js):
 mgr.create_jobset(commands=(), *, merge_ids=None, user_datas=None,
                   work_dir=None, work_dirs=None,
                   label="", tags=(), intended_count=0) -> JobSet
-mgr.merge(target, source, *, force=False) -> list[JobRecord]  # in-place 흡수
-mgr.can_merge(target, source) -> bool
+mgr.add_jobs(js, commands, *, merge_ids=None, user_datas=None,
+             work_dir=None, work_dirs=None) -> list[JobRecord]
+mgr.replace_jobs(js, commands, *, merge_ids, ..., force=False) -> list[JobRecord]
+mgr.upsert_jobs(js, commands, *, merge_ids, ..., force=False) -> list[JobRecord]
 mgr.remove_job(js, *, job_id=None, merge_id=None, job_key=None, force=False)
 mgr.clear_jobs(js, *, force=False)               # job만 전부 삭제 (jobset은 남음)
 mgr.set_user_data(js, ref, user_data)            # ref = job_key | merge_id | job_id
@@ -154,7 +157,7 @@ class JobSet(QObject):
     def jobs(self, states=None) -> list[JobRecord]: ...
 ```
 
-- **핸들에 명령 메서드는 없다** — kill/merge/submit 등은 전부 `mgr.*`.
+- **핸들에 명령 메서드는 없다** — kill/add_jobs/submit 등은 전부 `mgr.*`.
 - JobSet 재획득: `mgr.jobset(jobset_id)`. 파괴된 핸들 접근 시 `JobSetRemovedError`.
 
 ---
@@ -193,7 +196,7 @@ class JobState(Enum):
   "전원 terminal"은 **모두 성공(DONE)이 아니라 모두 끝남**을 뜻한다(post_process
   발화 조건, FR-10).
 - 그 밖: `is_failed` {EXIT, SUBMIT_FAILED, LOST} / `is_on_lsf` {PEND/RUN/SUSP\*/
-  UNKWN/ZOMBI} / **`is_inactive`** = CREATED **또는** terminal (submit/merge/remove의
+  UNKWN/ZOMBI} / **`is_inactive`** = CREATED **또는** terminal (submit/편집/remove의
   공통 "비활성" 술어 — terminal보다 넓다: CREATED는 "아직 제출 안 함"이라 terminal은
   아니지만 inactive).
 - 전이: `CREATED → SUBMITTING → PEND → RUN → DONE|EXIT`, 실패 시 `RETRY_WAIT`(n<N)
@@ -201,7 +204,7 @@ class JobState(Enum):
   cancel/kill(미제출) 시 `SUBMITTING/RETRY_WAIT → CREATED`.
 - 전이는 Store 경유만(원자적 `transition`).
 - `JobRecord`/`JobSetRecord`: frozen dataclass.
-- **불변식: 요약 상태별 합계 == intended_count** (remove/merge도 유지).
+- **불변식: 요약 상태별 합계 == intended_count** (remove/편집도 유지).
 
 ---
 
@@ -227,7 +230,7 @@ Exception
     └── JobSetStateError              # **전제조건 위반** — "지금은 이 명령 불가"
             .jobset_id / .job_keys    #   막은 원인을 구조화(메시지 파싱 불필요)
         ├── SubmitNotAllowedError     # 활성 job / 제출할 job 없음 / submit·kill 진행 중
-        ├── MergeNotAllowedError      # 양쪽 활성 job / submit·kill 진행 중
+        ├── JobEditNotAllowedError    # 교체 대상 활성 / submit·kill 진행 중
         ├── RemoveNotAllowedError     # remove_job·clear_jobs 대상이 활성 (force로 강제)
         └── RemoveJobSetNotAllowedError  # 전원 terminal 아님 (force=True로 강제)
 ```
@@ -236,7 +239,7 @@ Exception
   라이브러리 오류를 전부 포착할 수 있다.
 - **ERR-2 상태 vs 입력 구분**: 현재 상태에서 허용되지 않는 명령은 `JobSetStateError`
   계열(도메인), 잘못된 인자는 `ValueError`/`TypeError`. 전자는
-  `can_submit()`/`can_merge()`로 사전 회피 가능.
+  `can_submit()`으로 사전 회피 가능.
 - **ERR-3 구조화 정보**: `JobSetStateError`는 `.jobset_id`와 걸린 `.job_keys`를 담아,
   GUI가 메시지 문자열을 파싱하지 않고 어느 job이 막았는지 알 수 있다.
 - **ERR-4 이름 구분**: `SubmitError`(제출 실행 실패)와 `SubmitNotAllowedError`
@@ -304,7 +307,7 @@ JobSetStore(ABC) ── InMemoryStore
   - **FR-1.2** stdout에서 `Job <(\d+)>` 파싱으로 job_id 확보. 실패 시
     `NO_JOBID_PARSED`.
   - **FR-1.3** 제출 subprocess의 cwd는 `work_dir`/`work_dirs`(job별 `submit_cwd`)로
-    지정하며 재제출·merge에 보존된다. `os.chdir` 금지(스레드 안전).
+    지정하며 재제출·교체에 보존된다. `os.chdir` 금지(스레드 안전).
   - **FR-1.4** job_key = `<jsid>_<idx>` (내부 키 — LSF에 부착하지 않음).
 - **FR-2 Retry**: 실패 감지(exit≠0/파싱 실패/timeout) + fail_reason 분류, 최대
   `max_retry`회, `retry_backoff` 정책(**FR-2.1** timeout, **FR-2.2** backoff),
@@ -342,10 +345,12 @@ JobSetStore(ABC) ── InMemoryStore
   - **FR-5.1** 요약(불변식 합계==intended_count), **FR-5.2** intended_count 정합,
   - **FR-5.3** 손실 감지(`detect_lost` — ID 미확보 SUBMITTING → LOST 확정),
   - **FR-5.4** 생성(`create_jobset` 한 곳: commands/merge_ids/user_datas/work_dir(s))
-    — **이후 추가는 merge만**,
-  - **FR-5.5** merge: in-place 흡수(target 핸들/테이블 유지, source 소멸),
-    merge_id 일치=replace(물리 키 유지)/불일치·None=추가, 가드=양쪽 전원 비활성
-    (`can_merge`), `force`=레코드만 강제(LSF 정리는 앱 책임), 폴링 source→target 이관,
+    — 이후 편집은 FR-5.5,
+  - **FR-5.5** 편집 3형제(add_jobs/replace_jobs/upsert_jobs): merge_id가 이미
+    있을 때의 처리만 다르다(거부/교체/교체). 교체는 물리 키(job_key) 유지 —
+    테이블 행 연속. 가드=submit·kill 미진행 + 교체 대상이 비활성,
+    `force`=레코드만 강제(LSF 정리는 앱 책임). 편집 후 관찰 대상이 있으면
+    폴링 자동 재개, 변경분의 handler 장부는 무효화,
   - **FR-5.6** remove_job(job_id/merge_id/job_key, force)·clear_jobs(force) — 비활성만,
     force로 레코드만 강제 삭제, intended_count 함께 감소,
   - **FR-5.7** remove_jobset — 전원 terminal일 때 jobset을 **레코드째 삭제**
@@ -377,7 +382,7 @@ JobSetStore(ABC) ── InMemoryStore
   **무관**하게 job 상태만 보고 판정하므로, 아무것도 등록하지 않은 jobset도 완료를
   통지받는다. 감지 지점은 FR-10과 같은 공통 지점(폴링/`query_once`/submit 완료)이며,
   `post_process`도 걸었다면 `jobset_finished → post_processing_started` 순서다.
-  **재무장**: 다시 non-terminal이 되면(재제출·merge로 job 추가) latch가 풀려 다음
+  **재무장**: 다시 non-terminal이 되면(재제출·job 추가) latch가 풀려 다음
   완료에 또 발화한다 — "완료"는 제출 사이클이 아니라 jobset 상태의 성질이다.
   job이 하나도 없는 빈 jobset에서는 발화하지 않는다.
   **사용자 kill 억제**: `mgr.kill(js)`/`kill_jobs`로 끝난 완료는 발화하지 않는다
@@ -441,7 +446,7 @@ lsfmgr/
 ├── monitor.py           # PollingService (QThread+QTimer) + query_once + chunk 격리/회로차단
 ├── killer.py            # chunked bkill + env 분류 + verify + 확인 재시도
 ├── handlers.py          # JobSetHandlerService — job별 주기 handler (FR-7)
-├── jobset_core.py       # JobSet 도메인 로직 — local_* / merge_from
+├── jobset_core.py       # JobSet 도메인 로직 — local_* (편집/삭제 공용 몸통)
 ├── handle.py            # JobSet 핸들 (조회 + Signal 전용 뷰)
 ├── pacer.py             # progress throttle / 상태 전이 dwell
 ├── util.py
@@ -457,7 +462,7 @@ Qt 비의존 유지: options/config/states/command/store/jobset_core (Qt 없이 
 
 1. 5,000개 submit — ID 파싱 100% 또는 실패분 정확 분류
 2. 5,000개 kill — chunk 분할로 ARG_MAX 에러 없음, 미확인분 재시도
-3. 요약 합계 == intended_count (생성/merge/remove 후에도)
+3. 요약 합계 == intended_count (생성/편집/remove 후에도)
 4. polling 호출 횟수 ∝ JobSet 수 × chunk 수 (job 수에 선형 폭증 없음)
 5. bjobs 소실 → LOST 누락 없음, 조회 실패 섞이면 보류(FR-4.3), 연속 미발견 유예 준수
 6. GUI 응답성 — main 스레드 100ms 이상 정지 없음
@@ -472,9 +477,9 @@ Qt 비의존 유지: options/config/states/command/store/jobset_core (Qt 없이 
 14. **JobSet Signal**: 해당 JobSet 이벤트만 수신, `mgr.*` Signal과 이중 발행 일치
 15. **handler (FR-7)**: start/end state 구간 준수(시작 전 미발화·종료 시 final 1회),
     예외 격리, 폴링 사이클 구동, 재제출 후 재무장
-16. **생성/merge (FR-5.4/5.5)**: create_jobset가 유일 생성 경로, 추가는 merge만,
+16. **생성/편집 (FR-5.4/5.5)**: create_jobset가 유일 생성 경로, 이후는 편집 3형제,
     merge_id replace 시 물리 키 유지·요약 불변식, force는 레코드만
-17. **재실행**: `mgr.merge(js, fix) + mgr.submit(js)`로 실패분 교체 후 전체 재실행,
+17. **재실행**: `mgr.replace_jobs(js, …) + mgr.submit(js)`로 실패분 교체 후 전체 재실행,
     merge_id·user_data·submit_cwd 보존
 18. **pre_submit 게이트 (FR-9)**: False/예외 시 레코드 원상, 신호 순서 보장,
     통과 후에만 rearm/AUTO-1

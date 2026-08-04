@@ -1,9 +1,12 @@
-"""v9 jobset 계약 — create_jobset(commands·merge_id·user_data로 job까지 생성)/
-merge_from(in-place replace)/remove·clear(force 가드)/can_*/submit(전체 재제출).
+"""jobset 계약 — create_jobset(commands·merge_id·user_data로 job까지 생성)/
+편집 3형제(add_jobs·replace_jobs·upsert_jobs)/remove·clear(force 가드)/
+can_submit/submit(전체 재제출).
 
 GUI가 job control을 직접 갖는 구조: 라이브러리는 CRUD+submit+kill+poll만
-제공하고, job 생성은 create_jobset 한 곳, 이후 추가는 merge로만, 재실행은
-'merge로 교체 후 submit'으로 표현한다 (resubmit·create_job(s) 제거).
+제공하고, 재실행은 별도 파이프라인이 아니라 "replace_jobs로 교체 후 submit"
+이라는 데이터 조작으로 표현한다 (resubmit 제거).
+job 추가는 add_jobs로 직접 한다 — 임시 jobset을 만들어 흡수하던 merge는
+삭제됐다(그 간접성이 폴링·handler 규칙을 애매하게 만든 원인이었다).
 """
 from __future__ import annotations
 
@@ -11,7 +14,7 @@ import shlex
 
 import pytest
 
-from lsfmgr import JobState
+from lsfmgr import JobEditNotAllowedError, JobState
 from lsfmgr.errors import JobNotFoundError, LsfmgrError
 
 
@@ -89,184 +92,105 @@ def test_set_user_data_by_refs(qtbot, manager, fake_lsf):
 
 
 # ----------------------------------------------------------------------
-# merge_from — merge_id 규칙 (생성 후 job 추가는 merge로만)
+# job 편집 3형제 — add_jobs / replace_jobs / upsert_jobs
 # ----------------------------------------------------------------------
-def test_merge_from_replace_keeps_physical_key(qtbot, manager, fake_lsf):
-    """같은 merge_id → replace: 물리 키(job_key)는 target 것 유지(테이블 행
-    연속), 내용(command/user_data)은 source 것으로 교체."""
+def test_replace_jobs_keeps_physical_key(qtbot, manager, fake_lsf):
+    """교체는 물리 키(job_key)를 유지한다 — GUI 표의 행이 이어진다.
+    내용(command/user_data)만 새것으로 바뀐다."""
     a = manager.create_jobset(
         ["customwrapper_sub v1.sp", "customwrapper_sub keep.sp"],
         merge_ids=["m1", "keep"], user_datas=[{"ver": 1}, None], label="target")
     old = next(r for r in a.jobs() if r.merge_id == "m1")
-    b = manager.create_jobset(
-        ["customwrapper_sub v2.sp"], merge_ids=["m1"],
-        user_datas=[{"ver": 2}], label="source")
 
-    changed = manager.merge(a, b)
+    changed = manager.replace_jobs(
+        a, ["customwrapper_sub v2.sp"], merge_ids=["m1"],
+        user_datas=[{"ver": 2}])
 
     by_mid = {r.merge_id: r for r in a.jobs()}
     rep = by_mid["m1"]
-    assert rep.job_key == old.job_key           # 물리 키 유지
-    assert rep.command == "customwrapper_sub v2.sp"   # 내용은 source
+    assert rep.job_key == old.job_key                  # 물리 키 유지
+    assert rep.command == "customwrapper_sub v2.sp"    # 내용은 새것
     assert rep.user_data == {"ver": 2}
     assert by_mid["keep"].command == "customwrapper_sub keep.sp"
-    assert a.summary["total"] == 2
-    assert any(r.merge_id == "m1" for r in changed)
+    assert a.summary["total"] == 2                     # 늘지 않는다
+    assert [r.merge_id for r in changed] == ["m1"]
 
 
-def test_merge_from_adds_new_and_none_merge_ids(manager):
-    """merge_id가 target에 없거나 None이면 신규 추가."""
+def test_add_jobs_appends_and_rejects_duplicate(manager):
+    """추가는 순수 추가 — merge_id가 이미 있으면 ValueError."""
     a = manager.create_jobset(["customwrapper_sub a.sp"], merge_ids=["m1"])
-    b = manager.create_jobset(
-        ["customwrapper_sub new.sp", "customwrapper_sub anon.sp"],
-        merge_ids=["m2", None])              # m2=미존재 추가 / None=추가
 
-    manager.merge(a, b)
-
+    manager.add_jobs(a, ["customwrapper_sub new.sp", "customwrapper_sub x.sp"],
+                     merge_ids=["m2", None])       # 미존재 / None 둘 다 추가
     assert a.summary["total"] == 3
     assert {r.merge_id for r in a.jobs()} == {"m1", "m2", None}
 
-
-def test_merge_from_destroys_source(qtbot, manager, fake_lsf):
-    from lsfmgr import JobSetRemovedError
-
-    a = manager.create_jobset()
-    b = manager.create_jobset(["customwrapper_sub x.sp"])
-    manager.merge(a, b)
-    with pytest.raises(JobSetRemovedError):
-        b.jobs()                                # source 핸들 파괴
-    with pytest.raises(LsfmgrError):
-        manager.summary(b.id)                   # jobset 자체 삭제
+    with pytest.raises(ValueError, match="이미 있습니다"):
+        manager.add_jobs(a, ["customwrapper_sub dup.sp"], merge_ids=["m1"])
+    assert a.summary["total"] == 3                # 한 건도 안 들어갔다
 
 
-def test_merge_from_guard_and_force(qtbot, manager, fake_lsf):
-    """활성(RUN/PEND) job이 있으면 거부, force면 레코드만 교체 진행."""
+def test_add_jobs_key_does_not_collide_after_remove(manager):
+    """remove_job으로 중간이 빈 뒤 추가해도 job_key가 충돌하지 않는다."""
+    a = manager.create_jobset(
+        ["customwrapper_sub a.sp", "customwrapper_sub b.sp"],
+        merge_ids=["m1", "m2"])
+    manager.remove_job(a, merge_id="m1")          # _0 이 비었다
+    manager.add_jobs(a, ["customwrapper_sub c.sp"], merge_ids=["m3"])
+    keys = [r.job_key for r in a.jobs()]
+    assert len(keys) == len(set(keys)) == 2
+
+
+def test_replace_jobs_requires_existing_target(manager):
+    """교체 대상이 없으면 JobNotFoundError — 추가하려면 add/upsert."""
+    a = manager.create_jobset(["customwrapper_sub a.sp"], merge_ids=["m1"])
+    with pytest.raises(JobNotFoundError):
+        manager.replace_jobs(a, ["customwrapper_sub z.sp"], merge_ids=["nope"])
+    with pytest.raises(ValueError, match="merge_ids가 필요"):
+        manager.replace_jobs(a, ["customwrapper_sub z.sp"], merge_ids=[None])
+
+
+def test_upsert_jobs_replaces_or_adds(manager):
+    """있으면 교체, 없으면 추가 — 한 번에 반영."""
+    a = manager.create_jobset(["customwrapper_sub a.sp"], merge_ids=["m1"])
+    old = a.jobs()[0]
+
+    manager.upsert_jobs(
+        a, ["customwrapper_sub a2.sp", "customwrapper_sub b.sp"],
+        merge_ids=["m1", "m2"])
+
+    by_mid = {r.merge_id: r for r in a.jobs()}
+    assert a.summary["total"] == 2
+    assert by_mid["m1"].job_key == old.job_key            # 교체(키 유지)
+    assert by_mid["m1"].command == "customwrapper_sub a2.sp"
+    assert by_mid["m2"].command == "customwrapper_sub b.sp"   # 추가
+
+
+def test_edit_rejects_duplicate_merge_id_in_one_call(manager):
+    """한 호출 안에서 같은 merge_id가 두 번 오면 ValueError."""
+    a = manager.create_jobset([])
+    with pytest.raises(ValueError, match="중복"):
+        manager.add_jobs(a, ["customwrapper_sub a.sp", "customwrapper_sub b.sp"],
+                         merge_ids=["same", "same"])
+
+
+def test_replace_jobs_guard_and_force(qtbot, manager, fake_lsf):
+    """교체 대상이 활성이면 거부, force면 레코드만 교체 진행."""
     a = manager.create_jobset(["customwrapper_sub run.sp"], merge_ids=["m1"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(a, auto_poll=False)               # m1이 PEND(활성)로
 
-    b = manager.create_jobset(["customwrapper_sub v2.sp"], merge_ids=["m1"])
-
-    assert manager.can_merge(a, b) is False
-    with pytest.raises(LsfmgrError, match="활성"):
-        manager.merge(a, b)
+    with pytest.raises(JobEditNotAllowedError, match="활성"):
+        manager.replace_jobs(a, ["customwrapper_sub v2.sp"], merge_ids=["m1"])
 
     live_id = a.jobs()[0].job_id
-    manager.merge(a, b, force=True)                 # 레코드만 강제 교체
+    manager.replace_jobs(a, ["customwrapper_sub v2.sp"], merge_ids=["m1"],
+                         force=True)                     # 레코드만 강제 교체
     rec = a.jobs()[0]
-    assert rec.state is JobState.CREATED        # source 상태로 교체됨
+    assert rec.state is JobState.CREATED
     assert rec.command == "customwrapper_sub v2.sp"
     # LSF의 실제 job은 그대로 산다 — 정리는 caller(GUI) 책임
     assert any(j.job_id == live_id for j in fake_lsf.alive_jobs())
-
-
-def test_can_merge_true_when_all_inactive(qtbot, manager, fake_lsf):
-    a = manager.create_jobset(["customwrapper_sub a.sp"])
-    b = manager.create_jobset(["customwrapper_sub b.sp"])
-    assert manager.can_merge(a, b) is True               # 전원 CREATED
-
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        manager.submit(a, auto_poll=False)
-    assert manager.can_merge(a, b) is False              # PEND 활성
-    _finish_all(manager, fake_lsf, a)
-    assert manager.can_merge(a, b) is True               # DONE(종료) — 다시 가능
-
-
-# ----------------------------------------------------------------------
-# remove_job / clear
-# ----------------------------------------------------------------------
-def test_remove_job_by_merge_id_and_job_id(qtbot, manager, fake_lsf):
-    js = manager.create_jobset(
-        ["customwrapper_sub a.sp", "customwrapper_sub b.sp"],
-        merge_ids=["m1", "m2"])
-
-    removed = manager.remove_job(js, merge_id="m1")      # CREATED — 비활성이라 즉시
-    assert [r.merge_id for r in removed] == ["m1"]
-    assert js.summary["total"] == 1
-
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        manager.submit(js, auto_poll=False)
-    _finish_all(manager, fake_lsf, js)          # DONE(종료 상태)
-    jid = js.jobs()[0].job_id
-    manager.remove_job(js, job_id=jid)                   # job_id 기준, 종료라 허용
-    assert js.jobs() == [] and js.summary["total"] == 0
-
-
-def test_remove_job_active_requires_force(qtbot, manager, fake_lsf):
-    js = manager.create_jobset(["customwrapper_sub a.sp"], merge_ids=["m1"])
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        manager.submit(js, auto_poll=False)              # PEND(활성)
-
-    with pytest.raises(LsfmgrError, match="활성"):
-        manager.remove_job(js, merge_id="m1")
-    manager.remove_job(js, merge_id="m1", force=True)    # 레코드만 강제 삭제
-    assert js.jobs() == []
-
-    with pytest.raises(JobNotFoundError):
-        manager.remove_job(js, merge_id="없는것")
-
-
-def test_remove_job_without_selector_never_means_all(qtbot, manager):
-    """selector 누락은 **전량 삭제가 아니라 즉시 오류**다.
-
-    remove_job과 clear_jobs를 굳이 둘로 나눠 둔 이유 그 자체 — merge_id가
-    None으로 새는 GUI 실수 한 번이 jobset을 통째로 비우면 안 된다.
-    (전량 삭제는 clear_jobs라는 명시적 철자로만 도달한다.)"""
-    js = manager.create_jobset(["customwrapper_sub a.sp",
-                                "customwrapper_sub b.sp"],
-                               merge_ids=["m1", "m2"])
-    for bad in (lambda: manager.remove_job(js),                  # 아무것도 없음
-                lambda: manager.remove_job(js, merge_id=None),   # None으로 샘
-                lambda: manager.remove_job(js, job_id=1, merge_id="m1")):
-        with pytest.raises(ValueError, match="정확히 하나"):
-            bad()
-    assert len(js.jobs()) == 2                   # 한 건도 안 지워졌다
-
-
-def test_clear_jobs_on_empty_jobset_is_noop(qtbot, manager):
-    """빈 jobset의 clear_jobs는 정상 no-op — remove_job의 JobNotFoundError와
-    갈리는 지점(멱등 vs 호출자 실수)이라 한 함수로 합칠 수 없다."""
-    js = manager.create_jobset([])
-    assert manager.clear_jobs(js) == []
-    assert manager.clear_jobs(js) == []          # 몇 번을 불러도 동일
-    assert js.summary["total"] == 0
-
-
-def test_clear_guard_and_force(qtbot, manager, fake_lsf):
-    js = manager.create_jobset(["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        manager.submit(js, auto_poll=False)
-
-    with pytest.raises(LsfmgrError, match="활성"):
-        manager.clear_jobs(js)
-    _finish_all(manager, fake_lsf, js)
-    manager.clear_jobs(js)                                  # 전원 종료 — 허용
-    assert js.jobs() == [] and js.summary["total"] == 0
-
-
-def test_clear_jobs_keeps_jobset_reusable(qtbot, manager, fake_lsf):
-    """clear_jobs는 **내용물만** 비운다 — 같은 핸들/id로 이어서 쓸 수 있다.
-    (remove_jobset과의 차이: 그쪽은 jobset 자체가 사라져 재사용 불가.)"""
-    js = manager.create_jobset(["customwrapper_sub a.sp"], label="sweep",
-                               tags=["t1"])
-    jsid = js.id
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        manager.submit(js, auto_poll=False)
-    _finish_all(manager, fake_lsf, js)
-    manager.clear_jobs(js)
-
-    # 핸들은 살아있고 메타(label/tags)도 그대로 — id도 안 바뀐다
-    assert js.id == jsid and js.summary["total"] == 0
-    rec = manager.store.get_jobset(jsid)
-    assert rec.label == "sweep" and rec.tags == ["t1"]
-
-    # 새 batch를 merge로 흡수 → 같은 jobset으로 재제출 (v9: 추가는 merge 전용)
-    batch = manager.create_jobset(["customwrapper_sub b.sp"], merge_ids=["b"])
-    manager.merge(js, batch)
-    assert manager.can_submit(jsid) is True
-    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
-        manager.submit(js, auto_poll=False)
-    assert js.summary["total"] == 1
 
 
 # ----------------------------------------------------------------------
@@ -336,7 +260,7 @@ def test_submit_resets_previous_run_traces(qtbot, manager, fake_lsf):
 
 
 def test_rerun_pattern_merge_then_submit(qtbot, manager, fake_lsf):
-    """v9 재실행 패턴: 실패 job을 같은 merge_id로 교체(merge_from) 후
+    """재실행 패턴: 실패 job을 같은 merge_id로 교체(replace_jobs) 후
     전체 submit — resubmit 없이 재실행이 표현된다."""
     js = manager.create_jobset(
         ["customwrapper_sub bad.sp", "customwrapper_sub ok.sp"],
@@ -349,10 +273,8 @@ def test_rerun_pattern_merge_then_submit(qtbot, manager, fake_lsf):
     fake_lsf.set_job(recs["m2"].job_id, "DONE", 0)
     manager.querier.query(js.id)
 
-    fix = manager.create_jobset(              # 수정본 바구니
-        ["customwrapper_sub fixed.sp"], merge_ids=["m1"], label="fix")
-    assert manager.can_merge(js, fix) is True
-    manager.merge(js, fix)                          # m1만 교체 (m2 결과 유지)
+    manager.replace_jobs(js, ["customwrapper_sub fixed.sp"],
+                         merge_ids=["m1"])          # m1만 교체 (m2 결과 유지)
 
     recs = {r.merge_id: r for r in js.jobs()}
     assert recs["m1"].state is JobState.CREATED
@@ -362,18 +284,19 @@ def test_rerun_pattern_merge_then_submit(qtbot, manager, fake_lsf):
     assert all(r.state is JobState.PEND for r in js.jobs())
 
 
-def test_merge_from_transfers_polling(qtbot, manager, fake_lsf):
-    """source가 폴링 중이었으면 target이 이어받는다 (연속성)."""
+def test_add_jobs_resumes_polling(qtbot, manager, fake_lsf):
+    """job이 추가되면 관찰 대상이 생기므로 폴링이 (재)시작된다.
+    (폴링 tick에 tie된 handler가 새 job에 침묵하지 않도록 — 사이클 15)"""
     a = manager.create_jobset(["customwrapper_sub a.sp"])
-    b = manager.create_jobset(["customwrapper_sub b.sp"])
-    manager.start_polling(b.id, 1.0)            # source만 폴링 사용
+    manager.start_polling(a.id, 5.0)
+    manager.stop_polling(a.id)                  # 껐다 — 기억도 지워진다
+    assert manager._poll_intervals.get(a.id) is None
 
-    manager.merge(a, b)
+    manager.add_jobs(a, ["customwrapper_sub b.sp"], merge_ids=["m2"])
 
-    assert manager._poll_intervals.get(a.id) == 1.0
     with qtbot.waitSignal(manager.jobset_updated, timeout=10000,
                           check_params_cb=lambda j, _s: j == a.id):
-        pass                                    # target 폴링이 실제로 돈다
+        pass                                    # 폴링이 실제로 돈다
 
 
 # ----------------------------------------------------------------------

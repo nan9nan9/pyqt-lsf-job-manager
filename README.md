@@ -51,13 +51,13 @@ js.jobset_updated.connect(lambda s: print(f"RUN={s['RUN']} DONE={s['DONE']}/{s['
 |---|---|---|
 | **JobSet** | `mgr.create_jobset(...)` → `JobSet` 핸들 | 논리적 job 묶음. 모든 기능의 기본 단위 |
 | **job** | `JobRecord` | 커맨드 1건 = job 1건. jobset 안에서 `job_key`가 유일 물리 키 |
-| **merge_id** | `JobRecord.merge_id` | job의 **논리 키**. merge 시 같은 merge_id의 기존 job을 교체하는 기준 |
+| **merge_id** | `JobRecord.merge_id` | job의 **논리 키**. `replace_jobs`/`upsert_jobs`가 교체 대상을 찾는 기준 |
 | **user_data** | `JobRecord.user_data` | 앱이 job에 실어 두는 임의 dict. 라이브러리는 **보존만** 함 |
 
 **역할 분리**가 API의 전부입니다:
 
 ```
-명령  = mgr.*    mgr.submit(js) / mgr.kill(js) / mgr.merge(a, b) / mgr.create_jobset(...)
+명령  = mgr.*    mgr.submit(js) / mgr.kill(js) / mgr.add_jobs(js, …) / mgr.create_jobset(…)
 조회  = js.*     js.jobs() / js.summary / js.is_done          (동기 · 로컬 스냅샷)
 신호  = js.*     js.jobs_updated / js.submit_finished ...     (해당 JobSet 것만)
         mgr.*    mgr.jobs_updated(jsid, ...) ...              (전 JobSet — 대시보드용)
@@ -94,7 +94,7 @@ class JobState(Enum):
   전이하지 않음. "전원 terminal"은 **모두 성공이 아니라 모두 끝남**을 뜻합니다
   (`post_process` 발화 조건).
 - **`is_failed`** = `EXIT` / `SUBMIT_FAILED` / `LOST`
-- **`is_inactive`** = `CREATED` **또는** terminal — submit/merge/remove 가드의
+- **`is_inactive`** = `CREATED` **또는** terminal — submit/편집/remove 가드의
   공통 술어(terminal보다 넓습니다: CREATED는 "아직 제출 안 함"이라 terminal이
   아니지만 inactive).
 - `is_on_lsf` = PEND/RUN/SUSP\*/UNKWN/ZOMBI — 폴링·kill 스냅샷의 대상.
@@ -196,7 +196,7 @@ js = mgr.create_jobset(cmds, work_dir="/scratch/run")            # 전체 동일
 js = mgr.create_jobset(cmds, work_dirs=["/scratch/a", None])     # job별 (None=부모 cwd)
 ```
 
-두 옵션 동시 지정은 `ValueError`. 각 job의 `submit_cwd`로 저장돼 **재제출·merge에도
+두 옵션 동시 지정은 `ValueError`. 각 job의 `submit_cwd`로 저장돼 **재제출·교체에도
 보존**됩니다. `os.chdir` 같은 프로세스 전역 변경을 쓰지 않으므로 동시 제출
 worker 간 경합이 없습니다.
 
@@ -303,14 +303,14 @@ mgr.jobset_finished.connect(                   # 전역 계층 — (jobset_id, s
   구분 근거는 레코드의 `rec.killed`(위 "실패 원인 표시" 참고)와 "kill이 끝낸
   완료냐"입니다 — 전원이 `killed`면 EXIT가 폴링으로 나중에 확인돼도 조용합니다.
   `post_process`는 이와 무관하게 kill로 끝나도 실행됩니다(결과 수집은 별개 계약).
-- **1회**만 발화하지만, 재제출하거나 merge로 job이 늘어 다시 미완료가 되면 재무장돼
+- **1회**만 발화하지만, 재제출하거나 job이 추가돼 다시 미완료가 되면 재무장돼
   다음 완료에 또 발화합니다. job이 하나도 없는 빈 jobset에서는 발화하지 않습니다.
 
 ---
 
 ## 5. JobSet — 모든 것의 중심
 
-### 5.1 생성 → (필요하면 merge) → 제출
+### 5.1 생성 → (필요하면 편집) → 제출
 
 GUI는 제출 전(생성 단계)부터 jobset을 갖습니다 — `create_jobset`으로 job까지 함께
 만들고, jobset 단위로 제출합니다. 같은 jobset/job_key가 전이되므로 **핸들 교체·테이블
@@ -320,7 +320,7 @@ GUI는 제출 전(생성 단계)부터 jobset을 갖습니다 — `create_jobset
 js = mgr.create_jobset(                        # 생성 시 job까지 함께 만든다
     ["customwrapper_sub -i a.sp",              #   각 커맨드 = job 1건 (CREATED)
      "customwrapper_sub -i b.sp"],
-    merge_ids=["case-a", "case-b"],            # 논리 키 (merge 시 replace 기준)
+    merge_ids=["case-a", "case-b"],            # 논리 키 (교체 대상을 찾는 기준)
     user_datas=[{"run": "...", "rev": 3}, None],   # job별 사용자 데이터 (보존만)
     label="sweep")
 js.jobs_updated.connect(table.apply_changed)   # GUI 테이블(앱 코드)을 이 핸들의
@@ -331,19 +331,26 @@ if mgr.can_submit(js):                     # 전원 비활성 + job 존재?
                                            # DONE/EXIT도 리셋 후 재실행
 ```
 
-> **job 생성은 `create_jobset` 한 곳뿐**입니다. 생성 후 job을 더 넣는 유일한 방법은
-> **merge** — 별도 jobset을 만들어 `mgr.merge(js, src)`로 흡수합니다.
+> **생성 후 job 목록을 바꾸는 건 편집 3형제**입니다 — 하려는 일이 이름에 드러납니다.
+>
+> | 명령 | merge_id가 이미 있으면 | 없으면 |
+> |---|---|---|
+> | `mgr.add_jobs(js, …)` | `ValueError` | **추가** |
+> | `mgr.replace_jobs(js, …)` | **교체** (job_key 유지) | `JobNotFoundError` |
+> | `mgr.upsert_jobs(js, …)` | **교체** | **추가** |
+>
+> 인자는 `create_jobset`과 같은 모양입니다(`commands`, `merge_ids`, `user_datas`,
+> `work_dir(s)`). 교체는 물리 키(`job_key`)를 유지하므로 **테이블 행이 이어집니다**.
 
-**재실행 패턴** (별도 resubmit API 없음): 실패/수정 job을 같은 `merge_id`로 담은
-새 jobset을 만들어 흡수 → 다시 submit:
+**재실행 패턴** (별도 resubmit API 없음): 실패/수정 job을 같은 `merge_id`로 교체
+→ 다시 submit:
 
 ```python
-fix = mgr.create_jobset(["customwrapper_sub -i a_fixed.sp"],
-                        merge_ids=["case-a"], label="fix")
-if mgr.can_merge(js, fix):
-    mgr.merge(js, fix)         # case-a만 CREATED로 교체 (다른 결과 유지,
-                               # 물리 키 유지 — 테이블 행 연속), fix 소멸
-mgr.submit(js)                 # 전체 재실행
+mgr.replace_jobs(js, ["customwrapper_sub -i a_fixed.sp"],
+                 merge_ids=["case-a"])     # case-a만 CREATED로 교체
+                                           # (다른 job의 결과는 그대로,
+                                           #  물리 키 유지 — 테이블 행 연속)
+mgr.submit(js)                             # 전체 재실행
 ```
 
 재제출 리셋은 이전 실행 흔적(job_id/exit_code/실행시간/fail_message/`killed`/
@@ -355,16 +362,16 @@ mgr.submit(js)                 # 전체 재실행
 | 명령 | 가드 | force |
 |---|---|---|
 | `mgr.submit(js)` | 전 job 비활성 + 1건 이상 (`can_submit`) | — (활성은 먼저 kill) |
-| `mgr.merge(js, src)` | 양쪽 전 job 비활성 (`can_merge`) | 레코드만 강제 교체 (LSF 정리는 앱 책임) |
+| `mgr.replace_jobs(js, …)` / `upsert_jobs` | 교체 대상 job이 비활성 | 레코드만 강제 교체 (LSF 정리는 앱 책임) |
 | `mgr.remove_job(js, ...)` / `mgr.clear_jobs(js)` | 대상 비활성 | 레코드만 강제 삭제 (〃) |
 | `mgr.remove_jobset(js)` | 전원 terminal | 레코드만 강제 삭제 (〃) |
 | `mgr.kill(js)` | 예외 — 활성(RUN/PEND/SUBMITTING)만 대상, 종료분은 자동 skip | — |
 
 > 가드 위반 시 명령별 **전용 예외**가 납니다 — `SubmitNotAllowedError` /
-> `MergeNotAllowedError` / `RemoveNotAllowedError` / `RemoveJobSetNotAllowedError`
+> `JobEditNotAllowedError` / `RemoveNotAllowedError` / `RemoveJobSetNotAllowedError`
 > (전부 `JobSetStateError` → `LsfmgrError` 하위라 `except LsfmgrError`로도 잡힘).
 > 예외 객체의 `.jobset_id` · `.job_keys`(막은 job들)로 메시지 파싱 없이 원인을
-> 알 수 있습니다. 사전 확인은 `mgr.can_submit(js)` / `mgr.can_merge(a, b)`.
+> 알 수 있습니다. 사전 확인은 `mgr.can_submit(js)`.
 
 ### 5.3 제어 (비동기 — 즉시 반환, 결과는 Signal)
 
@@ -493,8 +500,9 @@ mgr.jobset(jobset_id)      # ID로 핸들 재획득
 ### 5.6 그 밖의 명령
 
 ```python
-mgr.merge(js_a, js_b)                  # b를 a에 흡수(merge_id 규칙) — b 소멸
-mgr.can_merge(js_a, js_b)              # 흡수 가능 여부 (전원 비활성)
+mgr.add_jobs(js, cmds, merge_ids=[...])       # 추가 (중복이면 ValueError)
+mgr.replace_jobs(js, cmds, merge_ids=[...])   # 교체 (부재면 JobNotFoundError)
+mgr.upsert_jobs(js, cmds, merge_ids=[...])    # 있으면 교체, 없으면 추가
 mgr.remove_job(js, merge_id="m1")      # 삭제 — job_id/merge_id/job_key 기준
 mgr.remove_job(js, job_id=12345, force=True)  # 활성이면 force 필요 (레코드만)
 mgr.clear_jobs(js)                     # job만 전부 삭제 — jobset은 남아 재사용 가능
@@ -508,10 +516,10 @@ mgr.shutdown()                         # 스레드 정리 (멱등 — 앱 종료
 > | 명령 | 지우는 것 | 남는 것 |
 > |---|---|---|
 > | `remove_job(js, ...)` | job 1건 | 나머지 job + jobset |
-> | `clear_jobs(js)` | job 전부 | **jobset** — id·label·tags·handler·폴링·GUI 행이 그대로. 새 batch를 `merge`로 흡수시키면 그대로 **재사용** |
+> | `clear_jobs(js)` | job 전부 | **jobset** — id·label·tags·handler·폴링·GUI 행이 그대로. `add_jobs`로 다시 채워 **재사용** |
 > | `remove_jobset(js)` | jobset 자체 | 없음 — `list_jobsets`/`search_jobsets`/`get_jobs` 어디에도 안 남음 |
 >
-> `remove_jobset`은 merge source와 똑같이 레코드를 실제로 지웁니다. **결과를
+> `remove_jobset`은 레코드를 실제로 지웁니다. **결과를
 > 나중에 다시 볼 수 없으니** 필요하면 삭제 전에 스냅샷을 뜨세요 — 반환값이
 > 삭제 직전의 `JobSetRecord`입니다. 삭제된 jobset의 핸들을 만지면
 > `JobSetRemovedError`, id로 접근하면 `JobSetNotFoundError`입니다.

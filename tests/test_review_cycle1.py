@@ -180,9 +180,9 @@ def test_removed_jobset_cannot_be_reused(qtbot, manager, fake_lsf):
         manager.jobset(jsid)                 # 재획득 거부
     with pytest.raises(JobSetNotFoundError):
         manager.submit(jsid)                 # 문자열 id 직접 제출도 거부
-    other = manager.create_jobset(["customwrapper_sub b.sp"])
     with pytest.raises(JobSetNotFoundError):
-        manager.merge(jsid, other)           # 사라진 target으로 merge 거부
+        manager.add_jobs(jsid, ["customwrapper_sub b.sp"],
+                         merge_ids=["b"])    # 사라진 jobset 편집도 거부
 
 
 # ----------------------------------------------------------------------

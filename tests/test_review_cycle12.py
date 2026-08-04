@@ -61,17 +61,17 @@ def test_zero_query_timeout_would_stall_polling_silently():
 #
 # JobsetQuerier._missing_streak은 "사이클마다 갈아끼우니 정리 불필요"였는데,
 # 그 논리는 **살아있는 jobset 안의 job_key**에만 성립한다. jobset 자체가
-# 사라지면(merge source 소멸) 그 id로는 다시 query()가 안 불려 _pop_streaks가
-# 영영 실행되지 않는다. merge는 이 라이브러리가 job을 추가·재실행하는 정규
-# 경로(v9)라 장시간 GUI에서 누적된다. pacer.forget()·_idle_counts 정리와
-# 같은 격으로 소멸 지점에 정리 훅을 건다.
+# 사라지면(remove_jobset) 그 id로는 다시 query()가 안 불려 _pop_streaks가
+# 영영 실행되지 않는다. 장시간 도는 GUI에서 jobset을 지웠다 만들었다 하면
+# 누적된다. pacer.forget()·_idle_counts 정리와 같은 격으로 소멸 지점에
+# 정리 훅을 건다.
 # ----------------------------------------------------------------------
 def _streaks(mgr):
     return mgr.querier._missing_streak
 
 
-def test_merged_away_jobset_leaves_no_streak(qtbot, manager, fake_lsf):
-    """merge로 소멸한 source의 스트릭 항목이 남지 않는다."""
+def test_removed_jobset_leaves_no_streak(qtbot, manager, fake_lsf):
+    """삭제된 jobset의 스트릭 항목이 남지 않는다."""
     from tests.conftest import submit_cmds
     src = submit_cmds(manager, ["echo a"], auto_poll=False)
     tgt = submit_cmds(manager, ["echo b"], auto_poll=False)
@@ -83,7 +83,7 @@ def test_merged_away_jobset_leaves_no_streak(qtbot, manager, fake_lsf):
     manager.querier.query(tgt.id)
     assert src.id in _streaks(manager) and tgt.id in _streaks(manager)
 
-    manager.merge(tgt, src, force=True)         # source 소멸
+    manager.remove_jobset(src, force=True)      # jobset 소멸
     assert src.id not in _streaks(manager)      # 누수 없음
     assert tgt.id in _streaks(manager)          # 살아있는 쪽은 보존
 

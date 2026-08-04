@@ -181,14 +181,13 @@ def test_deprecated_kwargs_ignored_end_to_end(qtbot, fake_lsf, config, caplog):
 # ----------------------------------------------------------------------
 # 7. merge 후 조회·kill — 부착물 없는 merge가 정상 동작
 # ----------------------------------------------------------------------
-def test_merge_then_query_and_kill(qtbot, manager, fake_lsf):
+def test_add_jobs_then_query_and_kill(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         a = submit_cmds(manager, ["m a0", "m a1"], auto_poll=False)
     fake_lsf.set_all("DONE", 0)
     manager.querier.query(a.id)
 
-    b = manager.create_jobset(["m b0", "m b1"], merge_ids=["x", "y"])
-    manager.merge(a, b)                                  # in-place 흡수
+    manager.add_jobs(a, ["m b0", "m b1"], merge_ids=["x", "y"])
     assert manager.summary(a.id)["total"] == 4
 
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):

@@ -1,13 +1,16 @@
-"""JobSetManager — JobSet CRUD / 요약 / 손실 감지 / merge / 삭제.
+"""JobSetManager — JobSet CRUD / 요약 / 손실 감지 / job 편집 / 삭제.
 
 Store만 사용 (Qt 비의존). v10: LSF 호출(부착물 name 역조회·bgdel)이
 전부 제거되어 이 계층은 순수 Store 연산이다.
 
-이름 규약(계층이 이름에 드러나게): 삭제 3형제는 **대상이 이름에 드러난다** —
-job 1건=remove_job, job 전부=clear_jobs, jobset 자체=remove_jobset.
-공개 API=mgr.create_jobset/remove_job/clear_jobs/remove_jobset,
-도메인=local_* (local_create_jobset/local_create_jobs, local_remove_jobs/
-local_clear_jobs, local_remove_jobset, merge_from), 저장소=store_*
+이름 규약(계층이 이름에 드러나게): 공개 API의 두 3형제는 **하려는 일이
+이름에 드러난다**.
+  삭제: job 1건=remove_job, job 전부=clear_jobs, jobset 자체=remove_jobset
+  편집: 추가=add_jobs, 교체=replace_jobs, 있으면 교체/없으면 추가=upsert_jobs
+각각 도메인에선 한 몸통을 공유한다(_delete_jobs / local_edit_jobs) — 가드와
+intended_count 규칙이 갈릴 수 없게.
+도메인=local_* (local_create_jobset/local_create_jobs, local_edit_jobs,
+local_remove_jobs/local_clear_jobs, local_remove_jobset), 저장소=store_*
 (store_insert_jobset/store_add_jobs/store_delete_job/store_dispose).
 """
 from __future__ import annotations
@@ -17,11 +20,11 @@ import threading
 import uuid
 from dataclasses import replace
 from datetime import datetime
-from typing import Iterable, List, Optional, Sequence
+from typing import List, Optional, Sequence
 
 from .errors import (
+    JobEditNotAllowedError,
     JobNotFoundError,
-    MergeNotAllowedError,
     RemoveJobSetNotAllowedError,
     RemoveNotAllowedError,
 )
@@ -45,7 +48,7 @@ class JobSetManager:
         self.store = store
         # JobSetRecord read-modify-write 직렬화 — Store는 개별 연산만
         # 원자적이므로, intended_count 갱신처럼 "읽고-고쳐-쓰는" 경로가 겹치면
-        # 한쪽 갱신이 유실된다 (예: new_jobs vs merge_from의 intended_count 갱신).
+        # 한쪽 갱신이 유실된다 (예: local_create_jobs vs local_edit_jobs).
         self._meta_lock = threading.RLock()
 
     # ------------------------------------------------------------------
@@ -58,11 +61,11 @@ class JobSetManager:
         record = JobSetRecord(
             jobset_id=jsid, intended_count=intended_count,
             label=label, tags=list(tags), description=description,
-            created_at=datetime.now(), merged_from=[])
+            created_at=datetime.now())
         return self.store.store_insert_jobset(record)
 
     # ------------------------------------------------------------------
-    # job 추가 — 생성은 local_create_jobs, 이후 추가는 merge_from만
+    # job 추가/편집 — 생성 시 일괄=local_create_jobs, 이후=local_edit_jobs
     # ------------------------------------------------------------------
     def local_create_jobs(self, jobset_id: str,
                           records: Sequence[JobRecord]) -> List[JobRecord]:
@@ -101,69 +104,87 @@ class JobSetManager:
                     replace(js, intended_count=len(keys)))
         return out
 
-    def merge_from(self, target_id: str, source_id: str, *,
-                   force: bool = False) -> List[JobRecord]:
-        """source jobset의 job들을 merge_id 규칙으로 target에 **in-place
-        흡수**하고 source를 삭제한다 (target 핸들/테이블 연속).
+    def local_edit_jobs(self, jobset_id: str, records: List[JobRecord], *,
+                        policy: str, force: bool = False) -> List[JobRecord]:
+        """job 목록 편집의 **공용 몸통** — add/replace/upsert의 유일한 차이는
+        `policy`로 표현되는 "merge_id가 이미 있을 때 어떻게 하느냐"뿐이다.
 
-        규칙 (v9):
-          - source job의 merge_id가 target에 존재 → **replace**: target의
-            기존 job_key(물리 키)는 유지하고 내용/상태를 source 것으로 교체
-            (테이블 행 연속). LSF의 실제 job은 건드리지 않는다 — 살아있는
-            job을 force로 replace하면 그 LSF job의 정리는 caller(GUI) 책임.
-          - merge_id가 없거나(None) target에 미존재 → 신규 추가.
-        가드: 양쪽 모든 job이 비활성(CREATED/terminal)이어야 한다 — 활성
-        (SUBMITTING/RETRY_WAIT/on-LSF)이 있으면 LsfmgrError, force면 진행.
-        반환: target에서 replace/추가된 레코드 목록 (신호 발행용)."""
-        if target_id == source_id:
-            raise ValueError("같은 jobset끼리는 merge할 수 없습니다")
+            add     : 있으면 ValueError (순수 추가)
+            replace : 없으면 JobNotFoundError (순수 교체, merge_id 필수)
+            upsert  : 있으면 교체, 없으면 추가
+
+        교체는 기존 **물리 키(job_key)를 유지**한 채 내용만 바꾼다 — GUI 표의
+        행 연속성이 유지된다. 교체 대상이 활성이면 JobEditNotAllowedError
+        (force=True면 레코드만 강제 교체 — LSF 정리는 caller 책임).
+
+        검증은 **변경 시작 전에 전부** 끝낸다(원자성). 루프 도중 예외가 나면
+        일부만 반영된 채 중단돼, intended_count가 실제 레코드 수와 어긋나
+        summary 불변식(합계 == intended_count)이 영구 파손된다.
+
+        반환: 추가·교체된 레코드 목록 (신호 발행용)."""
+        if policy not in ("add", "replace", "upsert"):
+            raise ValueError(f"policy는 add/replace/upsert (got {policy!r})")
         with self._meta_lock:
-            tgt = self.store.get_jobset(target_id)
-            self.store.get_jobset(source_id)     # 존재 검증 (없으면 예외)
-            tgt_jobs = self.store.get_jobs(target_id)
-            src_jobs = self.store.get_jobs(source_id)
+            jobs = self.store.get_jobs(jobset_id)     # 존재 검증 겸함
+            by_mid = {r.merge_id: r for r in jobs if r.merge_id is not None}
 
-            if not force:
-                busy = [r.job_key for r in tgt_jobs + src_jobs
-                        if not r.state.is_inactive]
-                if busy:
-                    raise MergeNotAllowedError(
-                        f"merge 불가 — 활성(진행 중) job {len(busy)}건: "
-                        f"{busy[:5]} (force=True로 레코드만 강제 교체 가능)",
-                        jobset_id=target_id, job_keys=busy)
+            # ① 입력 자체의 merge_id 중복 — jobset 내 유일해야 하므로,
+            #    한 번의 호출 안에서도 같은 키가 두 번 오면 안 된다.
+            seen = set()
+            for rec in records:
+                if rec.merge_id is None:
+                    continue
+                if rec.merge_id in seen:
+                    raise ValueError(
+                        f"merge_id 중복(한 호출 안에서): {rec.merge_id!r}")
+                seen.add(rec.merge_id)
 
-            by_mid = {r.merge_id: r for r in tgt_jobs
-                      if r.merge_id is not None}
-            tgt_keys = {r.job_key for r in tgt_jobs}
-            # 키 충돌은 **변경 시작 전에** 전부 검증한다 (원자성) — 루프
-            # 도중 예외면 앞선 job이 이미 target에 들어간 부분-반영 상태로
-            # 중단되어, 같은 job이 양쪽에 중복 존재하고 intended_count가
-            # 실제 레코드 수보다 작아져 summary 불변식이 영구 파손된다.
-            dup = [r.job_key for r in src_jobs
-                   if not (r.merge_id and r.merge_id in by_mid)
-                   and r.job_key in tgt_keys]
-            if dup:
-                raise ValueError(
-                    f"merge 불가 — job 이름 충돌: {dup[:5]!r}")
-            changed: List[JobRecord] = []
-            for rec in src_jobs:
+            # ② 정책별 매칭 — (새 레코드, 교체 대상 or None)
+            plan: List[tuple] = []
+            for rec in records:
                 old = by_mid.get(rec.merge_id) if rec.merge_id else None
+                if policy == "add":
+                    if old is not None:
+                        raise ValueError(
+                            f"merge_id가 이미 있습니다: {rec.merge_id!r} "
+                            f"(교체하려면 replace_jobs/upsert_jobs)")
+                elif policy == "replace":
+                    if rec.merge_id is None:
+                        raise ValueError(
+                            "replace_jobs는 merge_ids가 필요합니다"
+                            " (무엇을 교체할지 지정할 수 없음)")
+                    if old is None:
+                        raise JobNotFoundError(
+                            f"{jobset_id}: 교체 대상 없음 (merge_id="
+                            f"{rec.merge_id!r} — 추가하려면 add_jobs/"
+                            f"upsert_jobs)")
+                plan.append((rec, old))
+
+            # ③ 교체 대상이 활성이면 거부 (force로 강제 — 고아는 로그로)
+            olds = [o for _, o in plan if o is not None]
+            busy = [o.job_key for o in olds if not o.state.is_inactive]
+            if busy and not force:
+                raise JobEditNotAllowedError(
+                    f"{policy}_jobs 불가 — 교체 대상이 활성(진행 중)인 job "
+                    f"{len(busy)}건: {busy[:5]} "
+                    f"(force=True로 레코드만 강제 교체 가능)",
+                    jobset_id=jobset_id, job_keys=busy)
+            _warn_orphans(jobset_id, olds, f"{policy}_jobs")
+
+            # ④ 적용 — 교체는 기존 job_key 유지
+            changed: List[JobRecord] = []
+            for rec, old in plan:
                 if old is not None:
-                    # replace — 물리 키(job_key)는 target 것 유지
-                    new = replace(rec, jobset_id=target_id,
-                                  job_key=old.job_key)
-                    self.store.store_delete_job(target_id, old.job_key)
-                    self.store.store_add_job(new)
-                    changed.append(new)
+                    new = replace(rec, job_key=old.job_key)
+                    self.store.store_delete_job(jobset_id, old.job_key)
                 else:
-                    new = replace(rec, jobset_id=target_id)
-                    self.store.store_add_job(new)
-                    changed.append(new)
-            self.store.update_jobset(replace(
-                self.store.get_jobset(target_id),
-                intended_count=len(self.store.get_jobs(target_id)),
-                merged_from=_dedup(tgt.merged_from + [source_id])))
-            self.store.store_delete_jobset(source_id)
+                    new = rec
+                self.store.store_add_job(new)
+                changed.append(new)
+            js = self.store.get_jobset(jobset_id)
+            n = len(self.store.get_jobs(jobset_id))
+            if js.intended_count != n:
+                self.store.update_jobset(replace(js, intended_count=n))
         return changed
 
     def local_remove_jobs(self, jobset_id: str, *,
@@ -292,29 +313,19 @@ class JobSetManager:
 
 def _warn_orphans(jobset_id: str, targets: List[JobRecord],
                   what: str) -> None:
-    """LSF에 살아있는 job의 레코드를 지우기 직전 — job_id를 로그에 남긴다.
+    """LSF에 살아있는 job의 레코드가 사라지기 직전 — job_id를 로그에 남긴다.
 
-    force 삭제의 계약은 "레코드만 지운다, LSF job 정리는 caller 책임"인데,
-    레코드가 사라지면 caller가 그 job_id를 **조회할 방법이 없다**. 그래서
-    지우기 전 마지막 순간의 이 로그가 유일한 흔적이 된다.
+    삭제(remove_job/clear_jobs/remove_jobset)든 교체(replace_jobs/
+    upsert_jobs)든, force 계약은 "레코드만 건드린다, LSF job 정리는 caller
+    책임"인데 레코드가 사라지면 caller가 그 job_id를 **조회할 방법이 없다**.
+    그래서 사라지기 전 마지막 순간의 이 로그가 유일한 흔적이 된다.
     (force가 아니면 on-LSF job은 애초에 가드에 걸려 여기 못 온다 — 즉 이
     경고는 force 경로에서만 나온다.)"""
     alive = [r for r in targets if r.state.is_on_lsf and r.job_id is not None]
     if not alive:
         return
     log.warning(
-        "%s: LSF에 살아있는 job %d건의 레코드를 강제 삭제합니다 — "
-        "job_id=%s%s (정리는 caller 책임, 삭제 후에는 조회 불가)",
+        "%s: LSF에 살아있는 job %d건의 레코드가 사라집니다 — "
+        "job_id=%s%s (정리는 caller 책임, 이후에는 조회 불가)",
         what, len(alive), [r.job_id for r in alive[:20]],
         " …" if len(alive) > 20 else "")
-
-
-def _dedup(items: Iterable) -> list:
-    """순서 보존 중복 제거."""
-    seen = set()
-    out = []
-    for x in items:
-        if x not in seen:
-            seen.add(x)
-            out.append(x)
-    return out

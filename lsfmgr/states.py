@@ -133,12 +133,12 @@ class JobSetRecord:
     영속 저장소가 v9에서 제거돼 과거 데이터 호환 부담도 없다.
 
     closed 플래그도 삭제됐다 — 종결은 mgr.remove_jobset()이 레코드를 실제로
-    지우므로(merge source와 동일), '닫혔지만 목록에 남아있는' 중간 상태가
-    아예 없다.)"""
+    지우므로 '닫혔지만 목록에 남아있는' 중간 상태가 아예 없다.
+    merged_from도 삭제됐다 — merge API가 사라지면서(job 추가는 add_jobs/
+    replace_jobs/upsert_jobs로 직접) 기록할 대상 자체가 없어졌다.)"""
     jobset_id: str
     intended_count: int                          # 손실 감지 기준
     label: str = ""
     tags: List[str] = field(default_factory=list)   # search_jobsets(tag=) 필터
     description: str = ""
     created_at: Optional[datetime] = None        # search_jobsets(since=) 필터
-    merged_from: List[str] = field(default_factory=list)

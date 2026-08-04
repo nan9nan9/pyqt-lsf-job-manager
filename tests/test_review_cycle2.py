@@ -90,16 +90,13 @@ def test_stale_gate_rejected_does_not_destroy_new_cycle(qtbot, manager, fake_lsf
 
 
 # ----------------------------------------------------------------------
-# C2-3: 삭제된 jobset — can_submit/can_merge도 False (술어-명령 일치)
+# C2-3: 삭제된 jobset — can_submit도 False (술어-명령 일치)
 # ----------------------------------------------------------------------
 def test_predicates_false_for_removed_jobset(qtbot, manager, fake_lsf):
     js = _submit_done(qtbot, manager, fake_lsf, ["customwrapper_sub a.sp"])
     jsid = js.id
-    other = manager.create_jobset(["customwrapper_sub b.sp"])
     manager.remove_jobset(js)
     assert manager.can_submit(jsid) is False     # 명령은 예외 — 술어는 False
-    assert manager.can_merge(jsid, other) is False
-    assert manager.can_merge(other, jsid) is False
 
 
 # ----------------------------------------------------------------------

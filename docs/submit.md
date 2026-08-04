@@ -254,12 +254,11 @@ job control 은 앱(GUI)이 직접 갖는다:
 # 1) 살아있는 job 이 있으면 먼저 kill (앱이 직접)
 mgr.kill(js); ...kill_finished 대기...
 
-# 2) 다시 돌릴 job 을 같은 merge_id 로 담은 jobset 을 만들어 흡수
-fix = mgr.create_jobset(["customwrapper_sub -q long a.sp"],
-                        merge_ids=["case-a"], label="fix")
-if mgr.can_merge(js, fix):
-    mgr.merge(js, fix)     # case-a 가 CREATED 로 교체(물리 키 유지),
-                           # 나머지 job 의 결과는 그대로. fix 는 소멸
+# 2) 다시 돌릴 job 을 같은 merge_id 로 교체
+mgr.replace_jobs(js, ["customwrapper_sub -q long a.sp"],
+                 merge_ids=["case-a"])
+                       # case-a 가 CREATED 로 교체(물리 키 유지),
+                       # 나머지 job 의 결과는 그대로
 
 # 3) jobset 단위 재제출 — 전 job 이 리셋 후 재실행된다
 if mgr.can_submit(js):

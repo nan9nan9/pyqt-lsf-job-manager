@@ -110,7 +110,7 @@ mgr.kill(js)
 - 부분 kill(`only_state=`)·선택 kill(`kill_jobs`)은 기본적으로 제출을 건드리지 않고
   해당 대상만 겨냥한다. `cancel_submit=True`로 전체 kill과 같은 우선권을 켤 수 있다.
 
-## 3. 재실행 — merge + submit
+## 3. 재실행 — replace_jobs + submit
 
 재실행은 별도 파이프라인이 아니라 **데이터 조작 + 일반 submit**이다:
 
@@ -118,13 +118,13 @@ mgr.kill(js)
 main (전부 앱이 직접 제어)
 ──────────────────────────────────────────
 ① (살아있으면) mgr.kill(js) → kill_finished 대기
-② fix = mgr.create_jobset([...], merge_ids=[기존과 동일])   # 수정본 바구니
-③ mgr.merge(js, fix)     # merge_id 일치분 CREATED 교체(물리 키 유지),
-                         # 신규/None 은 추가. fix 소멸. 가드: 전원 비활성
-④ mgr.submit(js)         # 전 job 리셋 후 재제출 — §1과 동일 흐름
+② mgr.replace_jobs(js, [...], merge_ids=[기존과 동일])
+                         # 해당 job 만 CREATED 로 교체(물리 키 유지),
+                         # 가드: 교체 대상이 비활성
+③ mgr.submit(js)         # 전 job 리셋 후 재제출 — §1과 동일 흐름
 ```
 
-- ③의 replace는 레코드만 교체한다 — `force=True`로 활성 job을 교체해도 LSF의 실제
+- ②의 교체는 레코드만 바꾼다 — `force=True`로 활성 job을 교체해도 LSF의 실제
   job은 그대로다(정리는 앱 책임, 먼저 kill 권장).
 - ④의 리셋: job_id/exit_code/실행시간/fail_message/클러스터 소거,
   `merge_id`/`user_data`/`submit_cwd` 보존. handler 자동 재무장.

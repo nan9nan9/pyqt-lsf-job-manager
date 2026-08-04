@@ -30,9 +30,16 @@ class SubmitNotAllowedError(JobSetStateError):
     (제출 subprocess 실행 자체의 실패는 SubmitError — 별개)."""
 
 
-class MergeNotAllowedError(JobSetStateError):
-    """merge 불가 — 양쪽 중 활성 job 존재 / submit·kill 진행 중.
-    `mgr.can_merge(a, b)`로 사전 확인. force=True면 레코드만 강제 교체."""
+class JobEditNotAllowedError(JobSetStateError):
+    """job 목록 편집(add_jobs/replace_jobs/upsert_jobs) 불가.
+
+    ① submit·kill 진행 중 — 진행 중인 사이클의 스냅샷과 어긋나므로 거부한다.
+    ② 교체 대상 job이 활성(진행 중) — force=True면 레코드만 강제 교체하되,
+       LSF에 살아있는 job의 정리는 caller 책임이 된다(레코드가 사라져 그
+       job_id를 조회할 수 없으므로 삭제 직전 WARNING 로그가 유일한 흔적).
+
+    (입력 자체의 오류는 예외가 다르다: merge_id 중복/누락 = ValueError,
+     replace 대상 부재 = JobNotFoundError.)"""
 
 
 class RemoveNotAllowedError(JobSetStateError):

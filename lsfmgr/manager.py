@@ -21,10 +21,10 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 from .command import LsfCommand, Runner
 from .config import LsfConfig
 from .errors import (
+    JobEditNotAllowedError,
     JobNotFoundError,
     JobSetNotFoundError,
     LsfmgrError,
-    MergeNotAllowedError,
     RemoveJobSetNotAllowedError,
     SubmitNotAllowedError,
 )
@@ -592,9 +592,9 @@ class LsfJobManager(QObject):
                       intended_count: int = 0) -> JobSet:
         """[sync] JobSet 생성 — job까지 함께 만들고 핸들 즉시 반환 (CREATED).
 
-        **job 생성은 이 함수 한 곳뿐이다** (v9). 생성 후 job을 더 넣는
-        유일한 방법은 **merge** — 별도 jobset을 만들어 `mgr.merge(js, src)`로
-        흡수한다. 흐름:
+        생성 후 job을 더 넣거나 바꾸려면 편집 3형제를 쓴다 —
+        `add_jobs`(추가) / `replace_jobs`(교체) / `upsert_jobs`(있으면 교체).
+        흐름:
 
             js = mgr.create_jobset(
                 ["customwrapper_sub -i a.sp", "customwrapper_sub -i b.sp"],
@@ -643,10 +643,12 @@ class LsfJobManager(QObject):
                            merge_ids: Optional[Sequence[Optional[str]]],
                            user_datas: Optional[Sequence[Optional[dict]]],
                            work_dir: Optional[str],
-                           work_dirs: Optional[Sequence[Optional[str]]]
+                           work_dirs: Optional[Sequence[Optional[str]]],
+                           existing_keys: frozenset = frozenset()
                            ) -> List[JobRecord]:
-        """commands → CREATED JobRecord 목록 (create_jobset 내부용).
-        submit_cwd: work_dir(전체 단일) 또는 work_dirs(job별) — 동시 지정 불가."""
+        """commands → CREATED JobRecord 목록 (create_jobset / _edit_jobs 공용).
+        submit_cwd: work_dir(전체 단일) 또는 work_dirs(job별) — 동시 지정 불가.
+        existing_keys: 이미 쓰이고 있는 job_key — 연번이 그 뒤를 잇는다."""
         if work_dir is not None and work_dirs is not None:
             raise ValueError(
                 "work_dir와 work_dirs는 동시에 지정할 수 없습니다(둘 중 하나)")
@@ -660,16 +662,23 @@ class LsfJobManager(QObject):
             raise ValueError(
                 "merge_ids/user_datas/work_dirs 길이가 commands와 다릅니다")
 
-        # job_key 연번 — create_jobset은 항상 갓 만든(빈) jobset에만 호출되므로
-        # 0부터 시작한다 (v9의 기존-jobset 추가 경로(new_jobs)는 삭제됨 —
-        # 이후 추가는 merge뿐이고 merge는 자기 키를 갖고 온다)
+        # job_key 연번 — 이미 쓰이는 키는 건너뛴다. create_jobset은 빈 jobset에
+        # 호출되므로 0부터지만, add/upsert_jobs는 기존 jobset에 얹으므로
+        # 충돌하면 레코드 추가가 ValueError로 튕긴다. remove_job으로 중간이
+        # 비었다가 다시 채워지는 경우까지 덮으려면 '다음 번호'가 아니라
+        # '안 쓰이는 번호'를 찾아야 한다.
+        used = set(existing_keys)
         records = []
-        for nxt, (item, mid, ud, cwd) in enumerate(zip(items, mids, uds, wds)):
+        nxt = 0
+        for item, mid, ud, cwd in zip(items, mids, uds, wds):
+            while f"{jsid}_{nxt}" in used:
+                nxt += 1
             key = f"{jsid}_{nxt}"
+            used.add(key)
             argv = (shlex.split(item) if isinstance(item, str)
                     else [str(t) for t in item])
             if not argv:
-                raise ValueError("create_jobset: 빈 커맨드")
+                raise ValueError("빈 커맨드는 job으로 만들 수 없습니다")
             records.append(JobRecord(
                 job_id=None, array_index=None, jobset_id=jsid,
                 job_key=key, state=JobState.CREATED,
@@ -724,94 +733,113 @@ class LsfJobManager(QObject):
         jobset_id = self._jsid(jobset_id)
         self.handlers.remove_handler(jobset_id, name)
 
-    def merge(self, target_id, source_id, *,
-                   force: bool = False) -> List[JobRecord]:
-        """[sync] source jobset을 target에 **in-place 흡수** — merge_id 기준
-        (v9). source는 삭제되고 target 핸들/테이블은 그대로 유지된다.
+    # ------------------------------------------------------------------
+    # job 편집 3형제 — 하려는 일이 이름에 드러난다 (merge를 대체)
+    #   add_jobs     : 추가 전용 (merge_id가 이미 있으면 ValueError)
+    #   replace_jobs : 교체 전용 (merge_id가 없으면 JobNotFoundError)
+    #   upsert_jobs  : 있으면 교체, 없으면 추가
+    # 셋 다 도메인에선 local_edit_jobs 한 몸통을 공유한다 — 가드와
+    # intended_count 규칙이 갈릴 수 없게.
+    # ------------------------------------------------------------------
+    def add_jobs(self, jobset_id, commands: Sequence, *,
+                 merge_ids: Optional[Sequence[Optional[str]]] = None,
+                 user_datas: Optional[Sequence[Optional[dict]]] = None,
+                 work_dir: Optional[str] = None,
+                 work_dirs: Optional[Sequence[Optional[str]]] = None
+                 ) -> List[JobRecord]:
+        """[sync] 기존 jobset에 job을 **추가**한다 (CREATED).
 
-        규칙: source job의 merge_id가 target에 있으면 그 job을 **replace**
-        (물리 키 job_key 유지 — 테이블 행 연속), 없거나 None이면 신규 추가.
-        가드: 양쪽 전 job이 비활성(CREATED/DONE/EXIT 등)이어야 하며 활성이
-        있으면 LsfmgrError — force=True면 레코드만 강제 교체(살아있는 LSF
-        job의 정리는 caller 책임, 먼저 kill 권장). can_merge()로 선확인.
-        반환: target에서 replace/추가된 레코드 (jobs_updated로도 발행)."""
-        tid = self._jsid(target_id)
-        sid = self._jsid(source_id)
-        for jsid in (tid, sid):
-            self.store.get_jobset(jsid)      # 존재 검증 (삭제분이면 예외)
-            if self.submitter.is_active(jsid) or self.killer.is_active(jsid):
-                raise MergeNotAllowedError(
-                    f"{jsid}: submit/kill 진행 중에는 merge할 수 없습니다",
-                    jobset_id=jsid)
-        changed = self.jobsets.merge_from(tid, sid, force=force)
-        # 흡수분의 handler 장부를 무효화한다. merge는 같은 merge_id면 물리 키
-        # (job_key)를 유지한 채 **내용만 교체**하므로(테이블 행 연속성), 장부를
-        # 그대로 두면 그 키의 옛 _FINISHED가 남아 새 job에 handler가 영영
-        # 침묵한다. 신규 추가분은 장부가 없어 no-op이다.
-        # (지금은 CREATED가 되는 흡수분을 어차피 재제출해야 하고 그 rearm이
-        #  덮어주지만, 그건 우연한 은폐다 — pacer/querier 보류분을
-        #  _forget_paced로 정리하는 것과 같은 이유로 여기서 정리한다.)
+        인자는 create_jobset과 같은 모양이다. merge_id가 이미 있으면
+        ValueError — 교체할 생각이면 replace_jobs/upsert_jobs를 쓴다.
+        추가분은 jobs_updated/jobset_updated로 발행돼 표가 갱신된다.
+        제출은 별도다: 이어서 mgr.submit(js)를 부르면 **전 job**이 재제출된다."""
+        return self._edit_jobs(jobset_id, commands, policy="add",
+                               merge_ids=merge_ids, user_datas=user_datas,
+                               work_dir=work_dir, work_dirs=work_dirs)
+
+    def replace_jobs(self, jobset_id, commands: Sequence, *,
+                     merge_ids: Sequence[str],
+                     user_datas: Optional[Sequence[Optional[dict]]] = None,
+                     work_dir: Optional[str] = None,
+                     work_dirs: Optional[Sequence[Optional[str]]] = None,
+                     force: bool = False) -> List[JobRecord]:
+        """[sync] 기존 job의 내용을 **교체**한다 — merge_id로 지정(필수).
+
+        물리 키(job_key)는 유지되므로 GUI 표의 행이 그대로 이어진다. 수정한
+        커맨드로 재실행할 때 쓴다: replace_jobs(...) → submit(js).
+        대상이 없으면 JobNotFoundError, 대상이 활성이면
+        JobEditNotAllowedError(force=True면 강제 — LSF 정리는 caller 책임)."""
+        return self._edit_jobs(jobset_id, commands, policy="replace",
+                               merge_ids=merge_ids, user_datas=user_datas,
+                               work_dir=work_dir, work_dirs=work_dirs,
+                               force=force)
+
+    def upsert_jobs(self, jobset_id, commands: Sequence, *,
+                    merge_ids: Sequence[str],
+                    user_datas: Optional[Sequence[Optional[dict]]] = None,
+                    work_dir: Optional[str] = None,
+                    work_dirs: Optional[Sequence[Optional[str]]] = None,
+                    force: bool = False) -> List[JobRecord]:
+        """[sync] merge_id가 있으면 교체, 없으면 추가 (일괄 반영).
+
+        "이 목록을 jobset에 반영해라"를 한 번에 표현한다 — 어느 것이 이미
+        있는지 caller가 분류하지 않아도 된다. 의도가 '추가만'/'교체만'으로
+        분명하면 add_jobs/replace_jobs를 쓰는 편이 실수를 잡아준다."""
+        return self._edit_jobs(jobset_id, commands, policy="upsert",
+                               merge_ids=merge_ids, user_datas=user_datas,
+                               work_dir=work_dir, work_dirs=work_dirs,
+                               force=force)
+
+    def _edit_jobs(self, jobset_id, commands: Sequence, *, policy: str,
+                   merge_ids=None, user_datas=None, work_dir=None,
+                   work_dirs=None, force: bool = False) -> List[JobRecord]:
+        """add/replace/upsert_jobs의 구현 — 정책만 다르다."""
+        jobset_id = self._jsid(jobset_id)
+        if (self.submitter.is_active(jobset_id)
+                or self.killer.is_active(jobset_id)):
+            # 진행 중 사이클은 착수 시점의 job 스냅샷으로 돈다 — 그 사이
+            # 목록을 바꾸면 '추가했는데 이번 제출엔 없다'는 혼란만 남는다.
+            raise JobEditNotAllowedError(
+                f"{jobset_id}: submit/kill 진행 중에는 job 목록을 바꿀 수"
+                f" 없습니다 (완료를 기다리거나 먼저 kill 하세요)",
+                jobset_id=jobset_id)
+        items = list(commands)
+        if not items:
+            return []
+        existing = {r.job_key for r in self.get_jobs(jobset_id)}
+        records = self._build_job_records(jobset_id, items, merge_ids,
+                                          user_datas, work_dir, work_dirs,
+                                          existing_keys=existing)
+        changed = self.jobsets.local_edit_jobs(jobset_id, records,
+                                               policy=policy, force=force)
         if changed:
-            self.handlers.rearm(tid, [r.job_key for r in changed])
-        # source 정리 — 삭제된 jobset을 계속 polling하면 error 폭주.
-        # 폴링 연속성: target이 폴링을 안 쓰는데 source가 쓰고 있었다면
-        # 가장 짧은 interval로 target에 이어받는다.
-        src_iv = self._poll_intervals.pop(sid, None)
-        self._post_process.pop(sid, None)        # source 소멸 — 무장/보류 해제
-        self._pending_arm.pop(sid, None)
-        self._finished_latch.discard(sid)
-        # target의 latch는 **건드리지 않는다** — 흡수분이 CREATED면 다음 완료
-        # 감지가 non-terminal을 보고 알아서 푼다(그 job이 terminal이 되려면
-        # submit을 거쳐야 하고, 착수 확정에서도 푼다). 여기서 미리 풀면 완료본
-        # 둘을 합쳤을 때 — 아무 전이도 없는데 — 완료 통지가 또 나간다.
-        self._forget_paced(sid)                  # 사라진 jobset의 표시 보류분
-        self.polling.stop_polling(sid)
-        self.handlers.remove_all(sid)
-        self._invalidate_handle(sid)
-        # 폴링 재개 — 판단 기준은 **"target에 아직 관찰할 job이 있는가"**다.
-        # (src_iv 유무로 판단하면 결함이 된다: target이 전원 terminal이 돼
-        #  폴링이 자동 중지된 뒤 — monitor._maybe_auto_stop은 서비스 타이머만
-        #  끄고 아래 기억은 남긴다 — CREATED jobset을 흡수하면 src_iv가 None
-        #  이라 start_polling이 아예 안 불린다. 관찰할 일이 다시 생겼는데도
-        #  폴링이 죽은 채라, 폴링 tick에 tie된 handler가 흡수분에 영영
-        #  침묵한다.)
-        # interval은 src/tgt의 기억 중 짧은 쪽, 둘 다 없으면 기본값.
-        # ※ 이 재개는 "사용자가 stop_polling으로 끈 폴링은 되살리지 않는다"는
-        #   기존 계약보다 우선한다 — 관찰 대상이 있는데 조용히 멈춰 있는 쪽이
-        #   더 나쁜 실패이기 때문. 볼 것이 없어지면 _maybe_auto_stop이 다시 끈다.
-        try:
-            watchable = any(not r.state.is_terminal
-                            for r in self.store.get_jobs(tid))
-        except LsfmgrError:                      # target 소멸(있을 수 없음)
-            watchable = False
-        if watchable:
-            tgt_iv = self._poll_intervals.get(tid)
-            ivs = [v for v in (src_iv, tgt_iv) if v is not None]
-            self.start_polling(tid, min(ivs) if ivs else None)
-        if changed:
-            self._relay_jobs_changed(tid, list(changed))
+            # 교체분의 handler 장부를 무효화한다 — job_key는 유지되므로
+            # 옛 _FINISHED가 남으면 그 키의 **새 job**에 handler가 영영
+            # 침묵한다. 추가분은 장부가 없어 no-op이다.
+            self.handlers.rearm(jobset_id, [r.job_key for r in changed])
+            self._relay_jobs_changed(jobset_id, list(changed))
+        self._resume_polling_if_watchable(jobset_id)
         return changed
 
-    def can_merge(self, target_id, source_id) -> bool:
-        """[sync, snapshot] merge_from 가능 여부 — 양쪽 전 job이 비활성이고
-        진행 중 작업(submit/kill)이 없으면 True. GUI 버튼 활성화 판단용."""
-        target_id = self._jsid(target_id)
-        source_id = self._jsid(source_id)
+    def _resume_polling_if_watchable(self, jobset_id: str) -> None:
+        """관찰할 job(비terminal)이 생겼으면 폴링을 (재)시작한다.
+
+        job 목록이 늘거나 바뀌는 경로의 공통 뒷정리. 전원 terminal이 돼
+        폴링이 **자동 중지**된 뒤(monitor._maybe_auto_stop은 서비스 타이머만
+        끄고 아래 기억은 남긴다) job이 추가되면, 관찰할 일이 다시 생겼는데도
+        폴링이 죽은 채로 남는다 — 폴링 tick에 tie된 handler가 새 job에 영영
+        침묵한다(리뷰 사이클 15).
+        interval은 이 jobset의 기억, 없으면 기본값.
+        ※ 이 재개는 "사용자가 stop_polling으로 끈 폴링은 되살리지 않는다"는
+          계약보다 우선한다 — 관찰 대상이 있는데 조용히 멈춰 있는 쪽이 더
+          나쁜 실패이기 때문. 볼 것이 없어지면 _maybe_auto_stop이 다시 끈다."""
         try:
-            if target_id == source_id:
-                return False
-            # 삭제된 jobset은 아래 get_jobs가 JobSetNotFoundError —
-            # except LsfmgrError로 떨어져 False가 된다(merge()의 예외와 일치)
-            if (self.submitter.is_active(target_id)
-                    or self.submitter.is_active(source_id)
-                    or self.killer.is_active(target_id)
-                    or self.killer.is_active(source_id)):
-                return False
-            return all(r.state.is_inactive
-                       for r in (self.get_jobs(target_id)
-                                 + self.get_jobs(source_id)))
-        except LsfmgrError:
-            return False
+            watchable = any(not r.state.is_terminal
+                            for r in self.store.get_jobs(jobset_id))
+        except LsfmgrError:                      # jobset 소멸
+            return
+        if watchable:
+            self.start_polling(jobset_id, self._poll_intervals.get(jobset_id))
 
     def remove_job(self, jobset_id, *,
                     job_id: Optional[int] = None,
