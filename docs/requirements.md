@@ -107,11 +107,12 @@ mgr.upsert_jobs(js, commands, *, merge_ids, ..., force=False) -> list[JobRecord]
 mgr.remove_job(js, *, job_id=None, merge_id=None, job_key=None, force=False)
 mgr.clear_jobs(js, *, force=False)               # job만 전부 삭제 (jobset은 남음)
 mgr.set_user_data(js, ref, user_data)            # ref = job_key | merge_id | job_id
-mgr.can_submit(js) -> bool
+mgr.can_submit(js, *, only=None) -> bool
 mgr.remove_jobset(js, *, force=False)            # jobset 자체 삭제 (전원 terminal)
 
 # --- 실행 (async→Signal) ---
-mgr.submit(js, *, pre_submit=None, post_process=None, **opts) -> JobSet  # 전 job (재)제출
+mgr.submit(js, *, only=None, pre_submit=None, post_process=None, **opts) -> JobSet
+                                                 # only=None이면 전 job (재)제출
 mgr.kill(js, *, only_state=None, verify=None, cancel_submit=False)
 mgr.kill_jobs(js, job_keys, *, verify=None, cancel_submit=False)   # 선택 job만
 mgr.kill_jobs(job_keys=[...])                # 핸들 없이 key만으로 (jobset 자동 추적)
@@ -300,8 +301,13 @@ JobSetStore(ABC) ── InMemoryStore
 ## 6. 기능 요구사항 (FR)
 
 - **FR-1 Submission**: `mgr.submit(js)` — jobset의 **전 job (재)제출**(유일 경로).
-  전원 비활성(`can_submit`)이어야 하며 활성이 있으면 `SubmitNotAllowedError`.
+  대상이 전원 비활성(`can_submit`)이어야 하며 활성이 있으면 `SubmitNotAllowedError`.
   리셋 후 재실행되므로 같은 job_key가 전이(핸들·테이블 연속).
+  - **FR-1.0** `only=[ref, ...]`(job_key/merge_id/job_id)를 주면 **그 job만**
+    제출한다. 가드는 제출 대상에만 걸리므로 다른 job이 RUN이어도 진행되지만,
+    대상 자신이 활성이면 거부한다(리셋이 살아있는 job을 추적 불가로 만든다).
+    빈 리스트는 `SubmitNotAllowedError`. 사전 확인은 `can_submit(js, only=…)`.
+    rearm/리포트 집계도 선택분 기준이다.
   - **FR-1.1** 입력은 wrapper 커맨드 — 토큰 리스트는 그대로, 문자열은 `shlex` 분해
     후 **그대로 subprocess 실행**한다(인자 조립·주입 없음).
   - **FR-1.2** stdout에서 `Job <(\d+)>` 파싱으로 job_id 확보. 실패 시
@@ -479,7 +485,7 @@ Qt 비의존 유지: options/config/states/command/store/jobset_core (Qt 없이 
     예외 격리, 폴링 사이클 구동, 재제출 후 재무장
 16. **생성/편집 (FR-5.4/5.5)**: create_jobset가 유일 생성 경로, 이후는 편집 3형제,
     merge_id replace 시 물리 키 유지·요약 불변식, force는 레코드만
-17. **재실행**: `mgr.replace_jobs(js, …) + mgr.submit(js)`로 실패분 교체 후 전체 재실행,
+17. **재실행**: `mgr.replace_jobs(js, …) + mgr.submit(js, only=…)`로 실패분만 교체·재실행,
     merge_id·user_data·submit_cwd 보존
 18. **pre_submit 게이트 (FR-9)**: False/예외 시 레코드 원상, 신호 순서 보장,
     통과 후에만 rearm/AUTO-1

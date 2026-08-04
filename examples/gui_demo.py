@@ -7,7 +7,7 @@
     (진행률 바 / 취소 / rate limit / retry)
   - 다중 JobSet 트리 + 요약 실시간 갱신 + job 테이블 증분 upsert (README §5)
   - job 추가는 **add_jobs**: 기존 jobset 에 직접 추가
-  - 실패 재실행: 같은 merge_id 로 **replace_jobs** 교체 후 전체 재제출
+  - 실패 재실행: **replace_jobs** 로 교체 후 `submit(only=…)` 로 그것만 재제출
   - kill: 전체(verify, **MC-aware** — 생성자 cluster_envpaths 로 분류 kill) /
     PEND만 / 선택 행만 (job_id chunk 단일 경로)
   - JobSet handler: RUN 중 폴링마다 job 출력 파싱 + 종료 시 최종 1회
@@ -351,13 +351,14 @@ class Dashboard(QWidget):
                          f"(미제출, Submit 은 전체 재제출)")
 
     def rerun_failed(self):
-        """실패 job 을 같은 merge_id 로 교체(merge) 후 전체 재제출 (v9 패턴)."""
+        """실패 job 만 같은 merge_id 로 교체한 뒤 **그것만** 재제출."""
         js = self._handle()
         if js is None:
             return
         failed = [r for r in js.jobs() if r.state.is_failed]
-        if not failed or not self.mgr.can_submit(js):
-            self._log(js.id, "rerun 불가 — 실패분 없음 또는 활성 job 존재")
+        keys = [r.job_key for r in failed]
+        if not failed or not self.mgr.can_submit(js, only=keys):
+            self._log(js.id, "rerun 불가 — 실패분 없음 또는 그 job 이 활성")
             return
         # 같은 merge_id 로 교체 — job_key 가 유지돼 표의 행이 이어진다.
         # (실무에선 여기서 커맨드를 고쳐 넣는다. 데모는 원본 그대로 재실행)
@@ -365,10 +366,12 @@ class Dashboard(QWidget):
             js, [shlex.split(r.command) for r in failed],
             merge_ids=[r.merge_id for r in failed],
             user_datas=[r.user_data for r in failed])
-        self.mgr.submit(js, post_process=self._summarize_results,
+        # only= 로 실패분만 — 성공한 job 의 결과는 그대로 두고, 다른 job 이
+        # 아직 돌고 있어도 막히지 않는다
+        self.mgr.submit(js, only=keys, post_process=self._summarize_results,
                         auto_poll=False)
         self.mgr.start_polling(js, 1)
-        self._log(js.id, f"rerun — 실패 {len(failed)}건 교체 후 전체 재제출")
+        self._log(js.id, f"rerun — 실패 {len(failed)}건만 교체 후 재제출")
 
     # ------------------------------------------------------------------
     # kill / 제어

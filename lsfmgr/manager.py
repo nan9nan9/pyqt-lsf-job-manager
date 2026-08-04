@@ -266,15 +266,31 @@ class LsfJobManager(QObject):
     # High-level submit (v7 §1.1) — JobSet 핸들 반환
     # ------------------------------------------------------------------
     def submit(self, js, *,
+               only: Optional[Sequence] = None,
                pre_submit: Optional[Callable[[List[str]], bool]] = None,
                post_process: Optional[Callable[[list], Any]] = None,
                **kwargs: Any) -> JobSet:
-        """[async→Signal] jobset 제출 — **유일한 제출 경로** (v9).
+        """[async→Signal] jobset 제출 — **유일한 제출 경로**.
 
-        jobset의 **전 job**을 (재)제출한다: 전원 비활성(CREATED/DONE/EXIT/
-        SUBMIT_FAILED/LOST)이어야 하며 활성이 있으면 LsfmgrError —
+        기본은 jobset의 **전 job** (재)제출이다: 대상이 전원 비활성(CREATED/
+        DONE/EXIT/SUBMIT_FAILED/LOST)이어야 하며 활성이 있으면 LsfmgrError —
         can_submit(js)로 선확인. 리셋 후 재실행되므로 같은 jobset/job_key가
-        전이된다(핸들·테이블 연속). 흐름:
+        전이된다(핸들·테이블 연속).
+
+        only=[ref, ...]: 지정하면 **그 job들만** 제출한다. ref는 job_key /
+        merge_id / job_id(int) 중 아무거나 — remove_job·set_user_data의 ref와
+        같은 규칙이다. 나머지 job은 상태도 레코드도 건드리지 않으므로,
+        **다른 job이 RUN 중이어도** 선택분만 돌릴 수 있다(전체 제출과 달리
+        '전원 비활성' 가드가 선택분에만 걸린다). 실패분만 재실행하거나 GUI
+        테이블에서 고른 행만 돌릴 때 쓴다:
+
+            failed = [r.job_key for r in js.failed_jobs]
+            mgr.submit(js, only=failed)
+
+        빈 리스트는 SubmitNotAllowedError — '아무것도 안 함'을 조용히
+        성공으로 처리하면 호출자 실수가 묻힌다.
+
+        흐름:
 
             js = mgr.create_jobset(
                 ["customwrapper_sub -q normal run_0.sp",
@@ -287,15 +303,17 @@ class LsfJobManager(QObject):
         원상 유지. 신호: (pre_submit_started → pre_submit_finished(ok)) →
         submit_started → jobs_updated/progress → submit_finished.
 
-        post_process(records)->Any: 지정 시 이 제출의 **전 job이 terminal**에
-        도달하면(폴링/query_once로 완료 감지) worker에서 1회 실행. 인자는 최종
+        post_process(records)->Any: 지정 시 **jobset의 전 job이 terminal**에
+        도달하면(폴링/query_once로 완료 감지) worker에서 1회 실행. only로
+        일부만 제출했어도 판정 대상은 jobset 전체다 — 안 돌린 job이 아직
+        RUN이면 그것까지 끝나야 발화한다. 인자는 최종
         JobRecord 목록(성공/실패 혼재 가능 — DONE/EXIT/SUBMIT_FAILED/LOST 무관
         전원 terminal이면 실행). 반환값은 post_processing_finished로 전달.
         신호: post_processing_started → post_processing_finished(result).
         ※ pre_submit·post_process 콜백 모두 worker 스레드 실행 — GUI 접근 금지.
         옵션(kwargs): workers/max_retry/rate_limit_per_s/auto_poll/
         poll_interval_s/submit_timeout_s 등 (§1.2)."""
-        return self._submit_jobset(js, pre_submit=pre_submit,
+        return self._submit_jobset(js, only=only, pre_submit=pre_submit,
                                    post_process=post_process, **kwargs)
 
     @staticmethod
@@ -892,10 +910,14 @@ class LsfJobManager(QObject):
     # ------------------------------------------------------------------
     # jobset 단위 submit (v9) — 전 job (재)제출
     # ------------------------------------------------------------------
-    def can_submit(self, jobset_id: str) -> bool:
-        """[sync, snapshot] submit_jobset 가능 여부 — job이 1건 이상 있고
-        전원 비활성(CREATED/DONE/EXIT/SUBMIT_FAILED/LOST)이며 진행 중
-        submit/kill이 없으면 True. GUI 버튼 활성화 판단용."""
+    def can_submit(self, jobset_id: str, *,
+                   only: Optional[Sequence] = None) -> bool:
+        """[sync, snapshot] submit 가능 여부 — 대상 job이 1건 이상 있고 전원
+        비활성(CREATED/DONE/EXIT/SUBMIT_FAILED/LOST)이며 진행 중 submit/kill이
+        없으면 True. GUI 버튼 활성화 판단용.
+
+        only를 주면 **그 job들만** 본다 — 나머지가 RUN이어도 True일 수 있다
+        (submit(only=...)의 가드와 같은 술어)."""
         jobset_id = self._jsid(jobset_id)
         try:
             # 삭제된 jobset은 아래 get_jobs가 JobSetNotFoundError —
@@ -903,17 +925,49 @@ class LsfJobManager(QObject):
             if (self.submitter.is_active(jobset_id)
                     or self.killer.is_active(jobset_id)):
                 return False
-            jobs = [r for r in self.get_jobs(jobset_id)
-                    if r.array_index is None]
+            jobs = self._submit_targets(jobset_id, only)
             return bool(jobs) and all(r.state.is_inactive for r in jobs)
         except LsfmgrError:
             return False
 
+    def _submit_targets(self, jobset_id: str,
+                        only: Optional[Sequence]) -> List[JobRecord]:
+        """제출 대상 레코드 — only=None이면 전 job, 아니면 지정분만.
+
+        array element(array_index 지정분)는 개별 제출 대상이 아니다 — parent
+        job 하나가 element 전체를 만들므로 element만 따로 제출할 수 없다.
+        전체 제출에서는 조용히 걸러지고, only로 콕 집으면 오류로 알린다
+        (조용히 무시하면 '선택했는데 안 돌았다'가 된다)."""
+        jobs = self.get_jobs(jobset_id)
+        if only is None:
+            return [r for r in jobs if r.array_index is None]
+        by_key = {r.job_key: r for r in jobs}
+        by_mid = {r.merge_id: r for r in jobs if r.merge_id is not None}
+        by_jid = {r.job_id: r for r in jobs if r.job_id is not None}
+        out: List[JobRecord] = []
+        seen = set()
+        for ref in only:
+            rec = (by_jid.get(ref) if isinstance(ref, int)
+                   else (by_key.get(ref) or by_mid.get(ref)))
+            if rec is None:
+                raise JobNotFoundError(f"{jobset_id}/{ref}")
+            if rec.array_index is not None:
+                raise ValueError(
+                    f"array element는 개별 제출할 수 없습니다: {ref!r}"
+                    f" (parent job을 제출하세요)")
+            if rec.job_key in seen:              # 같은 job을 두 형태로 지정
+                continue
+            seen.add(rec.job_key)
+            out.append(rec)
+        return out
+
     def _submit_jobset(self, js: "JobSet",
+                       only: Optional[Sequence] = None,
                        pre_submit: Optional[Callable[[List[str]], bool]] = None,
                        post_process: Optional[Callable[[list], Any]] = None,
                        **kwargs: Any) -> JobSet:
-        """jobset 전 job (재)제출 — mgr.submit(js, ...)의 구현."""
+        """jobset (재)제출 — mgr.submit(js, ...)의 구현.
+        only=None이면 전 job, 아니면 지정분만."""
         jobset_id = self._jsid(js)
         if self._shutdown_done:
             # shutdown 후 제출은 아무도 join하지 않는 스레드/영영 안 오는
@@ -927,10 +981,15 @@ class LsfJobManager(QObject):
             raise SubmitNotAllowedError(
                 f"{jobset_id}: submit/kill 진행 중에는 submit할 수 없습니다",
                 jobset_id=jobset_id)
-        jobs = [r for r in self.get_jobs(jobset_id) if r.array_index is None]
+        jobs = self._submit_targets(jobset_id, only)
         if not jobs:
             raise SubmitNotAllowedError(
-                f"{jobset_id}: 제출할 job이 없습니다", jobset_id=jobset_id)
+                f"{jobset_id}: 제출할 job이 없습니다"
+                + (" (only=[] — 빈 선택)" if only is not None else ""),
+                jobset_id=jobset_id)
+        # 가드는 **제출 대상**에만 건다 — only로 일부만 돌릴 때 나머지가 RUN
+        # 이어도 막지 않는다. 대상 job은 리셋(이전 job_id/이력 소거) 후 다시
+        # 제출되므로, 그것이 활성이면 LSF에 살아있는 job을 추적 불가로 만든다.
         busy = [r.job_key for r in jobs if not r.state.is_inactive]
         if busy:
             raise SubmitNotAllowedError(

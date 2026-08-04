@@ -350,8 +350,23 @@ mgr.replace_jobs(js, ["customwrapper_sub -i a_fixed.sp"],
                  merge_ids=["case-a"])     # case-a만 CREATED로 교체
                                            # (다른 job의 결과는 그대로,
                                            #  물리 키 유지 — 테이블 행 연속)
-mgr.submit(js)                             # 전체 재실행
+mgr.submit(js, only=["case-a"])            # 그 job만 재실행
 ```
+
+**일부만 제출** — `only=[ref, ...]`에 `job_key` / `merge_id` / `job_id`를 섞어
+줄 수 있습니다(`remove_job`의 ref와 같은 규칙).
+
+```python
+mgr.submit(js, only=[r.job_key for r in js.failed_jobs])   # 실패분만
+```
+
+> "전원 비활성" 가드가 **제출 대상에만** 걸립니다 — 다른 job이 `RUN` 중이어도
+> 선택분만 돌릴 수 있습니다. 단 **대상 자신이 활성이면 거부**됩니다: 제출은
+> 레코드를 리셋(이전 `job_id`/이력 소거)하므로, 살아있는 job을 그대로 두면
+> 추적이 끊깁니다. 사전 확인은 `mgr.can_submit(js, only=[...])`.
+>
+> 빈 리스트(`only=[]`)는 `SubmitNotAllowedError` — "아무것도 안 함"을 조용히
+> 성공으로 처리하면 호출자 실수가 묻힙니다.
 
 재제출 리셋은 이전 실행 흔적(job_id/exit_code/실행시간/fail_message/`killed`/
 클러스터)을 지우고, `merge_id`/`user_data`/`submit_cwd`는 보존합니다. handler(§5.7)도 자동
