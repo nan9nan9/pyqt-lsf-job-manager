@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import replace as dc_replace
 
+from tests.conftest import mk_jobset
 from lsfmgr import InMemoryStore, LsfJobManager
 
 
@@ -15,7 +16,7 @@ from lsfmgr import InMemoryStore, LsfJobManager
 # 내가 죽인 job — killed=True (기본 optimistic 정책: 즉시 EXIT 전이와 함께)
 # ----------------------------------------------------------------------
 def test_killed_flag_set_by_kill(qtbot, manager, fake_lsf):
-    js = manager.create_jobset(["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
 
@@ -31,7 +32,7 @@ def test_killed_flag_set_by_kill(qtbot, manager, fake_lsf):
 # 시스템/자연 종료로 EXIT된 job — killed=False (exit_code는 kill과 무구분)
 # ----------------------------------------------------------------------
 def test_system_exit_is_not_flagged(qtbot, manager, fake_lsf):
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
 
@@ -47,7 +48,7 @@ def test_system_exit_is_not_flagged(qtbot, manager, fake_lsf):
 # 부분 kill — 죽인 것만 표시, 나머지는 그대로
 # ----------------------------------------------------------------------
 def test_partial_kill_flags_only_targets(qtbot, manager, fake_lsf):
-    js = manager.create_jobset(["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
 
@@ -64,7 +65,7 @@ def test_partial_kill_flags_only_targets(qtbot, manager, fake_lsf):
 # 재제출하면 표식이 지워진다 — 새 실행의 결과는 새 근거로 판단해야 한다
 # ----------------------------------------------------------------------
 def test_flag_cleared_on_resubmit(qtbot, manager, fake_lsf):
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
     with qtbot.waitSignal(manager.kill_finished, timeout=10000):
@@ -86,7 +87,7 @@ def test_actual_policy_flags_and_mutes(qtbot, fake_lsf, config):
     try:
         fired = []
         mgr.jobset_finished.connect(lambda j, s: fired.append(s))
-        js = mgr.create_jobset(["customwrapper_sub a.sp"])
+        js = mk_jobset(mgr, ["customwrapper_sub a.sp"])
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             mgr.submit(js, auto_poll=False)
 

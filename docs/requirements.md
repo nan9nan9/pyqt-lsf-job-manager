@@ -55,7 +55,7 @@ mgr = LsfJobManager()
 # job 생성은 create_jobset 한 곳 — 생성 시 job까지 함께 만든다
 js = mgr.create_jobset(
     ["customwrapper_sub -i a.sp", "customwrapper_sub -i b.sp"],
-    merge_ids=["case-a", "case-b"],            # 논리 키 (교체 대상 기준)
+    job_keys=["case-a", "case-b"],            # 논리 키 (교체 대상 기준)
     user_datas=[{"rev": 3}, None],             # job별 사용자 데이터 (보존만)
     label="sweep")
 
@@ -67,7 +67,9 @@ if mgr.can_submit(js):
 
 - **생성 후 job 목록 편집은 3형제** — `add_jobs`(추가) / `replace_jobs`(교체) /
   `upsert_jobs`(있으면 교체, 없으면 추가). 인자는 `create_jobset`과 같은 모양이고,
-  교체는 물리 키(job_key)를 유지해 테이블 행이 이어진다.
+  교체는 같은 job_key 자리를 갈아끼워 테이블 행이 이어진다.
+  **job_keys는 필수**다 — 라이브러리가 이름을 대신 짓지 않는다(그 job을 나중에
+  가리킬 수단이 이 키뿐이라, 자동 생성하면 앱이 자기 job을 못 찾는다).
 - 라이프사이클 자동화:
   - **AUTO-1**: `submit()` 시 polling 자동 시작 (`auto_poll=False`로 해제)
   - **AUTO-2**: JobSet 전원 terminal(또는 활동 없음 2사이클) 도달 시 polling 자동 중지
@@ -97,16 +99,16 @@ if mgr.can_submit(js):
 
 ```python
 # --- 생성/구성 (sync) ---
-mgr.create_jobset(commands=(), *, merge_ids=None, user_datas=None,
+mgr.create_jobset(commands=(), *, job_keys=None, user_datas=None,
                   work_dir=None, work_dirs=None,
                   label="", tags=(), intended_count=0) -> JobSet
-mgr.add_jobs(js, commands, *, merge_ids=None, user_datas=None,
+mgr.add_jobs(js, commands, *, job_keys=None, user_datas=None,
              work_dir=None, work_dirs=None) -> list[JobRecord]
-mgr.replace_jobs(js, commands, *, merge_ids, ..., force=False) -> list[JobRecord]
-mgr.upsert_jobs(js, commands, *, merge_ids, ..., force=False) -> list[JobRecord]
-mgr.remove_job(js, *, job_id=None, merge_id=None, job_key=None, force=False)
+mgr.replace_jobs(js, commands, *, job_keys, ..., force=False) -> list[JobRecord]
+mgr.upsert_jobs(js, commands, *, job_keys, ..., force=False) -> list[JobRecord]
+mgr.remove_jobs(js, refs, *, force=False)       # refs = [job_key | job_id, ...]
 mgr.clear_jobs(js, *, force=False)               # job만 전부 삭제 (jobset은 남음)
-mgr.set_user_data(js, ref, user_data)            # ref = job_key | merge_id | job_id
+mgr.set_user_data(js, ref, user_data)            # ref = job_key | job_key | job_id
 mgr.can_submit(js, *, only=None) -> bool
 mgr.remove_jobset(js, *, force=False)            # jobset 자체 삭제 (전원 terminal)
 
@@ -170,16 +172,17 @@ class JobSet(QObject):
 | 용어 | 코드 명칭 | 정의 |
 |---|---|---|
 | **JobSet** | `jobset_id`, `JobSet` 객체 | 논리적 job 묶음. 모든 기능의 기본 단위 |
-| **merge_id** | `JobRecord.merge_id` | job의 **논리 키** — merge 시 같은 merge_id 기존 job을 replace |
+| **job_key** | `JobRecord.job_key` | jobset 내 유일한 job의 키. **앱이 정한다(필수)**. 재제출·교체에도 유지 — 교체 대상·ref·표 행의 정체성 |
 | **user_data** | `JobRecord.user_data` | 사용자 정의 dict(JSON-able). 라이브러리는 **보존만** |
-| **job_key** | `JobRecord.job_key` | jobset 내 유일한 물리 키 `<jsid>_<idx>` — LSF에 부착되지 않는 순수 내부 키 |
 | **Array Job** | `array_index` | wrapper 제출 산물로만 존재하는 element(라이브러리가 array를 직접 제출하지는 않는다) |
 
 관계 규칙:
 - JobSet이 유일한 논리 단위이고, LSF 쪽 추적 수단은 **job_id 하나뿐**이다
   (group/name 부착물을 만들지 않는다).
-- **merge_id**는 jobset 내 유일(None 제외). replace 시 물리 키(`job_key`) 유지 →
-  테이블 행 연속. 없거나 None이면 신규 추가.
+- **job_key**는 jobset 내 유일. 교체는 같은 키 자리를 갈아끼우므로 테이블 행이
+  이어진다. LSF에 부착되지 않는 순수 내부 키라 형식 제약은 없다.
+  (구 merge_id는 이 키와 역할이 겹쳐 삭제됐다 — merge API가 사라지면서
+  "물리 키 vs 논리 키"를 나눌 이유가 없어졌다.)
 
 ---
 
@@ -213,7 +216,7 @@ class JobState(Enum):
 
 모든 예외는 `LsfmgrError`를 base로 하며(순수 Python, Qt 비의존), 앱은 한 곳
 (`except LsfmgrError`)에서 다 잡거나 세분화된 타입으로 개별 처리한다. 입력이 잘못된
-**프로그래밍 오류**(길이 불일치·빈 커맨드·merge_id 중복·범위 위반)는
+**프로그래밍 오류**(길이 불일치·빈 커맨드·job_key 중복·범위 위반)는
 `ValueError`/`TypeError`로 별도 신호한다 — 도메인 상태 오류와 구분.
 
 ```
@@ -222,7 +225,7 @@ Exception
 └── LsfmgrError                       # lsfmgr 모든 예외의 base
     ├── JobSetNotFoundError           # 존재하지 않는(삭제 포함) jobset_id 접근
     ├── JobSetRemovedError            # 삭제된 JobSet 핸들 접근
-    ├── JobNotFoundError              # jobset 내 없는 job(job_id/merge_id/job_key)
+    ├── JobNotFoundError              # jobset 내 없는 job(job_id/job_key/job_key)
     ├── LsfCommandError               # LSF 명령 실행 실패 (제출 제외)
     │       .returncode / .stderr
     ├── SubmitError                   # 제출 **실행** 실패 (JobRecord.fail_reason 기록)
@@ -232,7 +235,7 @@ Exception
             .jobset_id / .job_keys    #   막은 원인을 구조화(메시지 파싱 불필요)
         ├── SubmitNotAllowedError     # 활성 job / 제출할 job 없음 / submit·kill 진행 중
         ├── JobEditNotAllowedError    # 교체 대상 활성 / submit·kill 진행 중
-        ├── RemoveNotAllowedError     # remove_job·clear_jobs 대상이 활성 (force로 강제)
+        ├── RemoveNotAllowedError     # remove_jobs·clear_jobs 대상이 활성 (force로 강제)
         └── RemoveJobSetNotAllowedError  # 전원 terminal 아님 (force=True로 강제)
 ```
 
@@ -303,7 +306,7 @@ JobSetStore(ABC) ── InMemoryStore
 - **FR-1 Submission**: `mgr.submit(js)` — jobset의 **전 job (재)제출**(유일 경로).
   대상이 전원 비활성(`can_submit`)이어야 하며 활성이 있으면 `SubmitNotAllowedError`.
   리셋 후 재실행되므로 같은 job_key가 전이(핸들·테이블 연속).
-  - **FR-1.0** `only=[ref, ...]`(job_key/merge_id/job_id)를 주면 **그 job만**
+  - **FR-1.0** `only=[ref, ...]`(job_key/job_key/job_id)를 주면 **그 job만**
     제출한다. 가드는 제출 대상에만 걸리므로 다른 job이 RUN이어도 진행되지만,
     대상 자신이 활성이면 거부한다(리셋이 살아있는 job을 추적 불가로 만든다).
     빈 리스트는 `SubmitNotAllowedError`. 사전 확인은 `can_submit(js, only=…)`.
@@ -350,14 +353,14 @@ JobSetStore(ABC) ── InMemoryStore
 - **FR-5 JobSet 관리**:
   - **FR-5.1** 요약(불변식 합계==intended_count), **FR-5.2** intended_count 정합,
   - **FR-5.3** 손실 감지(`detect_lost` — ID 미확보 SUBMITTING → LOST 확정),
-  - **FR-5.4** 생성(`create_jobset` 한 곳: commands/merge_ids/user_datas/work_dir(s))
+  - **FR-5.4** 생성(`create_jobset` 한 곳: commands/job_keys/user_datas/work_dir(s))
     — 이후 편집은 FR-5.5,
-  - **FR-5.5** 편집 3형제(add_jobs/replace_jobs/upsert_jobs): merge_id가 이미
-    있을 때의 처리만 다르다(거부/교체/교체). 교체는 물리 키(job_key) 유지 —
+  - **FR-5.5** 편집 3형제(add_jobs/replace_jobs/upsert_jobs): job_key가 이미
+    있을 때의 처리만 다르다(거부/교체/교체). 교체는 같은 job_key 자리 —
     테이블 행 연속. 가드=submit·kill 미진행 + 교체 대상이 비활성,
     `force`=레코드만 강제(LSF 정리는 앱 책임). 편집 후 관찰 대상이 있으면
     폴링 자동 재개, 변경분의 handler 장부는 무효화,
-  - **FR-5.6** remove_job(job_id/merge_id/job_key, force)·clear_jobs(force) — 비활성만,
+  - **FR-5.6** remove_jobs(refs, force)·clear_jobs(force) — 비활성만,
     force로 레코드만 강제 삭제, intended_count 함께 감소,
   - **FR-5.7** remove_jobset — 전원 terminal일 때 jobset을 **레코드째 삭제**
     (force로 강제). 삭제분은 list/search/get_jobs 어디에도 남지 않는다 —
@@ -484,9 +487,9 @@ Qt 비의존 유지: options/config/states/command/store/jobset_core (Qt 없이 
 15. **handler (FR-7)**: start/end state 구간 준수(시작 전 미발화·종료 시 final 1회),
     예외 격리, 폴링 사이클 구동, 재제출 후 재무장
 16. **생성/편집 (FR-5.4/5.5)**: create_jobset가 유일 생성 경로, 이후는 편집 3형제,
-    merge_id replace 시 물리 키 유지·요약 불변식, force는 레코드만
+    replace 시 같은 job_key 자리 유지·요약 불변식, force는 레코드만
 17. **재실행**: `mgr.replace_jobs(js, …) + mgr.submit(js, only=…)`로 실패분만 교체·재실행,
-    merge_id·user_data·submit_cwd 보존
+    job_key·user_data·submit_cwd 보존
 18. **pre_submit 게이트 (FR-9)**: False/예외 시 레코드 원상, 신호 순서 보장,
     통과 후에만 rearm/AUTO-1
 19. **post_process 후처리 (FR-10)**: 전원 terminal(성공/실패 무관) 시 1회 실행,

@@ -17,7 +17,7 @@ from datetime import datetime
 import pytest
 
 from lsfmgr.command import _parse_lsf_time
-from tests.conftest import submit_cmds
+from tests.conftest import mk_jobset, submit_cmds
 from lsfmgr.states import JobState
 
 
@@ -73,7 +73,7 @@ def test_kill_jobs_single_array_element(qtbot, manager, fake_lsf):
     from tests.fake_lsf import FakeJob
     from lsfmgr import JobRecord
 
-    js = manager.create_jobset(intended_count=3)
+    js = mk_jobset(manager, intended_count=3)
     jsid, parent = js.id, 9400
     manager.store.store_add_jobs([JobRecord(
         job_id=parent, array_index=i, jobset_id=jsid,

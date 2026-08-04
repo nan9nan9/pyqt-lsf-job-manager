@@ -16,7 +16,7 @@ import dataclasses
 from lsfmgr import LsfConfig
 from lsfmgr.command import JobStatus, LsfCommand
 from lsfmgr.states import JobRecord
-from tests.conftest import submit_cmds
+from tests.conftest import mk_jobset, submit_cmds
 
 
 def _fields(cls):
@@ -56,13 +56,13 @@ def test_working_dir_field_is_gone():
 def test_submit_cwd_is_request_value_only(qtbot, manager):
     """작업 디렉토리는 요청값으로만 정해진다 — 폴링이 채우지 않는다.
     미지정이면 None(= 부모 프로세스 cwd)이 그대로 유지된다."""
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     assert js.jobs()[0].submit_cwd is None
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
     manager.querier.query(js.id)                 # 폴링해도 안 채워진다
     assert js.jobs()[0].submit_cwd is None
 
-    js2 = manager.create_jobset(["customwrapper_sub b.sp"],
+    js2 = mk_jobset(manager, ["customwrapper_sub b.sp"],
                                 work_dir="/scratch/b")
     assert js2.jobs()[0].submit_cwd == "/scratch/b"

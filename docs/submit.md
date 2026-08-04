@@ -59,8 +59,8 @@ js = mgr.create_jobset(
 
 - **`work_dir`(단일)** 과 **`work_dirs`(job 별 리스트)** 는 **동시 지정 불가** —
   둘 중 하나만 쓴다(같이 주면 `ValueError`). 둘 다 없으면 부모(GUI) 프로세스의 cwd.
-- 각 job 의 `submit_cwd` 레코드 필드로 저장돼 **재제출·merge 에도 보존**된다.
-  merge 시 `merge_id` 가 일치하는 job 은 replace 규칙에 따라 내용 전체가 신규
+- 각 job 의 `submit_cwd` 레코드 필드로 저장돼 **재제출·교체 에도 보존**된다.
+  merge 시 `job_key` 가 일치하는 job 은 replace 규칙에 따라 내용 전체가 신규
   레코드로 교체되므로 `work_dir` 도 신규 값으로 바뀐다.
 - 존재하지 않는 디렉토리를 주면 그 job 은 `SUBMIT_FAILED`(fail_reason
   `BSUB_OSERROR`) 로 분류돼 마무리된다(불투명 크래시 아님).
@@ -245,7 +245,7 @@ mgr.remove_handler(js, "collect")        # 해제
 
 ---
 
-## 7. job 재실행 — merge + submit
+## 7. job 재실행 — replace_jobs + submit
 
 재실행 전용 API 는 없다. 재실행은 **데이터 조작 + 일반 submit** 으로 표현한다 —
 job control 은 앱(GUI)이 직접 갖는다:
@@ -254,10 +254,10 @@ job control 은 앱(GUI)이 직접 갖는다:
 # 1) 살아있는 job 이 있으면 먼저 kill (앱이 직접)
 mgr.kill(js); ...kill_finished 대기...
 
-# 2) 다시 돌릴 job 을 같은 merge_id 로 교체
+# 2) 다시 돌릴 job 을 같은 job_key 로 교체
 mgr.replace_jobs(js, ["customwrapper_sub -q long a.sp"],
-                 merge_ids=["case-a"])
-                       # case-a 가 CREATED 로 교체(물리 키 유지),
+                 job_keys=["case-a"])
+                       # case-a 가 CREATED 로 교체(같은 키 자리),
                        # 나머지 job 의 결과는 그대로
 
 # 3) jobset 단위 재제출 — 전 job 이 리셋 후 재실행된다
@@ -269,7 +269,7 @@ if mgr.can_submit(js):
   SUBMIT_FAILED/LOST)이어야 하며 활성(RUN/PEND/SUBMITTING)이 있으면
   `SubmitNotAllowedError`. `can_submit()` 으로 선확인.
 - 리셋이 이전 실행 흔적(job_id/exit_code/실행시간/fail_message/클러스터)을 지우고,
-  `merge_id`/`user_data`/`submit_cwd` 는 보존한다.
+  `job_key`/`user_data`/`submit_cwd` 는 보존한다.
 - 재실행되는 job 의 handler(§6)는 **자동 재무장**된다.
 - polling 은 `auto_poll`(기본) 옵션으로 submit 시 자동 시작된다.
 

@@ -21,6 +21,7 @@ add_jobs/upsert_jobs로 바뀐 뒤에도 같은 지점이 그 역할을 한다.
 """
 from __future__ import annotations
 
+from tests.conftest import mk_jobset
 from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
 from tests.fake_lsf import FakeLsf
 
@@ -46,7 +47,7 @@ def test_add_jobs_resumes_polling_after_auto_stop(qtbot):
     fake = FakeLsf()
     mgr = _mgr(fake)
     try:
-        js = mgr.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
+        js = mk_jobset(mgr, ["customwrapper_sub a.sp"], job_keys=["a"])
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             mgr.submit(js, auto_poll=True, poll_interval_s=5)
         fake.set_all("DONE", 0)
@@ -54,7 +55,7 @@ def test_add_jobs_resumes_polling_after_auto_stop(qtbot):
         assert not _polling_on(mgr, js.id)
         assert mgr._poll_intervals.get(js.id) == 5.0     # 기억은 남는다
 
-        mgr.add_jobs(js, ["customwrapper_sub b.sp"], merge_ids=["b"])
+        mgr.add_jobs(js, ["customwrapper_sub b.sp"], job_keys=["b"])
         qtbot.wait(150)
         assert _polling_on(mgr, js.id), "추가분이 있는데 폴링이 재개되지 않았다"
     finally:
@@ -77,7 +78,7 @@ def test_merged_job_handler_runs(qtbot):
     seen = []
     mgr.handler_finished.connect(lambda j, n, r: seen.append(r.job_key))
     try:
-        js = mgr.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
+        js = mk_jobset(mgr, ["customwrapper_sub a.sp"], job_keys=["a"])
         mgr.add_handler(js.id, "h", lambda ctx: ctx.job_key)
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             mgr.submit(js, auto_poll=False)
@@ -89,7 +90,7 @@ def test_merged_job_handler_runs(qtbot):
         qtbot.waitUntil(lambda: not _polling_on(mgr, js.id), timeout=5000)
         assert js.is_done                        # 자동 중지는 전원 terminal로
 
-        added = mgr.add_jobs(js, ["customwrapper_sub b.sp"], merge_ids=["b"])
+        added = mgr.add_jobs(js, ["customwrapper_sub b.sp"], job_keys=["b"])
         new_key = added[0].job_key
 
         # 재제출은 추가분 포함 전 job — 이후는 **타이머만** 관찰에 쓴다
@@ -114,7 +115,7 @@ def test_add_resumes_even_if_polling_was_explicitly_stopped(qtbot):
     fake = FakeLsf()
     mgr = _mgr(fake)
     try:
-        js = mgr.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
+        js = mk_jobset(mgr, ["customwrapper_sub a.sp"], job_keys=["a"])
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             mgr.submit(js, auto_poll=True, poll_interval_s=5)
         mgr.stop_polling(js)                     # 사용자가 명시적으로 끔
@@ -124,7 +125,7 @@ def test_add_resumes_even_if_polling_was_explicitly_stopped(qtbot):
         fake.set_all("DONE", 0)
         _poll(qtbot, mgr, js)
         mgr.add_jobs(js, ["customwrapper_sub b.sp"],
-                     merge_ids=["b"])            # 추가분(CREATED)이 남는다
+                     job_keys=["b"])            # 추가분(CREATED)이 남는다
         qtbot.waitUntil(lambda: _polling_on(mgr, js.id), timeout=5000)
     finally:
         mgr.shutdown()
@@ -136,7 +137,7 @@ def test_replace_of_finished_jobs_does_not_start_polling(qtbot):
     fake = FakeLsf()
     mgr = _mgr(fake)
     try:
-        js = mgr.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
+        js = mk_jobset(mgr, ["customwrapper_sub a.sp"], job_keys=["a"])
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             mgr.submit(js, auto_poll=True, poll_interval_s=5)
         fake.set_all("DONE", 0)
@@ -156,7 +157,7 @@ def test_resume_uses_remembered_interval(qtbot):
     fake = FakeLsf()
     mgr = _mgr(fake)
     try:
-        js = mgr.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
+        js = mk_jobset(mgr, ["customwrapper_sub a.sp"], job_keys=["a"])
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             mgr.submit(js, auto_poll=True, poll_interval_s=7)
         fake.set_all("DONE", 0)
@@ -164,7 +165,7 @@ def test_resume_uses_remembered_interval(qtbot):
         qtbot.waitUntil(lambda: not _polling_on(mgr, js.id), timeout=5000)
         assert mgr._poll_intervals.get(js.id) == 7.0     # 기억은 남는다
 
-        mgr.add_jobs(js, ["customwrapper_sub b.sp"], merge_ids=["b"])
+        mgr.add_jobs(js, ["customwrapper_sub b.sp"], job_keys=["b"])
         qtbot.wait(200)
         assert mgr._poll_intervals.get(js.id) == 7.0     # 그 값으로 재개
         assert _polling_on(mgr, js.id)

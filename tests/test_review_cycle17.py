@@ -20,6 +20,7 @@
 """
 from __future__ import annotations
 
+from tests.conftest import mk_jobset
 from lsfmgr import (InMemoryStore, JobRecord, JobState, LsfConfig,
                     LsfJobManager)
 from tests.fake_lsf import FakeLsf
@@ -33,7 +34,7 @@ def _array_records(jsid, parent, n):
 
 def test_can_submit_never_raises_on_bad_only(qtbot, manager, fake_lsf):
     """C17-1: 술어는 어떤 only에도 bool을 돌려준다."""
-    js = manager.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"], job_keys=["a"])
     manager.store.store_add_jobs(_array_records(js.id, 9500, 2))
 
     assert manager.can_submit(js, only=[f"{js.id}[0]"]) is False  # array element
@@ -46,7 +47,7 @@ def test_only_job_id_picks_array_parent(qtbot, manager, fake_lsf):
     """C17-2: job_id로 지정하면 element가 아니라 parent가 잡힌다."""
     from dataclasses import replace as dc_replace
 
-    js = manager.create_jobset(["customwrapper_sub p.sp"], merge_ids=["p"])
+    js = mk_jobset(manager, ["customwrapper_sub p.sp"], job_keys=["p"])
     parent = js.jobs()[0]
     manager.store.update_job(
         dc_replace(parent, job_id=9500, state=JobState.DONE))
@@ -61,7 +62,7 @@ def test_only_job_id_of_element_only_reports_why(qtbot, manager, fake_lsf):
     """그 id가 element로만 존재하면 이유를 정확히 알린다(없는 ref가 아니다)."""
     import pytest
 
-    js = manager.create_jobset(intended_count=2)
+    js = mk_jobset(manager, intended_count=2)
     manager.store.store_add_jobs(_array_records(js.id, 9500, 2))
     with pytest.raises(ValueError, match="array element"):
         manager._submit_targets(js.id, [9500])
@@ -83,7 +84,7 @@ def test_start_polling_is_noop_when_already_running(qtbot):
     mgr = LsfJobManager(store=InMemoryStore(),
                         config=LsfConfig(retry_delay_s=0.05), runner=counting)
     try:
-        js = mgr.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
+        js = mk_jobset(mgr, ["customwrapper_sub a.sp"], job_keys=["a"])
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             mgr.submit(js, auto_poll=False)    # 조회 대상(job_id) 확보
         mgr.start_polling(js, 30)              # 주기 tick은 안 올 만큼 길게
@@ -92,7 +93,7 @@ def test_start_polling_is_noop_when_already_running(qtbot):
 
         for i in range(10):                    # job 을 하나씩 10번 추가
             mgr.add_jobs(js, [f"customwrapper_sub {i}.sp"],
-                         merge_ids=[f"m{i}"])
+                         job_keys=[f"m{i}"])
             qtbot.wait(30)
         assert calls["n"] == base, (
             f"편집 10회에 bjobs {calls['n'] - base}회 — 재시작이 억제되지 않았다")
@@ -113,7 +114,7 @@ def test_start_polling_restarts_when_interval_changes(qtbot):
     mgr = LsfJobManager(store=InMemoryStore(),
                         config=LsfConfig(retry_delay_s=0.05), runner=counting)
     try:
-        js = mgr.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
+        js = mk_jobset(mgr, ["customwrapper_sub a.sp"], job_keys=["a"])
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             mgr.submit(js, auto_poll=False)
         mgr.start_polling(js, 30)

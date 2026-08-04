@@ -187,7 +187,7 @@ def test_add_jobs_then_query_and_kill(qtbot, manager, fake_lsf):
     fake_lsf.set_all("DONE", 0)
     manager.querier.query(a.id)
 
-    manager.add_jobs(a, ["m b0", "m b1"], merge_ids=["x", "y"])
+    manager.add_jobs(a, ["m b0", "m b1"], job_keys=["x", "y"])
     assert manager.summary(a.id)["total"] == 4
 
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):

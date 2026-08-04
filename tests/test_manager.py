@@ -12,7 +12,7 @@ from lsfmgr import (
     LsfConfig,
     LsfJobManager,
 )
-from tests.conftest import submit_cmds
+from tests.conftest import mk_jobset, submit_cmds
 
 
 # ----------------------------------------------------------------------
@@ -58,7 +58,8 @@ def test_no_coredump_on_exit_without_shutdown(tmp_path):
         app = QApplication(sys.argv)
         mgr = LsfJobManager(store=InMemoryStore(),
                             config=LsfConfig(poll_interval_s=5), runner=FakeLsf())
-        js = mgr.create_jobset([f"r {i}" for i in range(20)])
+        js = mgr.create_jobset([f"r {i}" for i in range(20)],
+                               job_keys=[f"k{i}" for i in range(20)])
         mgr.submit(js, auto_poll=False)
         mgr.start_polling(js.id, 0.2)    # 폴링 QThread 가동 중
         # shutdown() 미호출 + app.exec() 미실행 → 그냥 종료

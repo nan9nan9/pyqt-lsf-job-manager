@@ -16,6 +16,8 @@
 """
 from __future__ import annotations
 
+from tests.conftest import mk_jobset
+
 
 def test_remove_jobset_holds_meta_lock():
     """jobset 삭제 경로가 다른 갱신 경로와 같은 lock 규율을 따른다."""
@@ -44,7 +46,7 @@ def test_remove_jobset_holds_meta_lock():
 
 def test_remove_jobset_returns_last_snapshot_and_drops_record(qtbot, manager):
     """삭제는 레코드를 실제로 지우고, 반환값이 삭제 직전 스냅샷이다."""
-    js = manager.create_jobset(["customwrapper_sub a.sp",
+    js = mk_jobset(manager, ["customwrapper_sub a.sp",
                                 "customwrapper_sub b.sp"])
     before = manager.summary(js.id)["total"]
     removed = manager.remove_jobset(js.id, force=True)

@@ -7,13 +7,15 @@ from __future__ import annotations
 
 import pytest
 
+from tests.conftest import mk_jobset
+
 from lsfmgr import JobRecord, JobSetNotFoundError, JobState
 
 
 def _array_jobset(manager, fake_lsf, n=10):
     from tests.fake_lsf import FakeJob
 
-    js = manager.create_jobset(intended_count=n)
+    js = mk_jobset(manager, intended_count=n)
     jsid, parent = js.id, 9500
     manager.store.store_add_jobs([JobRecord(
         job_id=parent, array_index=i, jobset_id=jsid,
@@ -65,7 +67,7 @@ def test_verify_target_matching_unit(qtbot, manager, fake_lsf):
 def test_verify_partial_kill_counts_only_targeted(qtbot, manager, fake_lsf):
     from tests.fake_lsf import FakeJob
 
-    js = manager.create_jobset(intended_count=4)
+    js = mk_jobset(manager, intended_count=4)
     jsid, parent = js.id, 9600
     states = {0: JobState.PEND, 1: JobState.RUN,
               2: JobState.PEND, 3: JobState.RUN}
@@ -101,7 +103,7 @@ import threading
 # ----------------------------------------------------------------------
 def test_post_process_fires_when_all_terminal_at_submit(qtbot, manager, fake_lsf):
     fake_lsf.fail_next_bsub = 100                # 전 job bsub 실패
-    js = manager.create_jobset(["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
     got = {}
     with qtbot.waitSignal(js.post_processing_finished, timeout=10000) as blk:
         manager.submit(js, post_process=lambda recs: {
@@ -115,7 +117,7 @@ def test_post_process_fires_when_all_terminal_at_submit(qtbot, manager, fake_lsf
 # C3-5 (fix 1/5): 게이트 예외 → jobset 잠기지 않고 _pending_arm도 정리된다
 # ----------------------------------------------------------------------
 def test_gate_exception_unlocks_and_clears_pending(qtbot, manager, fake_lsf):
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
     fake_lsf.set_all("DONE", 0)
@@ -143,7 +145,7 @@ def test_gate_exception_unlocks_and_clears_pending(qtbot, manager, fake_lsf):
 #               SUBMITTING 고착 없이 SUBMIT_FAILED로 마무리
 # ----------------------------------------------------------------------
 def test_nongate_launch_failure_finalizes(qtbot, manager, fake_lsf, monkeypatch):
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
     fake_lsf.set_all("DONE", 0)
@@ -175,7 +177,7 @@ def test_force_remove_during_active_submit_quiesces(qtbot, fake_lsf, config):
 
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf)
     try:
-        js = mgr.create_jobset(["customwrapper_sub a.sp"])
+        js = mk_jobset(mgr, ["customwrapper_sub a.sp"])
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             mgr.submit(js, auto_poll=False)
         fake_lsf.set_all("DONE", 0)

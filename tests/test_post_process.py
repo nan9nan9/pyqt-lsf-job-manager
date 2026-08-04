@@ -6,6 +6,7 @@ terminal이면 실행된다. pre_submit 게이트와 대칭(전자는 제출 전
 """
 from __future__ import annotations
 
+from tests.conftest import mk_jobset
 from lsfmgr import JobState, LsfJobManager
 
 
@@ -25,7 +26,7 @@ def test_post_process_runs_on_all_terminal(qtbot, manager, fake_lsf):
         seen["states"] = {r.state for r in records}
         return {"ok": sum(1 for r in records if r.state is JobState.DONE)}
 
-    js = manager.create_jobset([f"customwrapper_sub r{i}.sp" for i in range(3)])
+    js = mk_jobset(manager, [f"customwrapper_sub r{i}.sp" for i in range(3)])
     order = []
     js.post_processing_started.connect(lambda: order.append("started"))
 
@@ -51,7 +52,7 @@ def test_post_process_runs_on_mixed_terminal(qtbot, manager, fake_lsf):
         got["failed"] = [r.job_key for r in records if r.state is JobState.EXIT]
         return len(records)
 
-    js = manager.create_jobset(["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, post_process=collect, auto_poll=False)
 
@@ -69,7 +70,7 @@ def test_post_process_runs_on_mixed_terminal(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_post_process_not_run_while_active(qtbot, manager, fake_lsf):
     calls = []
-    js = manager.create_jobset(["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, post_process=lambda r: calls.append(1), auto_poll=False)
 
@@ -86,7 +87,7 @@ def test_post_process_not_run_while_active(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_post_process_fires_once(qtbot, manager, fake_lsf):
     calls = []
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, post_process=lambda r: calls.append(1), auto_poll=False)
 
@@ -108,7 +109,7 @@ def test_post_process_exception_reported(qtbot, manager, fake_lsf):
     def boom(records):
         raise RuntimeError("후처리 실패!")
 
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, post_process=boom, auto_poll=False)
 
@@ -124,7 +125,7 @@ def test_post_process_exception_reported(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_post_process_disarmed_on_resubmit_without_callback(qtbot, manager, fake_lsf):
     calls = []
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, post_process=lambda r: calls.append("first"),
                        auto_poll=False)

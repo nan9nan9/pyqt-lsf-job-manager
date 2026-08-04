@@ -148,7 +148,7 @@ class JobSetStore(ABC):
                 rec = self.transition(jobset_id, job_key, new_state,
                                       guard=guard, **fields)
             except JobNotFoundError:
-                continue                         # 사이클 도중 remove_job 등
+                continue                         # 사이클 도중 remove_jobs 등
             if rec is not None:
                 out.append(rec)
         return out

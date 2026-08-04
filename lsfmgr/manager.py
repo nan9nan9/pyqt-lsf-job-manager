@@ -278,7 +278,7 @@ class LsfJobManager(QObject):
         전이된다(핸들·테이블 연속).
 
         only=[ref, ...]: 지정하면 **그 job들만** 제출한다. ref는 job_key /
-        merge_id / job_id(int) 중 아무거나 — remove_job·set_user_data의 ref와
+        job_id(int) 중 아무거나 — remove_jobs·set_user_data의 ref와
         같은 규칙이다. 나머지 job은 상태도 레코드도 건드리지 않으므로,
         **다른 job이 RUN 중이어도** 선택분만 돌릴 수 있다(전체 제출과 달리
         '전원 비활성' 가드가 선택분에만 걸린다). 실패분만 재실행하거나 GUI
@@ -295,7 +295,7 @@ class LsfJobManager(QObject):
             js = mgr.create_jobset(
                 ["customwrapper_sub -q normal run_0.sp",
                  "customwrapper_sub -q long tb_1.v"],
-                merge_ids=["run_0", "tb_1"], label="sweep")
+                job_keys=["run_0", "tb_1"], label="sweep")
             mgr.submit(js, workers=8)
 
         pre_submit(commands)->bool: 지정 시 제출 전에 커맨드 리스트 전체를
@@ -602,7 +602,7 @@ class LsfJobManager(QObject):
             self.kill_started.emit(jsid)   # killer 등록 후 (pull 일치)
 
     def create_jobset(self, commands: Sequence = (), *,
-                      merge_ids: Optional[Sequence[Optional[str]]] = None,
+                      job_keys: Optional[Sequence[str]] = None,
                       user_datas: Optional[Sequence[Optional[dict]]] = None,
                       work_dir: Optional[str] = None,
                       work_dirs: Optional[Sequence[Optional[str]]] = None,
@@ -616,7 +616,7 @@ class LsfJobManager(QObject):
 
             js = mgr.create_jobset(
                 ["customwrapper_sub -i a.sp", "customwrapper_sub -i b.sp"],
-                merge_ids=["a", "b"], user_datas=[{"run": "..."}, None],
+                job_keys=["a", "b"], user_datas=[{"run": "..."}, None],
                 label="sweep")
             if mgr.can_submit(js):
                 mgr.submit(js, workers=8)     # 전 job (재)제출
@@ -624,8 +624,10 @@ class LsfJobManager(QObject):
         commands 각 항목 (v10: wrapper 단일 경로 — bsub 조립 경로 삭제):
           - 토큰 리스트(argv) → 그대로 실행
           - 문자열           → shlex 분해 후 실행
-        merge_ids: 각 job의 논리 키 — merge 시 같은 merge_id의 기존 job이
-        이 내용으로 replace된다. jobset 내 유일해야 한다(None 제외).
+        job_keys: 각 job의 키 — **필수**다. 앱이 정하는 이름이고 jobset 안에서
+        유일해야 한다. replace_jobs/upsert_jobs가 교체 대상을 찾고,
+        remove_jobs·set_user_data·submit(only=)의 ref가 되며, 재제출해도
+        유지돼 GUI 표의 행 정체성이 된다.
         user_datas: job별 사용자 정의 dict (JSON 직렬화 가능) — 보존만.
         work_dir: 이 jobset 전 job의 제출 작업 디렉토리(단일 값) — 전 job이
         이 cwd에서 실행된다. work_dirs와 **동시 지정 불가**(둘 중 하나).
@@ -633,7 +635,7 @@ class LsfJobManager(QObject):
         실행한다(wrapper 경로도 적용; bsub -cwd를 못 주는 wrapper의 실행
         디렉토리 지정 수단). None인 항목은 부모 cwd. 재제출에도 보존.
         work_dir/work_dirs 미지정 시 부모(GUI) 프로세스의 cwd.
-        merge_ids/user_datas/work_dirs는 commands와 같은 길이(생략 시 전부 None).
+        job_keys/user_datas/work_dirs는 commands와 같은 길이(생략 시 전부 None).
         commands가 비면 **빈 jobset** — 이후 merge로만 채운다.
         생성 즉시 jobs_updated/jobset_updated가 발행돼 표가 갱신된다."""
         if isinstance(tags, str):             # 편의: 단일 태그 문자열 허용
@@ -645,11 +647,11 @@ class LsfJobManager(QObject):
         if items:
             try:
                 records = self._build_job_records(
-                    jsid, items, merge_ids, user_datas,
+                    jsid, items, job_keys, user_datas,
                     work_dir, work_dirs)
                 out = self.jobsets.local_create_jobs(jsid, records)
             except BaseException:
-                # 검증 실패(길이 불일치·빈 커맨드·merge_id 중복 등) — 방금
+                # 검증 실패(길이 불일치·빈 커맨드·job_key 중복 등) — 방금
                 # 넣은 jobset 레코드를 되돌린다. 안 하면 핸들도 없는 유령
                 # 빈 jobset이 list/search에 영구 잔류한다.
                 self.store.store_delete_jobset(jsid)
@@ -658,41 +660,50 @@ class LsfJobManager(QObject):
         return self.jobset(jsid)
 
     def _build_job_records(self, jsid: str, items: list,
-                           merge_ids: Optional[Sequence[Optional[str]]],
+                           job_keys: Optional[Sequence[str]],
                            user_datas: Optional[Sequence[Optional[dict]]],
                            work_dir: Optional[str],
-                           work_dirs: Optional[Sequence[Optional[str]]],
-                           existing_keys: frozenset = frozenset()
+                           work_dirs: Optional[Sequence[Optional[str]]]
                            ) -> List[JobRecord]:
         """commands → CREATED JobRecord 목록 (create_jobset / _edit_jobs 공용).
         submit_cwd: work_dir(전체 단일) 또는 work_dirs(job별) — 동시 지정 불가.
-        existing_keys: 이미 쓰이고 있는 job_key — 연번이 그 뒤를 잇는다."""
+        job_keys: job별 키 — **필수**이며 jobset 안에서 유일해야 한다."""
         if work_dir is not None and work_dirs is not None:
             raise ValueError(
                 "work_dir와 work_dirs는 동시에 지정할 수 없습니다(둘 중 하나)")
-        mids = list(merge_ids) if merge_ids is not None else [None] * len(items)
+        if job_keys is None:
+            raise ValueError(
+                "job_keys는 필수입니다 — 각 job의 키를 앱이 정해야 합니다"
+                " (commands와 같은 길이)")
+        keys_in = list(job_keys)
         uds = list(user_datas) if user_datas is not None else [None] * len(items)
         # work_dir 단일 지정이면 전 job에 적용, 아니면 work_dirs(job별) 사용
         wds = (list(work_dirs) if work_dirs is not None
                else [work_dir] * len(items))
-        if (len(mids) != len(items) or len(uds) != len(items)
+        if (len(keys_in) != len(items) or len(uds) != len(items)
                 or len(wds) != len(items)):
             raise ValueError(
-                "merge_ids/user_datas/work_dirs 길이가 commands와 다릅니다")
+                "job_keys/user_datas/work_dirs 길이가 commands와 다릅니다")
 
-        # job_key 연번 — 이미 쓰이는 키는 건너뛴다. create_jobset은 빈 jobset에
-        # 호출되므로 0부터지만, add/upsert_jobs는 기존 jobset에 얹으므로
-        # 충돌하면 레코드 추가가 ValueError로 튕긴다. remove_job으로 중간이
-        # 비었다가 다시 채워지는 경우까지 덮으려면 '다음 번호'가 아니라
-        # '안 쓰이는 번호'를 찾아야 한다.
-        used = set(existing_keys)
+        # job_key는 **앱이 정한다** — 자동 생성하지 않는다. 라이브러리가 임의로
+        # 이름을 붙이면 그 job을 나중에 가리킬 방법이 앱에 없고(replace/remove/
+        # only의 ref가 전부 이 키다), 재제출 뒤에도 같은 job인지 앱이 스스로 알
+        # 수 없다. 빠뜨리면 조용히 넘어가지 않고 여기서 막는다.
+        # 기존 키와의 충돌은 여기서 보지 않는다 — 겹치는 것이 정상인 경로
+        # (replace/upsert)가 있어, 그 판단은 정책을 아는 계층(local_edit_jobs)의
+        # 몫이다. 여기서는 한 호출 안의 중복만 잡는다(어느 정책에서도 오류).
+        in_batch = set()
+        for k in keys_in:
+            if not isinstance(k, str) or not k.strip():
+                raise ValueError(
+                    f"job_key는 비어있지 않은 문자열이어야 합니다: {k!r}"
+                    f" (job_keys는 commands와 같은 길이로 반드시 지정)")
+            if k in in_batch:
+                raise ValueError(f"job_key 중복(한 호출 안에서): {k!r}")
+            in_batch.add(k)
+
         records = []
-        nxt = 0
-        for item, mid, ud, cwd in zip(items, mids, uds, wds):
-            while f"{jsid}_{nxt}" in used:
-                nxt += 1
-            key = f"{jsid}_{nxt}"
-            used.add(key)
+        for item, key, ud, cwd in zip(items, keys_in, uds, wds):
             argv = (shlex.split(item) if isinstance(item, str)
                     else [str(t) for t in item])
             if not argv:
@@ -701,14 +712,13 @@ class LsfJobManager(QObject):
                 job_id=None, array_index=None, jobset_id=jsid,
                 job_key=key, state=JobState.CREATED,
                 command=shlex.join(argv),
-                merge_id=mid, user_data=ud, submit_cwd=cwd))
+                user_data=ud, submit_cwd=cwd))
         return records
 
     def set_user_data(self, jobset_id: str, ref, user_data: Optional[dict]
                     ) -> JobRecord:
-        """[sync] job의 user_data 교체 — ref는 job_key(str) 또는 merge_id(str,
-        job_key 미매칭 시) 또는 job_id(int). 갱신 레코드를 jobs_updated로
-        발행한다."""
+        """[sync] job의 user_data 교체 — ref는 job_key(str) 또는 job_id(int).
+        갱신 레코드를 jobs_updated로 발행한다."""
         jobset_id = self._jsid(jobset_id)
         rec = self._find_job(jobset_id, ref)
         new = self.store.update_job(dc_replace(rec, user_data=user_data))
@@ -716,14 +726,12 @@ class LsfJobManager(QObject):
         return new
 
     def _find_job(self, jobset_id: str, ref) -> JobRecord:
-        """job_id(int) / job_key / merge_id 로 단일 job 찾기."""
+        """job_key(str) / job_id(int) 로 단일 job 찾기."""
         jobs = self.get_jobs(jobset_id)
         if isinstance(ref, int):
             hits = [r for r in jobs if r.job_id == ref]
         else:
             hits = [r for r in jobs if r.job_key == ref]
-            if not hits:
-                hits = [r for r in jobs if r.merge_id == ref]
         if not hits:
             raise JobNotFoundError(f"{jobset_id}/{ref}")
         return hits[0]
@@ -753,63 +761,63 @@ class LsfJobManager(QObject):
 
     # ------------------------------------------------------------------
     # job 편집 3형제 — 하려는 일이 이름에 드러난다 (merge를 대체)
-    #   add_jobs     : 추가 전용 (merge_id가 이미 있으면 ValueError)
-    #   replace_jobs : 교체 전용 (merge_id가 없으면 JobNotFoundError)
+    #   add_jobs     : 추가 전용 (job_key가 이미 있으면 ValueError)
+    #   replace_jobs : 교체 전용 (job_key가 없으면 JobNotFoundError)
     #   upsert_jobs  : 있으면 교체, 없으면 추가
     # 셋 다 도메인에선 local_edit_jobs 한 몸통을 공유한다 — 가드와
     # intended_count 규칙이 갈릴 수 없게.
     # ------------------------------------------------------------------
     def add_jobs(self, jobset_id, commands: Sequence, *,
-                 merge_ids: Optional[Sequence[Optional[str]]] = None,
+                 job_keys: Optional[Sequence[str]] = None,
                  user_datas: Optional[Sequence[Optional[dict]]] = None,
                  work_dir: Optional[str] = None,
                  work_dirs: Optional[Sequence[Optional[str]]] = None
                  ) -> List[JobRecord]:
         """[sync] 기존 jobset에 job을 **추가**한다 (CREATED).
 
-        인자는 create_jobset과 같은 모양이다. merge_id가 이미 있으면
+        인자는 create_jobset과 같은 모양이다. job_key가 이미 있으면
         ValueError — 교체할 생각이면 replace_jobs/upsert_jobs를 쓴다.
         추가분은 jobs_updated/jobset_updated로 발행돼 표가 갱신된다.
         제출은 별도다: 이어서 mgr.submit(js)를 부르면 **전 job**이 재제출된다."""
         return self._edit_jobs(jobset_id, commands, policy="add",
-                               merge_ids=merge_ids, user_datas=user_datas,
+                               job_keys=job_keys, user_datas=user_datas,
                                work_dir=work_dir, work_dirs=work_dirs)
 
     def replace_jobs(self, jobset_id, commands: Sequence, *,
-                     merge_ids: Sequence[str],
+                     job_keys: Sequence[str],
                      user_datas: Optional[Sequence[Optional[dict]]] = None,
                      work_dir: Optional[str] = None,
                      work_dirs: Optional[Sequence[Optional[str]]] = None,
                      force: bool = False) -> List[JobRecord]:
-        """[sync] 기존 job의 내용을 **교체**한다 — merge_id로 지정(필수).
+        """[sync] 기존 job의 내용을 **교체**한다 — job_key로 지정(필수).
 
-        물리 키(job_key)는 유지되므로 GUI 표의 행이 그대로 이어진다. 수정한
+        키가 곧 행의 정체성이므로 GUI 표의 행이 그대로 이어진다. 수정한
         커맨드로 재실행할 때 쓴다: replace_jobs(...) → submit(js).
         대상이 없으면 JobNotFoundError, 대상이 활성이면
         JobEditNotAllowedError(force=True면 강제 — LSF 정리는 caller 책임)."""
         return self._edit_jobs(jobset_id, commands, policy="replace",
-                               merge_ids=merge_ids, user_datas=user_datas,
+                               job_keys=job_keys, user_datas=user_datas,
                                work_dir=work_dir, work_dirs=work_dirs,
                                force=force)
 
     def upsert_jobs(self, jobset_id, commands: Sequence, *,
-                    merge_ids: Sequence[str],
+                    job_keys: Sequence[str],
                     user_datas: Optional[Sequence[Optional[dict]]] = None,
                     work_dir: Optional[str] = None,
                     work_dirs: Optional[Sequence[Optional[str]]] = None,
                     force: bool = False) -> List[JobRecord]:
-        """[sync] merge_id가 있으면 교체, 없으면 추가 (일괄 반영).
+        """[sync] job_key가 있으면 교체, 없으면 추가 (일괄 반영).
 
         "이 목록을 jobset에 반영해라"를 한 번에 표현한다 — 어느 것이 이미
         있는지 caller가 분류하지 않아도 된다. 의도가 '추가만'/'교체만'으로
         분명하면 add_jobs/replace_jobs를 쓰는 편이 실수를 잡아준다."""
         return self._edit_jobs(jobset_id, commands, policy="upsert",
-                               merge_ids=merge_ids, user_datas=user_datas,
+                               job_keys=job_keys, user_datas=user_datas,
                                work_dir=work_dir, work_dirs=work_dirs,
                                force=force)
 
     def _edit_jobs(self, jobset_id, commands: Sequence, *, policy: str,
-                   merge_ids=None, user_datas=None, work_dir=None,
+                   job_keys=None, user_datas=None, work_dir=None,
                    work_dirs=None, force: bool = False) -> List[JobRecord]:
         """add/replace/upsert_jobs의 구현 — 정책만 다르다."""
         jobset_id = self._jsid(jobset_id)
@@ -824,10 +832,8 @@ class LsfJobManager(QObject):
         items = list(commands)
         if not items:
             return []
-        existing = {r.job_key for r in self.get_jobs(jobset_id)}
-        records = self._build_job_records(jobset_id, items, merge_ids,
-                                          user_datas, work_dir, work_dirs,
-                                          existing_keys=existing)
+        records = self._build_job_records(jobset_id, items, job_keys,
+                                          user_datas, work_dir, work_dirs)
         changed = self.jobsets.local_edit_jobs(jobset_id, records,
                                                policy=policy, force=force)
         if changed:
@@ -859,25 +865,27 @@ class LsfJobManager(QObject):
         if watchable:
             self.start_polling(jobset_id, self._poll_intervals.get(jobset_id))
 
-    def remove_job(self, jobset_id, *,
-                    job_id: Optional[int] = None,
-                    merge_id: Optional[str] = None,
-                    job_key: Optional[str] = None,
+    def remove_jobs(self, jobset_id, refs: Sequence, *,
                     force: bool = False) -> List[JobRecord]:
-        """[sync] job 삭제 — job_id/merge_id/job_key 중 하나로 지정.
-        비활성만 삭제 가능(활성이면 LsfmgrError, force로 레코드만 강제
-        삭제 — LSF job 정리는 caller 책임). 삭제분은 jobset_updated로 반영."""
+        """[sync] 지정한 job들을 삭제 — refs는 job_key(str)/job_id(int) 목록.
+
+        편집 3형제·submit(only=)와 같은 ref 규칙이고, 같은 job을 두 형태로
+        지정하면 1회로 접힌다. 없는 ref는 JobNotFoundError.
+        비활성만 삭제 가능(활성이면 RemoveNotAllowedError, force로 레코드만
+        강제 삭제 — LSF job 정리는 caller 책임). 전부 지우려면 clear_jobs().
+        삭제분은 반환값과 jobset_updated로 반영된다(레코드가 사라져
+        jobs_updated로는 표현할 수 없다)."""
         jobset_id = self._jsid(jobset_id)
+        keys = [r.job_key for r in self._resolve_refs(jobset_id, refs)]
         removed = self.jobsets.local_remove_jobs(
-            jobset_id, job_id=job_id, merge_id=merge_id, job_key=job_key,
-            force=force)
+            jobset_id, keys, force=force)
         self._forget_paced(jobset_id, [r.job_key for r in removed])
         self._emit_summary(jobset_id)
         return removed
 
     def clear_jobs(self, jobset_id, *,
                    force: bool = False) -> List[JobRecord]:
-        """[sync] jobset의 **job 전부** 삭제 — remove_job과 동일 가드.
+        """[sync] jobset의 **job 전부** 삭제 — remove_jobs과 동일 가드.
 
         jobset 자체는 남는다 — id/label/tags/handler/폴링/GUI 행이 그대로
         유지되므로 새 batch jobset을 만들어 merge()로 흡수시키면 **같은
@@ -942,32 +950,44 @@ class LsfJobManager(QObject):
         job 하나가 element 전체를 만들므로 element만 따로 제출할 수 없다.
         전체 제출에서는 조용히 걸러지고, only로 콕 집으면 오류로 알린다
         (조용히 무시하면 '선택했는데 안 돌았다'가 된다)."""
-        jobs = self.get_jobs(jobset_id)
         if only is None:
-            return [r for r in jobs if r.array_index is None]
+            return [r for r in self.get_jobs(jobset_id)
+                    if r.array_index is None]
+        targets = self._resolve_refs(jobset_id, only)
+        for rec in targets:
+            if rec.array_index is not None:
+                raise ValueError(
+                    f"array element는 개별 제출할 수 없습니다:"
+                    f" {rec.job_key!r} (parent job을 제출하세요)")
+        return targets
+
+    def _resolve_refs(self, jobset_id: str,
+                      refs: Sequence) -> List[JobRecord]:
+        """ref 목록 → 레코드 목록 — remove_jobs·submit(only=) 공용.
+
+        ref는 job_key(str) 또는 job_id(int). 같은 job을 두 형태로 지정하면
+        1회로 접히고, 순서는 지정 순서를 따른다. 없는 ref는 JobNotFoundError.
+
+        job_id 색인은 **parent만** 담는다 — array element는 parent와 job_id를
+        공유하므로 전부 넣으면 마지막 element가 parent를 덮어, job_id로 지정한
+        parent가 엉뚱하게 element로 해석된다. element를 콕 집으려면 그
+        element의 job_key를 쓴다."""
+        jobs = self.get_jobs(jobset_id)
         by_key = {r.job_key: r for r in jobs}
-        by_mid = {r.merge_id: r for r in jobs if r.merge_id is not None}
-        # job_id 색인은 **parent만** 담는다 — array element는 parent와 job_id를
-        # 공유하므로 전부 넣으면 마지막 element가 parent를 덮어, job_id로 지정한
-        # parent가 "element는 개별 제출 불가"로 엉뚱하게 거부된다.
         by_jid = {r.job_id: r for r in jobs
                   if r.job_id is not None and r.array_index is None}
         out: List[JobRecord] = []
         seen = set()
-        for ref in only:
+        for ref in refs:
             rec = (by_jid.get(ref) if isinstance(ref, int)
-                   else (by_key.get(ref) or by_mid.get(ref)))
+                   else by_key.get(ref))
             if rec is None:
                 if isinstance(ref, int) and any(r.job_id == ref for r in jobs):
                     # 그 id는 있는데 element뿐 — 정확한 이유를 알린다
                     raise ValueError(
-                        f"array element는 개별 제출할 수 없습니다:"
-                        f" job_id={ref} (parent job을 제출하세요)")
+                        f"job_id={ref}는 array element뿐입니다"
+                        f" (element는 job_key로 지정하세요)")
                 raise JobNotFoundError(f"{jobset_id}/{ref}")
-            if rec.array_index is not None:
-                raise ValueError(
-                    f"array element는 개별 제출할 수 없습니다: {ref!r}"
-                    f" (parent job을 제출하세요)")
             if rec.job_key in seen:              # 같은 job을 두 형태로 지정
                 continue
             seen.add(rec.job_key)

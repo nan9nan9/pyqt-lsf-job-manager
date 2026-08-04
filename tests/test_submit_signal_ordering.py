@@ -38,7 +38,7 @@ def test_all_jobs_updated_before_finished(qtbot, manager, fake_lsf, trial):
 
     # 완료 통지 시점 스냅샷: 전 job의 PEND가 이미 jobs_updated로 나갔어야 함
     assert snapshot_at_finish["report"].succeeded == n
-    expected = {f"{jsid}_{i}" for i in range(n)}
+    expected = {f"k{i}" for i in range(n)}   # mk_jobset의 연번 키
     assert snapshot_at_finish["keys"] == expected, (
         f"submit_finished 시점에 누락된 jobs_updated: "
         f"{expected - snapshot_at_finish['keys']}")

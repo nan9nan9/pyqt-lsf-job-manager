@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+from tests.conftest import mk_jobset
 from lsfmgr import JobRecord, JobState
 
 
@@ -21,7 +22,7 @@ def test_verify_collapsed_array_not_element_overcounted(qtbot, manager, fake_lsf
     from lsfmgr.killer import _KillTask
     from tests.fake_lsf import FakeJob
 
-    js = manager.create_jobset(intended_count=1)
+    js = mk_jobset(manager, intended_count=1)
     jsid = js.id
     # monitor가 wrapper array를 접은 집계 레코드 (id, None) — RUN 유지
     manager.store.store_add_jobs([JobRecord(
@@ -43,7 +44,7 @@ def test_verify_collapsed_array_not_element_overcounted(qtbot, manager, fake_lsf
 # C6-2: born-cancelled(kill barrier 중 시작)도 started↔finished 짝을 유지
 # ----------------------------------------------------------------------
 def test_born_cancelled_pairs_started_finished(qtbot, manager, fake_lsf):
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
     fake_lsf.set_all("DONE", 0)
@@ -74,7 +75,7 @@ def test_born_cancelled_pairs_started_finished(qtbot, manager, fake_lsf):
 #       일반 경로의 짝을 깨지 않았는지 회귀)
 # ----------------------------------------------------------------------
 def test_normal_submit_still_pairs_once(qtbot, manager, fake_lsf):
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     starts, finishes = [], []
     manager.submit_started.connect(lambda j: starts.append(j))
     manager.submit_finished.connect(lambda j, r: finishes.append(j))

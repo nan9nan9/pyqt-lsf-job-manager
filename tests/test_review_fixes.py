@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from lsfmgr import JobRecord, JobState, LsfJobManager
-from tests.conftest import submit_cmds
+from tests.conftest import mk_jobset, submit_cmds
 from lsfmgr.errors import LsfmgrError
 from lsfmgr.options import resolve_options
 from tests.test_store_contract import make_job, make_jobset
@@ -97,13 +97,13 @@ def test_manager_only_kwargs_validated(fake_lsf):
 def test_empty_jobset_submit_rejected(manager, fake_lsf):
     """v9: 빈 jobset(commands 없이 생성)은 허용되지만 job이 없으니
     submit은 LsfmgrError로 거부된다. job은 이후 merge로만 채운다."""
-    js = manager.create_jobset()          # 빈 jobset — 생성만 (허용)
+    js = mk_jobset(manager)          # 빈 jobset — 생성만 (허용)
     assert js.summary["total"] == 0
     with pytest.raises(LsfmgrError):
         manager.submit(js)                # job 없음 → 거부
     # merge_ids/user_datas 길이 불일치는 ValueError
     with pytest.raises(ValueError):
-        manager.create_jobset(["a", "b"], merge_ids=["m1"])
+        mk_jobset(manager, ["a", "b"], job_keys=["m1"])
 
 
 # ----------------------------------------------------------------------
@@ -119,7 +119,7 @@ def test_array_partial_kill_only_pend(qtbot, manager, fake_lsf):
     레코드/LSF를 수동 구성해 element 계약을 검증)."""
     from tests.fake_lsf import FakeJob
 
-    js = manager.create_jobset(intended_count=10)
+    js = mk_jobset(manager, intended_count=10)
     jsid, parent = js.id, 9000
     manager.store.store_add_jobs([JobRecord(
         job_id=parent, array_index=i, jobset_id=jsid,

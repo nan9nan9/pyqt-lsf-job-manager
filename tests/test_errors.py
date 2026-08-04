@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import pytest
 
+from tests.conftest import mk_jobset
+
 from lsfmgr import (
     RemoveJobSetNotAllowedError,
     JobSetStateError,
@@ -36,7 +38,7 @@ def test_hierarchy():
 # submit 불가 — 활성 job / job 없음
 # ----------------------------------------------------------------------
 def test_submit_not_allowed_active(qtbot, manager, fake_lsf):
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)          # PEND(활성)
     with pytest.raises(SubmitNotAllowedError) as ei:
@@ -49,7 +51,7 @@ def test_submit_not_allowed_active(qtbot, manager, fake_lsf):
 
 
 def test_submit_not_allowed_empty(manager):
-    js = manager.create_jobset()
+    js = mk_jobset(manager)
     with pytest.raises(SubmitNotAllowedError, match="job이 없습니다"):
         manager.submit(js)
 
@@ -58,11 +60,11 @@ def test_submit_not_allowed_empty(manager):
 # merge 불가 — 활성 job
 # ----------------------------------------------------------------------
 def test_job_edit_not_allowed_active(qtbot, manager, fake_lsf):
-    a = manager.create_jobset(["customwrapper_sub a.sp"], merge_ids=["m1"])
+    a = mk_jobset(manager, ["customwrapper_sub a.sp"], job_keys=["m1"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(a, auto_poll=False)
     with pytest.raises(JobEditNotAllowedError) as ei:
-        manager.replace_jobs(a, ["customwrapper_sub v2.sp"], merge_ids=["m1"])
+        manager.replace_jobs(a, ["customwrapper_sub v2.sp"], job_keys=["m1"])
     assert ei.value.job_keys
 
 
@@ -70,11 +72,11 @@ def test_job_edit_not_allowed_active(qtbot, manager, fake_lsf):
 # remove / clear 불가 — 활성 job
 # ----------------------------------------------------------------------
 def test_remove_not_allowed_active(qtbot, manager, fake_lsf):
-    js = manager.create_jobset(["customwrapper_sub a.sp"], merge_ids=["m1"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"], job_keys=["m1"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
     with pytest.raises(RemoveNotAllowedError):
-        manager.remove_job(js, merge_id="m1")
+        manager.remove_jobs(js, ["m1"])
     with pytest.raises(RemoveNotAllowedError):
         manager.clear_jobs(js)
 
@@ -83,7 +85,7 @@ def test_remove_not_allowed_active(qtbot, manager, fake_lsf):
 # close 불가 — 전원 terminal 아님
 # ----------------------------------------------------------------------
 def test_close_not_allowed_active(qtbot, manager, fake_lsf):
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)          # PEND
     with pytest.raises(RemoveJobSetNotAllowedError) as ei:

@@ -173,7 +173,7 @@ def test_removed_job_does_not_resurrect(qtbot, paced_manager):
     key = mgr.get_jobs(js._jobset_id)[0].job_key
 
     seen = _connect(mgr)
-    mgr.remove_job(js._jobset_id, job_key=key)     # dwell 창 안에 삭제
+    mgr.remove_jobs(js._jobset_id, [key])     # dwell 창 안에 삭제
     qtbot.wait(int(DWELL * 1000 * 3))
     assert _states_of(seen, key) == []
 

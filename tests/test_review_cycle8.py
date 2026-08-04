@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import pytest
 
+from tests.conftest import mk_jobset
+
 from lsfmgr import (InMemoryStore, JobRecord, JobState, LsfConfig,
                     LsfJobManager)
 
@@ -21,7 +23,7 @@ from lsfmgr import (InMemoryStore, JobRecord, JobState, LsfConfig,
 #       (verify를 optimistic 마킹보다 먼저 수행, 생존분은 EXIT로 안 덮음)
 # ----------------------------------------------------------------------
 def test_optimistic_verify_reports_survivor(qtbot, manager, fake_lsf, monkeypatch):
-    js = manager.create_jobset(["echo a"])
+    js = mk_jobset(manager, ["echo a"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
     fake_lsf.set_all("RUN")
@@ -58,7 +60,7 @@ def test_cluster_preserved_on_format_downgrade(qtbot, fake_lsf, tmp_path):
                     kill_retry_delay_s=0.05, collect_clusters=True)
     mgr = LsfJobManager(store=InMemoryStore(), config=cfg, runner=fake_lsf)
     try:
-        js = mgr.create_jobset(intended_count=1)
+        js = mk_jobset(mgr, intended_count=1)
         jsid = js.id
         # forward_cluster가 이미 채워진 RUN 레코드 (이전 MC 폴링/복원 결과)
         mgr.store.store_add_jobs([JobRecord(

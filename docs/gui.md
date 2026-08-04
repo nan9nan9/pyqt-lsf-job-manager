@@ -6,7 +6,7 @@ PyQt/qtpy 앱에서 `LsfJobManager`로 대량 job을 제출·감시·kill할 때
 [`../examples/gui_demo.py`](../examples/gui_demo.py).
 
 실측 반응(mocklsf): submit `SUBMITTING` 1.5ms → PEND 점진 · kill `EXIT` ~100ms ·
-재실행(merge+submit) `SUBMITTING→PEND` ~175ms.
+재실행(replace_jobs+submit) `SUBMITTING→PEND` ~175ms.
 
 ---
 
@@ -58,7 +58,7 @@ mgr.submit(js, post_process=post)
 ### 두 계층의 API — 명령은 manager, 구독은 handle
 
 - **`LsfJobManager`(mgr)**: 모든 **명령**의 유일한 진입점(`create_jobset`/`submit`/
-  `kill`/`merge`/`close`…). Signal도 갖지만 첫 인자로 `jobset_id`가 붙는다 —
+  `kill`/`add_jobs`/`remove_jobset`…). Signal도 갖지만 첫 인자로 `jobset_id`가 붙는다 —
   여러 jobset을 한 곳에서 처리하는 대시보드용.
 - **`JobSet`(js) 핸들**: `mgr.create_jobset(...)`가 반환하거나 `mgr.jobset(id)`로
   얻는다. **조회(pull) + Signal(view) 전용** — 명령 메서드가 없다. 핸들 Signal은
@@ -357,10 +357,10 @@ def _on_kill_done(self, jsid, rep):           # KillReport — 통계만
             f"{rep.unconfirmed} 미확인")
 ```
 
-### 6.3 재실행 — merge + submit
+### 6.3 재실행 — replace_jobs + submit
 
 재실행은 별도 API가 아니라 **데이터 조작 + 일반 submit**이다 — 실패/수정 job을 같은
-`merge_id`로 담은 jobset을 만들어 흡수한 뒤 전체 재제출한다:
+`job_key`로 담은 jobset을 만들어 흡수한 뒤 전체 재제출한다:
 
 ```python
 def on_rerun_failed(self):
@@ -368,9 +368,9 @@ def on_rerun_failed(self):
     failed = [r for r in js.jobs() if r.state.is_failed]
     if not failed or not self.mgr.can_submit(js):
         return                                 # 활성 job 있으면 먼저 kill
-    self.mgr.replace_jobs(                     # 같은 merge_id → CREATED 교체
+    self.mgr.replace_jobs(                     # 같은 job_key → CREATED 교체
         js, [shlex.split(r.command) for r in failed],
-        merge_ids=[r.merge_id for r in failed],
+        job_keys=[r.job_key for r in failed],
         user_datas=[r.user_data for r in failed])
     self.mgr.submit(js)                        # 전 job 재제출
 ```
@@ -470,7 +470,7 @@ agg = mgr.total_summary()
 - 키는 `JobState.value` 문자열과 `"total"`. 어떤 jobset에도 없는 상태 키는 dict에
   없으므로 `agg.get("RUN", 0)`으로 읽는다.
 - `"total"`은 각 jobset 합계의 합이고, 상태 합계 == `"total"` 불변식이 유지된다.
-- 조회 중 다른 스레드가 jobset을 close/merge로 지워도 **내부에서 건너뛰고 계속**
+- 조회 중 다른 스레드가 jobset을 remove_jobset으로 지워도 **내부에서 건너뛰고 계속**
   하므로 호출자가 방어할 필요가 없다.
 - **Store 스냅샷일 뿐 LSF를 호출하지 않는다** — 값이 최신이려면 각 jobset이 폴링
   되고 있어야 한다.

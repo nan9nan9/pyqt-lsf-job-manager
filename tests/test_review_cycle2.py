@@ -10,6 +10,8 @@ import threading
 
 import pytest
 
+from tests.conftest import mk_jobset
+
 from lsfmgr import (InMemoryStore, JobSetNotFoundError, JobState,
                     LsfJobManager)
 
@@ -20,7 +22,7 @@ def _finish(manager, fake_lsf, js, state="DONE", code=0):
 
 
 def _submit_done(qtbot, manager, fake_lsf, cmds):
-    js = manager.create_jobset(cmds)
+    js = mk_jobset(manager, cmds)
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
     _finish(manager, fake_lsf, js)
@@ -131,7 +133,7 @@ def test_removed_script_dir_option_ignored(qtbot, fake_lsf, config):
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf,
                         script_dir="/scratch/lsf")     # 구버전 앱 코드
     try:
-        js = mgr.create_jobset(["customwrapper_sub a.sp"])
+        js = mk_jobset(mgr, ["customwrapper_sub a.sp"])
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             mgr.submit(js, auto_poll=False)            # 정상 기동·동작
         assert js.jobs()[0].state is JobState.PEND
@@ -143,7 +145,7 @@ def test_removed_script_dir_option_ignored(qtbot, fake_lsf, config):
 # C2-6: kill finished-last — 핸들 kill_finished 시점에 EXIT 전이분이 이미 도착
 # ----------------------------------------------------------------------
 def test_kill_finished_arrives_after_exit_updates(qtbot, manager, fake_lsf):
-    js = manager.create_jobset([f"customwrapper_sub r{i}.sp" for i in range(4)])
+    js = mk_jobset(manager, [f"customwrapper_sub r{i}.sp" for i in range(4)])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
 

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import pytest
 
+from tests.conftest import mk_jobset
+
 from lsfmgr import JobState
 
 
@@ -21,7 +23,7 @@ def _wrapper_calls(fake_lsf):
 # work_dirs가 각 job의 submit_cwd로 저장된다
 # ----------------------------------------------------------------------
 def test_work_dirs_set_submit_cwd(qtbot, manager):
-    js = manager.create_jobset(
+    js = mk_jobset(manager, 
         ["customwrapper_sub a.sp", "customwrapper_sub b.sp"],
         work_dirs=["/scratch/a", "/scratch/b"])
     cwds = sorted(r.submit_cwd for r in js.jobs())
@@ -32,7 +34,7 @@ def test_work_dirs_set_submit_cwd(qtbot, manager):
 # jobset 단위 기본 work_dir — 전 job에 적용
 # ----------------------------------------------------------------------
 def test_jobset_default_work_dir_applies_to_all(qtbot, manager):
-    js = manager.create_jobset(
+    js = mk_jobset(manager, 
         ["customwrapper_sub a.sp", "customwrapper_sub b.sp"],
         work_dir="/scratch/common")
     assert all(r.submit_cwd == "/scratch/common" for r in js.jobs())
@@ -43,7 +45,7 @@ def test_jobset_default_work_dir_applies_to_all(qtbot, manager):
 # ----------------------------------------------------------------------
 def test_work_dir_and_work_dirs_mutually_exclusive(qtbot, manager):
     with pytest.raises(ValueError):
-        manager.create_jobset(
+        mk_jobset(manager, 
             ["customwrapper_sub a.sp", "customwrapper_sub b.sp"],
             work_dir="/scratch/common",
             work_dirs=["/scratch/a", "/scratch/b"])
@@ -53,11 +55,11 @@ def test_work_dir_and_work_dirs_mutually_exclusive(qtbot, manager):
 # replace_jobs: 교체되는 job은 work_dir도 새것으로 바뀐다
 # ----------------------------------------------------------------------
 def test_replace_jobs_replaces_work_dir(qtbot, manager):
-    tgt = manager.create_jobset(["customwrapper_sub a.sp"],
-                                merge_ids=["a"], work_dir="/old")
+    tgt = mk_jobset(manager, ["customwrapper_sub a.sp"],
+                                job_keys=["a"], work_dir="/old")
     manager.replace_jobs(tgt, ["customwrapper_sub a.sp"],
-                         merge_ids=["a"], work_dir="/new")
-    rec = next(r for r in tgt.jobs() if r.merge_id == "a")
+                         job_keys=["a"], work_dir="/new")
+    rec = next(r for r in tgt.jobs() if r.job_key == "a")
     assert rec.submit_cwd == "/new"      # 새 work_dir로 교체(교체 규칙)
 
 
@@ -65,7 +67,7 @@ def test_replace_jobs_replaces_work_dir(qtbot, manager):
 # 제출 subprocess가 그 work_dir을 cwd로 실행한다 (wrapper 경로)
 # ----------------------------------------------------------------------
 def test_submit_uses_work_dir_as_subprocess_cwd(qtbot, manager, fake_lsf):
-    js = manager.create_jobset(["customwrapper_sub run.sp"],
+    js = mk_jobset(manager, ["customwrapper_sub run.sp"],
                                work_dirs=["/scratch/run_a"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
@@ -78,7 +80,7 @@ def test_submit_uses_work_dir_as_subprocess_cwd(qtbot, manager, fake_lsf):
 # work_dir 미지정 job은 cwd=None (부모 프로세스 cwd)
 # ----------------------------------------------------------------------
 def test_no_work_dir_is_none(qtbot, manager, fake_lsf):
-    js = manager.create_jobset(["customwrapper_sub run.sp"])   # work_dirs 없음
+    js = mk_jobset(manager, ["customwrapper_sub run.sp"])   # work_dirs 없음
     assert all(r.submit_cwd is None for r in js.jobs())        # 요청값 그대로
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
@@ -90,7 +92,7 @@ def test_no_work_dir_is_none(qtbot, manager, fake_lsf):
 # 재제출에도 work_dir이 보존된다 (레코드 필드라 리셋이 안 지운다)
 # ----------------------------------------------------------------------
 def test_work_dir_preserved_on_resubmit(qtbot, manager, fake_lsf):
-    js = manager.create_jobset(["customwrapper_sub run.sp"],
+    js = mk_jobset(manager, ["customwrapper_sub run.sp"],
                                work_dirs=["/scratch/run_a"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
@@ -109,7 +111,7 @@ def test_work_dir_preserved_on_resubmit(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_work_dirs_length_mismatch_raises(qtbot, manager):
     with pytest.raises(ValueError):
-        manager.create_jobset(["a", "b"], work_dirs=["/only-one"])
+        mk_jobset(manager, ["a", "b"], work_dirs=["/only-one"])
 
 
 # ----------------------------------------------------------------------
@@ -124,7 +126,7 @@ def test_legacy_two_arg_runner_still_works(qtbot, fake_lsf, config):
     mgr = LsfJobManager(store=InMemoryStore(), config=config,
                         runner=legacy_runner)
     try:
-        js = mgr.create_jobset(["customwrapper_sub a.sp"])
+        js = mk_jobset(mgr, ["customwrapper_sub a.sp"])
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000) as blk:
             mgr.submit(js, auto_poll=False)
         assert blk.args[1].succeeded == 1    # TypeError 없이 제출 성공
@@ -161,7 +163,7 @@ def test_submit_invalid_work_dir_lands_submit_failed(qtbot, fake_lsf, config):
     mgr = LsfJobManager(store=InMemoryStore(), config=config,
                         runner=cwd_checking_runner)
     try:
-        js = mgr.create_jobset(["customwrapper_sub a.sp"],
+        js = mk_jobset(mgr, ["customwrapper_sub a.sp"],
                                work_dirs=["/definitely/does/not/exist"])
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000) as blk:
             mgr.submit(js, auto_poll=False, max_retry=0)

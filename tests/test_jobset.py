@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from lsfmgr import JobState
-from tests.conftest import submit_cmds
+from tests.conftest import mk_jobset, submit_cmds
 from lsfmgr.errors import JobSetNotFoundError, LsfmgrError
 
 
@@ -69,20 +69,20 @@ def test_edit_jobs_validation_failure_is_atomic(qtbot, manager, fake_lsf):
     배치 앞쪽은 멀쩡하고 뒤쪽만 위반하는 경우가 함정이다 — 루프 도중
     예외면 앞쪽이 이미 반영된 채 중단된다."""
     import pytest
-    js = manager.create_jobset(["customwrapper_sub keep.sp"],
-                               merge_ids=["keep"])
+    js = mk_jobset(manager, ["customwrapper_sub keep.sp"],
+                               job_keys=["keep"])
 
     with pytest.raises(ValueError, match="이미 있습니다"):
         manager.add_jobs(js,
                          ["customwrapper_sub ok.sp", "customwrapper_sub bad.sp"],
-                         merge_ids=["fresh", "keep"])    # 두 번째만 위반
-    assert [r.merge_id for r in js.jobs()] == ["keep"]   # 앞쪽도 안 들어갔다
+                         job_keys=["fresh", "keep"])    # 두 번째만 위반
+    assert [r.job_key for r in js.jobs()] == ["keep"]   # 앞쪽도 안 들어갔다
 
     from lsfmgr.errors import JobNotFoundError
     with pytest.raises(JobNotFoundError):
         manager.replace_jobs(js,
                              ["customwrapper_sub a.sp", "customwrapper_sub b.sp"],
-                             merge_ids=["keep", "nope"])  # 두 번째만 부재
+                             job_keys=["keep", "nope"])  # 두 번째만 부재
     assert js.jobs()[0].command == "customwrapper_sub keep.sp"
 
     s = manager.store.summary(js.id)
@@ -124,8 +124,7 @@ def test_remove_job_decrements_intended_count(qtbot, manager, fake_lsf, submitte
     assert before["total"] == 10
 
     # victim은 PEND(활성) — v9 가드상 force로 레코드만 제거
-    recs = manager.remove_job(submitted, job_key=victim.job_key,
-                              force=True)
+    recs = manager.remove_jobs(submitted, [victim.job_key], force=True)
     rec = recs[0]
     assert rec.job_key == victim.job_key       # 제거된 레코드 반환
 

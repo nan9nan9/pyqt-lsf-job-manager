@@ -55,7 +55,7 @@ def test_merge_during_active_submit_rejected(qtbot, config):
                                workers=1, auto_poll=False)
         assert mgr.submitter.is_active(js_active.id)
         with pytest.raises(LsfmgrError):
-            mgr.add_jobs(js_active.id, ["echo c"], merge_ids=["c"])
+            mgr.add_jobs(js_active.id, ["echo c"], job_keys=["c"])
         lsf.gate.set()
         qtbot.waitUntil(lambda: not mgr.submitter.is_active(js_active.id),
                         timeout=10000)
@@ -63,7 +63,7 @@ def test_merge_during_active_submit_rejected(qtbot, config):
         for js in (js_done, js_active):
             lsf.set_all("DONE", 0)
             mgr.querier.query(js.id)
-        mgr.add_jobs(js_active.id, ["echo c"], merge_ids=["c"])
+        mgr.add_jobs(js_active.id, ["echo c"], job_keys=["c"])
         assert mgr.summary(js_active.id)["total"] == 3
     finally:
         lsf.gate.set()

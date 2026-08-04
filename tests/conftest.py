@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pytest
 
+
 from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
 from tests.fake_lsf import FakeLsf
 
@@ -37,8 +38,20 @@ def manager(qtbot, fake_lsf, config):
 
 
 
+def mk_jobset(mgr, commands=(), *, job_keys=None, **kw):
+    """테스트 편의 — job_keys를 안 주면 연번으로 채운다.
+
+    라이브러리는 job_keys를 **필수**로 요구한다(앱이 job을 나중에 가리킬
+    수단이 그 키뿐이라 자동 생성하지 않는다). 키 자체가 관심사가 아닌
+    테스트까지 매번 적게 하면 신호 대 잡음만 나빠지므로 여기서 채운다."""
+    cmds = list(commands)
+    if cmds and job_keys is None:
+        job_keys = [f"k{i}" for i in range(len(cmds))]
+    return mgr.create_jobset(cmds, job_keys=job_keys, **kw)
+
+
 def submit_cmds(mgr, commands, *, wrapper=None, count=None,
-                merge_ids=None, **opts):
+                job_keys=None, **opts):
     """v9 흐름 축약 헬퍼 — create_jobset(commands=...) → submit.
 
     v10: 제출은 wrapper 단일 경로 — `wrapper` 인자는 하위 호환으로 받기만
@@ -49,7 +62,7 @@ def submit_cmds(mgr, commands, *, wrapper=None, count=None,
         commands = [commands] * (count or 1)
     label = opts.pop("label", "")
     tags = opts.pop("tags", ())
-    js = mgr.create_jobset(list(commands),
-                           merge_ids=merge_ids, label=label, tags=tags)
+    js = mk_jobset(mgr, list(commands),
+                   job_keys=job_keys, label=label, tags=tags)
     mgr.submit(js, **opts)
     return js

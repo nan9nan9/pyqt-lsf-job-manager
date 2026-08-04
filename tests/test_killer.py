@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from lsfmgr import JobState
-from tests.conftest import submit_cmds
+from tests.conftest import mk_jobset, submit_cmds
 
 
 @pytest.fixture
@@ -438,7 +438,7 @@ def test_kill_by_keys_spanning_jobsets_splits_per_jobset(qtbot, manager,
 def test_kill_jobs_rejects_jobset_without_keys(manager):
     """선택 kill인데 선택이 없으면 조용한 no-op 대신 TypeError — 특히
     cancel_submit=True면 kill 0건인데 제출만 전부 취소돼 위험하다."""
-    js = manager.create_jobset(["x"])
+    js = mk_jobset(manager, ["x"])
     with pytest.raises(TypeError):
         manager.kill_jobs(js)
     with pytest.raises(TypeError):
@@ -471,7 +471,7 @@ def test_global_verify_does_not_mark_surviving_array_exited(qtbot, manager,
     from tests.fake_lsf import FakeJob
     from lsfmgr import JobRecord
 
-    js = manager.create_jobset(intended_count=1)
+    js = mk_jobset(manager, intended_count=1)
     aid = 7700
     manager.store.store_add_job(JobRecord(
         job_id=aid, array_index=None, jobset_id=js.id,

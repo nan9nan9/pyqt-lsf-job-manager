@@ -10,6 +10,7 @@ killer shutdown TOCTOU.
 """
 from __future__ import annotations
 
+from tests.conftest import mk_jobset
 from lsfmgr import JobRecord, JobState
 from lsfmgr.command import JobStatus
 from lsfmgr.states import JobSetRecord
@@ -53,7 +54,7 @@ def test_sibling_refresh_not_stale_from_cache(qtbot, manager):
 def test_kill_after_shutdown_starts_no_task(qtbot, fake_lsf, config):
     from lsfmgr import InMemoryStore, LsfJobManager
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf)
-    js = mgr.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(mgr, ["customwrapper_sub a.sp"])
     with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
         mgr.submit(js, auto_poll=False)
     key = js.jobs()[0].job_key

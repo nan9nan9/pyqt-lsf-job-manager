@@ -38,12 +38,12 @@ class JobEditNotAllowedError(JobSetStateError):
        LSF에 살아있는 job의 정리는 caller 책임이 된다(레코드가 사라져 그
        job_id를 조회할 수 없으므로 삭제 직전 WARNING 로그가 유일한 흔적).
 
-    (입력 자체의 오류는 예외가 다르다: merge_id 중복/누락 = ValueError,
+    (입력 자체의 오류는 예외가 다르다: job_key 중복/누락 = ValueError,
      replace 대상 부재 = JobNotFoundError.)"""
 
 
 class RemoveNotAllowedError(JobSetStateError):
-    """remove_job/clear_jobs 불가 — 활성(진행 중) job은 삭제 거부.
+    """remove_jobs/clear_jobs 불가 — 활성(진행 중) job은 삭제 거부.
     force=True면 레코드만 강제 삭제(LSF job 정리는 caller 책임)."""
 
 

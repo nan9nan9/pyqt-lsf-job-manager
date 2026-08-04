@@ -234,7 +234,7 @@ class JobsetQuerier:
                         max(1, self.command.config.lost_after_missing_polls),
                         _brief([spec[0] for spec in lost_specs]))
 
-        # 전이 대상 소실(사이클 도중 remove_job)·guard 거부는 transition_many가
+        # 전이 대상 소실(사이클 도중 remove_jobs)·guard 거부는 transition_many가
         # 조용히 건너뛰고 반환 목록에서 제외한다 (safe_transition과 동일 계약).
         changed: List[JobRecord] = list(
             self.store.transition_many(jobset_id, update_specs))

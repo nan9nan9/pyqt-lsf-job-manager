@@ -6,6 +6,7 @@ shutdown 경합의 started/finished 짝(kill/submit), kill verify의 array_index
 """
 from __future__ import annotations
 
+from tests.conftest import mk_jobset
 from lsfmgr import InMemoryStore, JobRecord, JobState, LsfJobManager
 
 
@@ -19,7 +20,7 @@ def _finish(manager, fake_lsf, js, state="DONE", code=0):
 #       SUBMITTING 레코드를 전부 SUBMIT_FAILED로 정리 (jobset 안 잠김)
 # ----------------------------------------------------------------------
 def test_gate_fail_unstick_isolates_per_key(qtbot, manager, fake_lsf, monkeypatch):
-    js = manager.create_jobset([f"customwrapper_sub r{i}.sp" for i in range(3)])
+    js = mk_jobset(manager, [f"customwrapper_sub r{i}.sp" for i in range(3)])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
     _finish(manager, fake_lsf, js)
@@ -58,7 +59,7 @@ def test_gate_fail_unstick_isolates_per_key(qtbot, manager, fake_lsf, monkeypatc
 # ----------------------------------------------------------------------
 def test_submit_started_only_at_launch(qtbot, fake_lsf, config):
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf)
-    js = mgr.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(mgr, ["customwrapper_sub a.sp"])
     starts = []
     mgr.submit_started.connect(lambda j: starts.append(j))
     with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
@@ -77,7 +78,7 @@ def test_submit_started_only_at_launch(qtbot, fake_lsf, config):
 # ----------------------------------------------------------------------
 def test_kill_started_only_when_queued(qtbot, fake_lsf, config):
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf)
-    js = mgr.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(mgr, ["customwrapper_sub a.sp"])
     with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
         mgr.submit(js, auto_poll=False)
     starts = []
@@ -100,7 +101,7 @@ def test_kill_started_only_when_queued(qtbot, fake_lsf, config):
 def test_verify_none_array_index_not_element_matched(qtbot, manager, fake_lsf):
     from lsfmgr.killer import _KillTask
     from tests.fake_lsf import FakeJob
-    js = manager.create_jobset(intended_count=1)
+    js = mk_jobset(manager, intended_count=1)
     jsid = js.id
     # array_index=None인 RUN 레코드 (비array/collapsed)
     manager.store.store_add_jobs([JobRecord(

@@ -153,7 +153,7 @@ class InMemoryStore(JobSetStore):
             for job_key, new_state, guard, fields in specs:
                 old = jobs.get(job_key)
                 if old is None:
-                    continue                     # 사이클 도중 remove_job 등
+                    continue                     # 사이클 도중 remove_jobs 등
                 if guard is not None and not guard(old):
                     continue
                 new = replace(old, state=new_state, updated_at=now, **fields)

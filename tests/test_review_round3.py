@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from lsfmgr import JobRecord, JobState, LsfJobManager
-from tests.conftest import submit_cmds
+from tests.conftest import mk_jobset, submit_cmds
 from tests.test_store_contract import make_job, make_jobset
 
 
@@ -105,7 +105,7 @@ def test_shutdown_finalizes_pending_retries(qtbot, fake_lsf, config):
 # R3-8: 빈 jobset / cancel로 CREATED만 잔존 시 polling 영구 지속 (자동 중지 확장)
 # ----------------------------------------------------------------------
 def test_polling_autostops_on_empty_jobset(qtbot, manager, fake_lsf):
-    js = manager.create_jobset()          # v9: 빈 jobset은 생성만 가능
+    js = mk_jobset(manager)          # v9: 빈 jobset은 생성만 가능
     updates = []
     js.jobset_updated.connect(lambda s: updates.append(s))
     manager.start_polling(js, 0.1)

@@ -9,18 +9,20 @@ from __future__ import annotations
 
 import pytest
 
+from tests.conftest import mk_jobset
+
 from lsfmgr import JobState, SubmitNotAllowedError
 from lsfmgr.errors import JobNotFoundError
 
 
 def _mk(manager):
-    return manager.create_jobset(
+    return mk_jobset(manager, 
         ["customwrapper_sub a.sp", "customwrapper_sub b.sp",
-         "customwrapper_sub c.sp"], merge_ids=["a", "b", "c"])
+         "customwrapper_sub c.sp"], job_keys=["a", "b", "c"])
 
 
 def _states(js):
-    return {r.merge_id: r.state for r in js.jobs()}
+    return {r.job_key: r.state for r in js.jobs()}
 
 
 def test_only_submits_selected_and_leaves_rest(qtbot, manager, fake_lsf):
@@ -72,9 +74,9 @@ def test_only_ref_forms_and_dedup(qtbot, manager, fake_lsf):
     fake_lsf.set_all("DONE", 0)
     manager.querier.query(js.id)
 
-    rec = next(r for r in js.jobs() if r.merge_id == "a")
+    rec = next(r for r in js.jobs() if r.job_key == "a")
     with qtbot.waitSignal(manager.submit_finished, timeout=10000) as blk:
-        manager.submit(js, only=[rec.job_key, rec.merge_id, rec.job_id],
+        manager.submit(js, only=[rec.job_key, rec.job_key, rec.job_id],
                        auto_poll=False)
     assert blk.args[1].total == 1                    # 세 형태 → 같은 job 1건
 
@@ -105,7 +107,7 @@ def test_only_rearms_handler_for_selected_only(qtbot, manager, fake_lsf):
     with qtbot.waitSignal(manager.jobset_updated, timeout=10000):
         manager.query_once(js)
     qtbot.wait(200)
-    a_key = next(r.job_key for r in js.jobs() if r.merge_id == "a")
+    a_key = next(r.job_key for r in js.jobs() if r.job_key == "a")
     assert a_key in seen                              # a는 돌았다
 
     seen.clear()

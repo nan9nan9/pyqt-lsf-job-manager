@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from lsfmgr import JobState
-from tests.conftest import submit_cmds
+from tests.conftest import mk_jobset, submit_cmds
 
 
 def wait_submit_finished(qtbot, mgr, timeout=10000):
@@ -62,7 +62,7 @@ def test_submit_emits_submitting_immediately(qtbot, manager, fake_lsf):
     batches = []
     manager.jobs_updated.connect(
         lambda jsid, recs: batches.append([r.state for r in recs]))
-    js = manager.create_jobset([f"r {i}" for i in range(3)])
+    js = mk_jobset(manager, [f"r {i}" for i in range(3)])
     assert batches and batches[0] == [JobState.CREATED] * 3   # 생성 즉시
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js)

@@ -30,6 +30,8 @@ import threading
 
 import pytest
 
+from tests.conftest import mk_jobset
+
 from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
 from tests.fake_lsf import FakeLsf
 
@@ -63,7 +65,7 @@ def test_delete_during_inflight_submit_is_not_internal_error(
     errors = []
     mgr.error_occurred.connect(lambda j, m: errors.append((j, m)))
     try:
-        js = mgr.create_jobset(["customwrapper_sub a.sp"])
+        js = mk_jobset(mgr, ["customwrapper_sub a.sp"])
         with caplog.at_level(logging.WARNING, logger="lsfmgr.submit"):
             mgr.submit(js, auto_poll=False, workers=1)
             assert entered.wait(3), "제출 subprocess 진입 실패"
@@ -98,7 +100,7 @@ def test_force_delete_of_live_jobs_leaves_a_trace(qtbot, caplog, delete,
     mgr = LsfJobManager(store=InMemoryStore(), config=config,
                         runner=fake_lsf)
     try:
-        js = mgr.create_jobset(["customwrapper_sub a.sp"])
+        js = mk_jobset(mgr, ["customwrapper_sub a.sp"])
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             mgr.submit(js, auto_poll=False)
         live = [r.job_id for r in js.jobs()]          # PEND — LSF에 존재
@@ -116,7 +118,7 @@ def test_force_delete_of_live_jobs_leaves_a_trace(qtbot, caplog, delete,
 def test_non_force_delete_is_silent(qtbot, caplog, manager, fake_lsf):
     """전원 terminal이면 살아있는 job이 없으니 경고도 없어야 한다 —
     정상 종결마다 WARNING이 나면 이 로그가 무의미해진다."""
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
     fake_lsf.set_all("DONE", 0)
@@ -136,7 +138,7 @@ def test_delete_during_inflight_submit_still_finishes(qtbot):
     fake = FakeLsf()
     mgr, entered, release = _mgr_blocking_submit(fake)
     try:
-        js = mgr.create_jobset([f"customwrapper_sub {i}.sp" for i in range(3)])
+        js = mk_jobset(mgr, [f"customwrapper_sub {i}.sp" for i in range(3)])
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000) as blocker:
             mgr.submit(js, auto_poll=False, workers=1)
             assert entered.wait(3)

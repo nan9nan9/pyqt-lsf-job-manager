@@ -7,6 +7,7 @@ close force barrier 누수, kill verify 범위/whole 매칭.
 """
 from __future__ import annotations
 
+from tests.conftest import mk_jobset
 from lsfmgr import JobRecord, JobState
 
 
@@ -17,7 +18,7 @@ def _finish(manager, fake_lsf, js, state="DONE", code=0):
 
 def _array_jobset(manager, fake_lsf, n, base=9700):
     from tests.fake_lsf import FakeJob
-    js = manager.create_jobset(intended_count=n)
+    js = mk_jobset(manager, intended_count=n)
     jsid = js.id
     manager.store.store_add_jobs([JobRecord(
         job_id=base, array_index=i, jobset_id=jsid,
@@ -42,7 +43,7 @@ def _array_jobset(manager, fake_lsf, n, base=9700):
 #                  전량 SUBMIT_FAILED로 마무리 (부분착수 방지 + 잠금 없음)
 # ----------------------------------------------------------------------
 def test_partial_launch_no_orphan(qtbot, manager, fake_lsf, monkeypatch):
-    js = manager.create_jobset([f"customwrapper_sub r{i}.sp" for i in range(4)])
+    js = mk_jobset(manager, [f"customwrapper_sub r{i}.sp" for i in range(4)])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
     _finish(manager, fake_lsf, js)
@@ -73,7 +74,7 @@ def test_partial_launch_no_orphan(qtbot, manager, fake_lsf, monkeypatch):
 # ----------------------------------------------------------------------
 def test_gate_post_process_not_lost_on_fast_finish(qtbot, manager, fake_lsf):
     fake_lsf.fail_next_bsub = 100                      # 즉시 전량 실패
-    js = manager.create_jobset(
+    js = mk_jobset(manager, 
         [f"customwrapper_sub r{i}.sp" for i in range(4)])
     with qtbot.waitSignal(js.post_processing_finished, timeout=10000) as blk:
         manager.submit(js, pre_submit=lambda c: True,

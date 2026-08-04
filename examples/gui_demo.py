@@ -314,13 +314,18 @@ class Dashboard(QWidget):
                 self.tree.takeTopLevelItem(idx)
 
     # ------------------------------------------------------------------
-    # submit / merge 추가 / 실패 재실행
+    # submit / job 추가 / 실패 재실행
     # ------------------------------------------------------------------
     def submit(self):
         self.form.apply_mocklsf()
         kw = self.form.call_kwargs()
         label = kw.pop("label", "")
-        js = self.mgr.create_jobset(self.form.commands(), label=label)
+        cmds = self.form.commands()
+        # job_key 는 앱이 정한다 — 이후 add/replace/remove/only 가 전부 이
+        # 키로 job 을 가리킨다 (라이브러리는 대신 지어주지 않는다)
+        js = self.mgr.create_jobset(
+            cmds, job_keys=[f"run_{i}" for i in range(len(cmds))],
+            label=label)
         self.mgr.submit(js, post_process=self._summarize_results, **kw)
         if self.form.use_handler.isChecked():
             # RUN 중 폴링 사이클마다 parse_job_output, 종료 시 최종 1회
@@ -343,7 +348,7 @@ class Dashboard(QWidget):
         cmds = self.form.commands(start=n)
         try:
             self.mgr.add_jobs(
-                js, cmds, merge_ids=[f"run_{n + i}" for i in range(len(cmds))])
+                js, cmds, job_keys=[f"run_{n + i}" for i in range(len(cmds))])
         except LsfmgrError as e:
             self._log(js.id, f"추가 불가: {e}")
             return
@@ -351,7 +356,7 @@ class Dashboard(QWidget):
                          f"(미제출, Submit 은 전체 재제출)")
 
     def rerun_failed(self):
-        """실패 job 만 같은 merge_id 로 교체한 뒤 **그것만** 재제출."""
+        """실패 job 만 같은 job_key 로 교체한 뒤 **그것만** 재제출."""
         js = self._handle()
         if js is None:
             return
@@ -360,11 +365,11 @@ class Dashboard(QWidget):
         if not failed or not self.mgr.can_submit(js, only=keys):
             self._log(js.id, "rerun 불가 — 실패분 없음 또는 그 job 이 활성")
             return
-        # 같은 merge_id 로 교체 — job_key 가 유지돼 표의 행이 이어진다.
+        # 같은 job_key 자리에 새 내용 — 표의 행이 그대로 이어진다.
         # (실무에선 여기서 커맨드를 고쳐 넣는다. 데모는 원본 그대로 재실행)
         self.mgr.replace_jobs(
             js, [shlex.split(r.command) for r in failed],
-            merge_ids=[r.merge_id for r in failed],
+            job_keys=[r.job_key for r in failed],
             user_datas=[r.user_data for r in failed])
         # only= 로 실패분만 — 성공한 job 의 결과는 그대로 두고, 다른 job 이
         # 아직 돌고 있어도 막히지 않는다

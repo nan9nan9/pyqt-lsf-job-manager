@@ -5,6 +5,8 @@ post_process 등록과 무관하게 LSF job 상태만 보고 판정한다(전원
 """
 from __future__ import annotations
 
+from tests.conftest import mk_jobset
+
 
 def _finish(manager, fake_lsf, js, state="DONE", code=0):
     fake_lsf.set_all(state, code)
@@ -15,7 +17,7 @@ def _finish(manager, fake_lsf, js, state="DONE", code=0):
 # 기본 — post_process 없이도 전원 terminal 시 발화, 인자는 최종 요약
 # ----------------------------------------------------------------------
 def test_jobset_finished_without_post_process(qtbot, manager, fake_lsf):
-    js = manager.create_jobset([f"customwrapper_sub r{i}.sp" for i in range(3)])
+    js = mk_jobset(manager, [f"customwrapper_sub r{i}.sp" for i in range(3)])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
 
@@ -34,7 +36,7 @@ def test_manager_signal_carries_jobset_id(qtbot, manager, fake_lsf):
     seen = []
     manager.jobset_finished.connect(lambda j, s: seen.append((j, s)))
 
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
     with qtbot.waitSignal(manager.jobset_finished, timeout=10000):
@@ -47,7 +49,7 @@ def test_manager_signal_carries_jobset_id(qtbot, manager, fake_lsf):
 # 실패 혼재여도 전원 terminal이면 발화 (성공 여부와 무관)
 # ----------------------------------------------------------------------
 def test_fires_on_mixed_terminal(qtbot, manager, fake_lsf):
-    js = manager.create_jobset(["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
 
@@ -65,7 +67,7 @@ def test_fires_on_mixed_terminal(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_not_fired_while_active(qtbot, manager, fake_lsf):
     fired = []
-    js = manager.create_jobset(["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
     js.jobset_finished.connect(lambda s: fired.append(s))
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
@@ -83,7 +85,7 @@ def test_not_fired_while_active(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_fires_once(qtbot, manager, fake_lsf):
     fired = []
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     js.jobset_finished.connect(lambda s: fired.append(s))
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
@@ -101,7 +103,7 @@ def test_fires_once(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_rearms_on_resubmit(qtbot, manager, fake_lsf):
     fired = []
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     js.jobset_finished.connect(lambda s: fired.append(s))
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
@@ -121,7 +123,7 @@ def test_rearms_on_resubmit(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_muted_when_user_killed_whole_jobset(qtbot, manager, fake_lsf):
     fired = []
-    js = manager.create_jobset(["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
     js.jobset_finished.connect(lambda s: fired.append(s))
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
@@ -139,7 +141,7 @@ def test_muted_when_user_killed_whole_jobset(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_post_process_still_runs_after_kill(qtbot, manager, fake_lsf):
     fired = []
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     js.jobset_finished.connect(lambda s: fired.append(s))
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, post_process=lambda r: len(r), auto_poll=False)
@@ -158,7 +160,7 @@ def test_post_process_still_runs_after_kill(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_partial_kill_still_notifies(qtbot, manager, fake_lsf):
     fired = []
-    js = manager.create_jobset(["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp", "customwrapper_sub b.sp"])
     js.jobset_finished.connect(lambda s: fired.append(s))
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
@@ -180,7 +182,7 @@ def test_partial_kill_still_notifies(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_rearms_after_killed_jobset_resubmitted(qtbot, manager, fake_lsf):
     fired = []
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     js.jobset_finished.connect(lambda s: fired.append(s))
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
@@ -204,22 +206,22 @@ def test_merge_of_finished_jobsets_does_not_refire(qtbot, manager, fake_lsf):
     fired = []
     manager.jobset_finished.connect(lambda j, s: fired.append(j))
 
-    a = manager.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
+    a = mk_jobset(manager, ["customwrapper_sub a.sp"], job_keys=["a"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(a, auto_poll=False)
     with qtbot.waitSignal(a.jobset_finished, timeout=10000):
         _finish(manager, fake_lsf, a)
 
-    b = manager.create_jobset(["customwrapper_sub b.sp"], merge_ids=["b"])
+    b = mk_jobset(manager, ["customwrapper_sub b.sp"], job_keys=["b"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(b, auto_poll=False)
     with qtbot.waitSignal(b.jobset_finished, timeout=10000):
         _finish(manager, fake_lsf, b)
     assert fired == [a.id, b.id]
 
-    manager.upsert_jobs(a, ["customwrapper_sub b.sp"], merge_ids=["b"],
+    manager.upsert_jobs(a, ["customwrapper_sub b.sp"], job_keys=["b"],
                         force=True)     # 완료본 교체 — 전이 없음
-    manager.remove_job(a, merge_id="b")  # 다시 완료 상태로
+    manager.remove_jobs(a, ["b"])  # 다시 완료 상태로
     manager.query_once(a)
     qtbot.wait(200)
     assert fired == [a.id, b.id]        # a 재발화 없음
@@ -232,14 +234,14 @@ def test_added_created_jobs_rearm(qtbot, manager, fake_lsf):
     fired = []
     manager.jobset_finished.connect(lambda j, s: fired.append(j))
 
-    a = manager.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
+    a = mk_jobset(manager, ["customwrapper_sub a.sp"], job_keys=["a"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(a, auto_poll=False)
     with qtbot.waitSignal(a.jobset_finished, timeout=10000):
         _finish(manager, fake_lsf, a)
 
     manager.add_jobs(a, ["customwrapper_sub c.sp"],
-                     merge_ids=["c"])   # CREATED 1건 추가 — 다시 미완료
+                     job_keys=["c"])   # CREATED 1건 추가 — 다시 미완료
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(a, auto_poll=False)
     with qtbot.waitSignal(a.jobset_finished, timeout=10000) as blk:
@@ -254,7 +256,7 @@ def test_added_created_jobs_rearm(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_post_process_survives_resubmit_from_slot(qtbot, manager, fake_lsf):
     calls = []
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, post_process=lambda r: calls.append(len(r)),
                        auto_poll=False)
@@ -274,7 +276,7 @@ def test_post_process_survives_resubmit_from_slot(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_order_before_post_processing(qtbot, manager, fake_lsf):
     order = []
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
     js.jobset_finished.connect(lambda s: order.append("finished"))
     js.post_processing_started.connect(lambda: order.append("post_started"))
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
@@ -292,7 +294,7 @@ def test_order_before_post_processing(qtbot, manager, fake_lsf):
 def test_empty_jobset_never_fires(qtbot, manager, fake_lsf):
     fired = []
     manager.jobset_finished.connect(lambda j, s: fired.append(j))
-    js = manager.create_jobset([])
+    js = mk_jobset(manager, [])
     manager.query_once(js)
     qtbot.wait(150)
     assert fired == []
@@ -305,7 +307,7 @@ def test_fires_when_all_submit_failed(qtbot, manager, fake_lsf):
     fired = []
     manager.jobset_finished.connect(lambda j, s: fired.append(s))
     fake_lsf.fail_next_bsub = 1                 # 유일한 job의 제출이 거부됨
-    js = manager.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
 
     with qtbot.waitSignal(js.jobset_finished, timeout=10000) as blk:
         manager.submit(js, auto_poll=False, max_retry=0)

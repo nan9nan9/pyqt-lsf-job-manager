@@ -35,7 +35,7 @@ from .util import EmitThrottler, TokenBucketLimiter
 log = logging.getLogger("lsfmgr.submit")
 
 #: 제출 도중 대상 레코드가 사라졌다는 신호 — main 스레드의 동시 삭제
-#: (remove_job / clear_jobs / remove_jobset, 전부 force 경로)는 **정상 동작**
+#: (remove_jobs / clear_jobs / remove_jobset, 전부 force 경로)는 **정상 동작**
 #: 이지 INTERNAL_ERROR가 아니다. killer(_mark_exited)·monitor(_poll)·
 #: handlers(tick)가 이미 같은 소실 방어를 하고 있고, submitter만 빠져 있었다.
 _RECORD_GONE = (JobNotFoundError, JobSetNotFoundError)
@@ -257,7 +257,7 @@ class BulkSubmitter(QObject):
                         finish_time=None,
                         source_cluster=None, forward_cluster=None)
                 except Exception:                # noqa: BLE001
-                    # 키 소실(remove_job 경합)·store 장애 어느 쪽이든 이
+                    # 키 소실(remove_jobs 경합)·store 장애 어느 쪽이든 이
                     # 키만 건너뛰고 나머지는 진행 — 여기서 전파되면 ctx가
                     # 미완(finished 미발행)으로 고착되어 jobset이 잠긴다
                     log.exception("재제출 리셋 실패 — 건너뜀: %s/%s",
@@ -517,7 +517,7 @@ class BulkSubmitter(QObject):
         복귀시키고 작업 1단위 완료로 계상한다.
 
         - guard(CAS)로 SUBMITTING/RETRY_WAIT일 때만 전이 — 그새 다른 상태로
-          바뀐(또는 remove_job으로 소실된) 키는 조용히 건너뛴다.
+          바뀐(또는 remove_jobs으로 소실된) 키는 조용히 건너뛴다.
         - 이전 시도의 실패 잔재(fail_reason/fail_message/retry_count)를 함께
           리셋한다 — 안 지우면 '제출된 적 없는' CREATED job이 실패 이력을
           달고 UI/store에 남는다 (_task_succeeded가 성공 시
@@ -758,7 +758,7 @@ class BulkSubmitter(QObject):
         for r in recs:
             if r.state is not JobState.SUBMITTING:
                 continue
-            # 개별 transition을 각자 try로 — 한 key가 remove_job 경합으로
+            # 개별 transition을 각자 try로 — 한 key가 remove_jobs 경합으로
             # JobNotFoundError를 던져도 루프가 통째로 죽어 나머지가 SUBMITTING에
             # 갇히면(재제출 busy 가드에 걸려 영구 잠김) 안 된다. 그 key만 건너뛴다.
             try:

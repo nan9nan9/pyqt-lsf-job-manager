@@ -25,7 +25,7 @@ def _poll(qtbot, manager, jsid):
 # ----------------------------------------------------------------------
 def test_handler_runs_on_start_state_and_finalizes(qtbot, manager, fake_lsf,
                                                    submitted):
-    key = f"{submitted}_0"
+    key = "k0"          # mk_jobset의 연번 키
     calls = []
 
     def handler(ctx):
@@ -159,7 +159,7 @@ def test_handler_default_states(qtbot, manager, fake_lsf, submitted):
 # resubmit_jobs 후 handler 재무장 — 새 실행에서 다시 돈다
 # ----------------------------------------------------------------------
 def test_handler_rearmed_after_resubmit_all(qtbot, manager, fake_lsf, submitted):
-    key = f"{submitted}_0"
+    key = "k0"          # mk_jobset의 연번 키
     results = []
     manager.handler_finished.connect(lambda j, n, r: results.append(r))
 

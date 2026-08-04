@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import threading
 
+from tests.conftest import mk_jobset
 from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
 from tests.fake_lsf import FakeLsf
 
@@ -53,7 +54,7 @@ def test_replace_reruns_handler_without_resubmit(qtbot):
     mgr.handler_finished.connect(lambda j, n, r: seen.append(r.job_key))
     try:
         # target: merge_id "a"로 완주 → 그 job_key의 장부는 _FINISHED
-        tgt = mgr.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
+        tgt = mk_jobset(mgr, ["customwrapper_sub a.sp"], job_keys=["a"])
         mgr.add_handler(tgt.id, "h", lambda ctx: 1)
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             mgr.submit(tgt, auto_poll=False)
@@ -65,7 +66,7 @@ def test_replace_reruns_handler_without_resubmit(qtbot):
         assert tgt_key in seen
 
         # 같은 merge_id "a"를 새 커맨드로 교체 → 재제출 후 다시 RUN
-        mgr.replace_jobs(tgt, ["customwrapper_sub a2.sp"], merge_ids=["a"])
+        mgr.replace_jobs(tgt, ["customwrapper_sub a2.sp"], job_keys=["a"])
         rec = tgt.jobs()[0]
         assert rec.job_key == tgt_key            # 물리 키 유지
         assert rec.command == "customwrapper_sub a2.sp"
@@ -89,7 +90,7 @@ def test_edit_does_not_touch_untouched_jobs(qtbot):
     seen = []
     mgr.handler_finished.connect(lambda j, n, r: seen.append(r.job_key))
     try:
-        tgt = mgr.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
+        tgt = mk_jobset(mgr, ["customwrapper_sub a.sp"], job_keys=["a"])
         mgr.add_handler(tgt.id, "h", lambda ctx: 1)
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             mgr.submit(tgt, auto_poll=False)
@@ -100,7 +101,7 @@ def test_edit_does_not_touch_untouched_jobs(qtbot):
         old_key = tgt.jobs()[0].job_key
 
         # 무관한 merge_id "b"를 추가 — "a"는 손대지 않는다
-        mgr.add_jobs(tgt, ["customwrapper_sub b.sp"], merge_ids=["b"])
+        mgr.add_jobs(tgt, ["customwrapper_sub b.sp"], job_keys=["b"])
 
         seen.clear()
         _poll(qtbot, mgr, tgt)
@@ -131,7 +132,7 @@ def test_readd_handler_does_not_double_run(qtbot):
         return 1
 
     try:
-        js = mgr.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
+        js = mk_jobset(mgr, ["customwrapper_sub a.sp"], job_keys=["a"])
         mgr.add_handler(js.id, "h", slow)
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             mgr.submit(js, auto_poll=False)
@@ -175,7 +176,7 @@ def test_distinct_handlers_still_run_concurrently(qtbot):
         return 1
 
     try:
-        js = mgr.create_jobset(["customwrapper_sub a.sp"], merge_ids=["a"])
+        js = mk_jobset(mgr, ["customwrapper_sub a.sp"], job_keys=["a"])
         mgr.add_handler(js.id, "h1", slow)
         mgr.add_handler(js.id, "h2", slow)
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):

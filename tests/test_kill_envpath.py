@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 
 from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
-from tests.conftest import submit_cmds
+from tests.conftest import mk_jobset, submit_cmds
 from lsfmgr.command import LsfCommand, CommandResult
 from lsfmgr.states import JobState
 
@@ -258,7 +258,7 @@ def test_kill_array_element_envpath(qtbot, fake_lsf, config):
         from tests.fake_lsf import FakeJob
         from lsfmgr import JobRecord
 
-        js = mgr.create_jobset(intended_count=3)
+        js = mk_jobset(mgr, intended_count=3)
         jsid, aid = js.id, 9300
         mgr.store.store_add_jobs([JobRecord(
             job_id=aid, array_index=i, jobset_id=jsid,

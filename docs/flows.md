@@ -118,8 +118,8 @@ mgr.kill(js)
 main (전부 앱이 직접 제어)
 ──────────────────────────────────────────
 ① (살아있으면) mgr.kill(js) → kill_finished 대기
-② mgr.replace_jobs(js, [...], merge_ids=[기존과 동일])
-                         # 해당 job 만 CREATED 로 교체(물리 키 유지),
+② mgr.replace_jobs(js, [...], job_keys=[기존과 동일])
+                         # 해당 job 만 CREATED 로 교체(같은 키 자리),
                          # 가드: 교체 대상이 비활성
 ③ mgr.submit(js)         # 전 job 리셋 후 재제출 — §1과 동일 흐름
 ```
@@ -127,7 +127,7 @@ main (전부 앱이 직접 제어)
 - ②의 교체는 레코드만 바꾼다 — `force=True`로 활성 job을 교체해도 LSF의 실제
   job은 그대로다(정리는 앱 책임, 먼저 kill 권장).
 - ④의 리셋: job_id/exit_code/실행시간/fail_message/클러스터 소거,
-  `merge_id`/`user_data`/`submit_cwd` 보존. handler 자동 재무장.
+  `job_key`/`user_data`/`submit_cwd` 보존. handler 자동 재무장.
 
 ## 4. cancel (`mgr.cancel_submit(js)`)
 
@@ -182,4 +182,4 @@ polling QThread (jobset당 QTimer, interval마다)
 
 `is_on_lsf` = PEND/RUN/SUSP\*/UNKWN/ZOMBI — 폴링·kill 스냅샷 대상.
 `is_terminal` = DONE/EXIT/SUBMIT_FAILED/LOST — 더 이상 전이하지 않음.
-`is_inactive` = CREATED 또는 terminal — submit/merge/remove 가드의 공통 술어.
+`is_inactive` = CREATED 또는 terminal — submit/편집/remove 가드의 공통 술어.

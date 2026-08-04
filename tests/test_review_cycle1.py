@@ -9,6 +9,8 @@ import threading
 
 import pytest
 
+from tests.conftest import mk_jobset
+
 from lsfmgr import (
     InMemoryStore,
     JobSetNotFoundError,
@@ -25,7 +27,7 @@ def _finish(manager, fake_lsf, js, state="DONE", code=0):
 
 
 def _submit_done(qtbot, manager, fake_lsf, cmds):
-    js = manager.create_jobset(cmds)
+    js = mk_jobset(manager, cmds)
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)
     _finish(manager, fake_lsf, js)
@@ -130,7 +132,7 @@ def test_gate_pass_then_cancel_reports_false(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 def test_submit_after_shutdown_raises(qtbot, fake_lsf, config):
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf)
-    js = mgr.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(mgr, ["customwrapper_sub a.sp"])
     mgr.shutdown()
     with pytest.raises(SubmitNotAllowedError):
         mgr.submit(js)
@@ -138,7 +140,7 @@ def test_submit_after_shutdown_raises(qtbot, fake_lsf, config):
 
 def test_kill_after_shutdown_is_noop(qtbot, fake_lsf, config):
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf)
-    js = mgr.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(mgr, ["customwrapper_sub a.sp"])
     with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
         mgr.submit(js, auto_poll=False)
     started = []
@@ -155,7 +157,7 @@ def test_kill_after_shutdown_is_noop(qtbot, fake_lsf, config):
 # ----------------------------------------------------------------------
 def test_poll_updated_after_shutdown_ignored(qtbot, fake_lsf, config):
     mgr = LsfJobManager(store=InMemoryStore(), config=config, runner=fake_lsf)
-    js = mgr.create_jobset(["customwrapper_sub a.sp"])
+    js = mk_jobset(mgr, ["customwrapper_sub a.sp"])
     calls = []
     with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
         mgr.submit(js, post_process=lambda r: calls.append(1),
@@ -182,7 +184,7 @@ def test_removed_jobset_cannot_be_reused(qtbot, manager, fake_lsf):
         manager.submit(jsid)                 # 문자열 id 직접 제출도 거부
     with pytest.raises(JobSetNotFoundError):
         manager.add_jobs(jsid, ["customwrapper_sub b.sp"],
-                         merge_ids=["b"])    # 사라진 jobset 편집도 거부
+                         job_keys=["b"])    # 사라진 jobset 편집도 거부
 
 
 # ----------------------------------------------------------------------
@@ -191,9 +193,9 @@ def test_removed_jobset_cannot_be_reused(qtbot, manager, fake_lsf):
 def test_create_jobset_rollback_on_validation_error(manager):
     before = {r.jobset_id for r in manager.list_jobsets()}
     with pytest.raises(ValueError):
-        manager.create_jobset(["a", "b"], merge_ids=["m1"])   # 길이 불일치
+        mk_jobset(manager, ["a", "b"], job_keys=["m1"])   # 길이 불일치
     with pytest.raises(ValueError):
-        manager.create_jobset(["a", "b"], merge_ids=["m", "m"])  # 중복
+        mk_jobset(manager, ["a", "b"], job_keys=["m", "m"])  # 중복
     after = {r.jobset_id for r in manager.list_jobsets()}
     assert after == before                   # 유령 빈 jobset 없음
 

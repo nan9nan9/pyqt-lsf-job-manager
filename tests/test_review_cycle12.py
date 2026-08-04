@@ -100,7 +100,7 @@ def test_remove_job_keeps_other_jobs_grace(qtbot, manager, fake_lsf):
     gone, kept = sorted(r.job_key for r in js.jobs())
     assert _streaks(manager)[js.id][kept] == 1
 
-    manager.remove_job(js, job_key=gone, force=True)
+    manager.remove_jobs(js, [gone], force=True)
     assert gone not in _streaks(manager)[js.id]     # 삭제분만 사라지고
     assert _streaks(manager)[js.id][kept] == 1      # 남은 job 유예는 그대로
 

@@ -10,7 +10,7 @@
 | `lsfmgr.submit` | submit 시작/성공/실패/재시도/취소 |
 | `lsfmgr.monitor` | polling 시작/중지, 조회 실패, 판단 보류, LOST 확정 |
 | `lsfmgr.kill` | kill 착수/완료, env 분류, 확인 재시도, 실패 |
-| `lsfmgr.jobset` | JobSet 생성/merge/close/손실 감지 |
+| `lsfmgr.jobset` | JobSet 생성/편집/삭제/손실 감지 |
 | `lsfmgr.handler` | job별 handler 실행/예외 |
 | `lsfmgr.manager` | shutdown 등 수명 이벤트 |
 

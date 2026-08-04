@@ -75,9 +75,14 @@ class JobRecord:
     job_id: Optional[int]            # SUBMIT_FAILED 등 미확보 시 None
     array_index: Optional[int]       # array element면 인덱스, 아니면 None
     jobset_id: str
-    #: Store 내 물리 키 — "<jobset_id>_<idx>". (v10.1: 구명 lsf_job_name에서
-    #: 개명 — v10부터 LSF에 -J로 부착되지 않는 순수 내부 키라 옛 이름이
-    #: 오해를 유발했다. 구명 별칭 없음 — 호출부는 job_key만 쓴다.)
+    #: job의 키 — jobset 안에서 유일한 **논리 정체성**이다. 앱이 직접 정하고
+    #: (create_jobset/add_jobs의 job_keys), 생략하면 "<jobset_id>_<연번>"으로
+    #: 자동 생성된다. 재제출·교체에도 유지되므로 GUI 표의 행 정체성이 되고,
+    #: replace_jobs가 교체 대상을 찾는 기준이며 remove_jobs·set_user_data·
+    #: submit(only=)의 ref다.
+    #: (구 merge_id는 이 키와 역할이 겹쳐 삭제됐다 — merge API가 사라지면서
+    #:  "물리 키 vs 논리 키"를 나눌 이유가 없어졌다. LSF에 -J로 부착되지도
+    #:  않으므로 형식 제약도 없다.)
     job_key: str
     state: JobState
     fail_reason: Optional[str] = None    # "NO_JOBID_PARSED"|"BSUB_TIMEOUT"|...
@@ -106,17 +111,13 @@ class JobRecord:
     forward_cluster: Optional[str] = None    # 포워딩된 실행(원격) 클러스터
     # 제출 시 subprocess를 실행할 작업 디렉토리(create_jobset의 work_dir(s)
     # 요청값). None이면 부모(GUI) 프로세스의 cwd에서 실행(스레드 안전 —
-    # os.chdir 같은 프로세스 전역 변경 금지). job 단위 속성이라 merge/재제출
+    # os.chdir 같은 프로세스 전역 변경 금지). job 단위 속성이라 교체/재제출
     # 에도 보존된다.
     # v10.4: 관측값 working_dir(bjobs exec_cwd) 삭제 — RUN 이후에야 채워지는
     # 데다 이 값과 사실상 같은 경로를 가리켜 헷갈리기만 했다. 작업 디렉토리는
     # 이 필드 하나로 본다. exec_cwd 조회를 되살리지 말 것.
     submit_cwd: Optional[str] = None
-    # --- 논리 정체성/사용자 데이터 (GUI 직접 제어용, v9) ---
-    # merge_id: job의 논리 키 — merge 시 같은 merge_id의 기존 job을 이
-    # 레코드 내용으로 replace한다(물리 키 job_key는 유지 → 테이블 행 연속).
-    # None이면 merge에서 항상 신규 추가. jobset 내 유일해야 한다(None 제외).
-    merge_id: Optional[str] = None
+    # --- 사용자 데이터 (GUI 직접 제어용) ---
     # user_data: 사용자 정의 데이터(dict, JSON 직렬화 가능해야 함) — 실제
     # run command 등 GUI가 임의 정보를 싣는 용도. 라이브러리는 해석하지
     # 않고 보존만 한다. frozen 레코드 안의 dict이므로 내용을 제자리에서
