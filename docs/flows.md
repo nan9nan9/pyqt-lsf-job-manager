@@ -107,8 +107,13 @@ mgr.kill(js)
 - `kill_status_policy="actual"`이면 EXIT 전이는 다음 폴링에서(최대 `poll_interval_s`
   지연) — GUI는 기본(optimistic) 유지 권장.
 - 정지 대기 초과는 `KillReport.errors`에 남고 optimistic 표시도 억제된다.
-- 부분 kill(`only_state=`)·선택 kill(`kill_jobs`)은 기본적으로 제출을 건드리지 않고
-  해당 대상만 겨냥한다. `cancel_submit=True`로 전체 kill과 같은 우선권을 켤 수 있다.
+- 선택 kill(`kill_jobs`)은 **대상 job만** 제출을 취소·정지 대기한다
+  (`JobCancelScope` — barrier 없음, 대상 아닌 job의 제출과 새 제출 사이클은 그대로).
+  제출 중인 대상은 job_id가 없어 `bkill` 대상이 될 수 없으므로, 기다리지 않으면
+  key→id 해석에서 통째로 빠져 kill을 빠져나간다(→ 나중에 PEND→RUN으로 부활).
+- 부분 kill(`only_state=`)의 대상은 이미 on-LSF 상태라 제출을 건드릴 이유가 없다.
+- `cancel_submit=True`면 둘 다 전체 kill과 같은 우선권(사이클 전체 취소 +
+  SubmitGate barrier)으로 올라간다.
 
 ## 3. 재실행 — replace_jobs + submit
 

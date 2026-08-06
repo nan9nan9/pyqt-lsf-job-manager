@@ -325,7 +325,14 @@ JobSetStore(ABC) ── InMemoryStore
 - **FR-3 Kill**: job_id chunked `bkill` **단일 경로**, 부분 kill(`only_state`)·
   선택 kill(`kill_jobs`). MultiCluster forward는 **생성자 옵션** `cluster_envpaths`
   (`{클러스터명: cshrc경로}`, `"*"`가 기본 env)로 클러스터별 env를 source한 bkill.
-  제출 우선권은 전체 kill에 기본 적용, 부분·선택 kill은 `cancel_submit=True` opt-in.
+  제출 우선권(**FR-3.7**): 전체 kill은 jobset 제출 사이클 전체를 취소·barrier로
+  막고, 선택 kill(`kill_jobs`)은 **선택한 job의 제출만** 취소·정지 대기한다(대상
+  아닌 job의 제출은 계속). 그 범위를 전체로 넓히는 것이 `cancel_submit=True`.
+  - **FR-3.7** 어느 경로든 **kill 대상이 제출 중이면 반드시 처리된다** — 미착수분은
+    `CREATED` 복귀, 이미 wrapper가 도는 분은 job_id 확보를 기다렸다가 kill. 제출
+    중인 job은 job_id가 없어 bkill 대상이 될 수 없으므로, 기다리지 않으면 key→id
+    해석에서 빠져 kill을 빠져나가고 나중에 `PEND`→`RUN`으로 부활한다. 정지 대기
+    초과는 `KillReport.errors`에 남긴다.
   - **FR-3.4** 확인 문구 파싱 + 미확인분 재시도(`kill_max_retry`),
     `KillReport.unconfirmed`/`kill_retries`.
   - **FR-3.5** `kill_status_policy` — `"optimistic"`=확인 즉시 EXIT /

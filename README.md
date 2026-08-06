@@ -409,8 +409,14 @@ mgr.remove_jobset(js)                  # jobset 자체 삭제 (전원 terminal�
 
 **kill은 진행 중 submit에 우선권**을 갖습니다 — 전체 kill이면 진행 중 제출을 취소하고
 재시도를 포기시킨 뒤, barrier로 "kill을 빠져나가는 늦은 제출"을 구조적으로 막습니다.
-부분/선택 kill은 기본적으로 제출을 건드리지 않고, `cancel_submit=True`로 같은
-우선권을 켤 수 있습니다. 내부 도식은 [`docs/flows.md`](docs/flows.md).
+선택 kill(`kill_jobs`)은 **선택한 job의 제출만** 멈춥니다 — 아직 wrapper를 안 돌린
+대상은 `CREATED`로 되돌리고, 이미 도는 대상은 끝나 `job_id`가 잡힌 뒤 죽입니다
+(대상 아닌 job의 제출은 계속). 그 범위를 jobset 전체 제출로 넓히려면
+`cancel_submit=True`. 내부 도식은 [`docs/flows.md`](docs/flows.md).
+
+> 제출 중인 job은 아직 LSF job id가 없어 `bkill` 대상이 될 수 없습니다. 그래서
+> kill은 **id가 잡힐 때까지 기다리거나(quiesce) 제출 자체를 취소**합니다 — 기다리지
+> 않으면 그 job이 kill을 빠져나가 나중에 `PEND`→`RUN`으로 살아납니다.
 
 > **kill 상태 정책** (`kill_status_policy`):
 > `bkill`은 비동기라 `Job <id> is being terminated`(요청 수락)와 실제 종료 사이에

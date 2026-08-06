@@ -505,11 +505,15 @@ class LsfJobManager(QObject):
         jobset 컨텍스트가 있으면 optimistic EXIT 전이·verify가 켜지고 결과가
         핸들 kill_finished로도 중계된다.
 
-        cancel_submit: 선택 kill에 제출 우선권을 건다(jobset 컨텍스트 필수).
-        진행 중 제출 취소·재시도 포기·barrier(quiesce) — 취소는 jobset 전체
-        제출에 걸리고, kill 대상은 선택분 그대로다. 이때 job_key→id 해석은
-        barrier 뒤로 미뤄져, 호출 순간 제출 중이던 선택 job도 id를 확보한 뒤
-        확실히 죽는다(안 그러면 그 job이 kill을 빠져나가 LSF에 살아남는다)."""
+        **선택 대상이 제출 중이면 그 job의 제출은 항상 멈춘다** — 아직
+        wrapper를 안 돌린 대상은 CREATED로 되돌리고, 이미 도는 대상은 끝나길
+        기다렸다가 확보된 job_id로 죽인다. 안 그러면 job_id가 없는 대상이
+        key→id 해석에서 빠져 bkill이 안 나가고, 그 job은 제출을 마쳐 PEND→RUN
+        으로 살아난다. 대상 **아닌** job의 제출은 계속된다.
+
+        cancel_submit: 그 범위를 jobset **전체** 제출로 넓힌다(jobset 컨텍스트
+        필수) — 진행 중 사이클 전체 취소 + SubmitGate barrier로 새 제출 사이클
+        등록까지 막는다. kill 대상은 선택분 그대로다."""
         if self._shutdown_done:
             log.warning("shutdown 후 kill_jobs 요청 무시")
             return
@@ -592,6 +596,14 @@ class LsfJobManager(QObject):
             self.submitter.cancel_submit(jsid)
             self.submitter.abort_retries(jsid)
             scope = self._gate.kill_scope(jsid)
+        elif keys is not None and jsid:
+            # 선택 kill의 기본 우선권 — **대상 job만** 제출을 멈추고 정지를
+            # 기다린다. 안 하면 제출 중(job_id 미확보)인 대상이 key→id 해석에서
+            # 통째로 빠져 bkill이 안 나가고, 그 job은 제출을 마쳐 PEND→RUN으로
+            # 살아난다("kill했는데 안 죽는다" — 여러 번 kill해야 하는 증상).
+            # cancel_submit=True와 달리 barrier를 올리지 않으므로 대상 아닌
+            # job의 제출과 새 제출 사이클은 그대로다.
+            scope = self.submitter.job_scope(jsid, keys)
         queued = self.killer.kill_jobs(ids, job_keys=keys, verify=verify,
                                        jobset_id=jsid or "", scope=scope)
         if queued:                       # 실제 큐잉일 때만 (shutdown 경합 제외)
