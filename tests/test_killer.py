@@ -436,13 +436,13 @@ def test_kill_by_keys_spanning_jobsets_splits_per_jobset(qtbot, manager,
 
 
 def test_kill_jobs_rejects_jobset_without_keys(manager):
-    """선택 kill인데 선택이 없으면 조용한 no-op 대신 TypeError — 특히
-    cancel_submit=True면 kill 0건인데 제출만 전부 취소돼 위험하다."""
+    """선택 kill인데 선택이 없으면 조용한 no-op 대신 TypeError — 호출자는
+    뭔가 죽었다고 믿는데 실제로는 0건이라 위험하다."""
     js = mk_jobset(manager, ["x"])
     with pytest.raises(TypeError):
         manager.kill_jobs(js)
     with pytest.raises(TypeError):
-        manager.kill_jobs(js.id, cancel_submit=True)
+        manager.kill_jobs(js.id)
     manager.kill_jobs(js, [])            # 빈 선택은 명시하면 정상 no-op
 
 

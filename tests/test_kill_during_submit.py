@@ -10,10 +10,11 @@ kill했더니 "제출 중"이던 job은 죽지 않고, 그대로 제출을 마�
 제출을 먼저 정지시켜(quiesce) 이 창이 없었지만, 선택 kill은 기본적으로 제출을
 건드리지 않아 그대로 유출됐다.
 
-수정: 선택 kill도 **대상 job만** 제출을 취소하고 정지를 기다린다
-(JobCancelScope) — 미착수분은 CREATED로 되돌리고, 이미 wrapper가 도는 분은
-끝나 job_id가 잡힌 뒤 죽인다. 대상 아닌 job의 제출은 계속된다(그걸 통째로
-멈추는 것은 여전히 cancel_submit=True의 opt-in).
+수정: kill의 제출 우선권을 **겨냥한 job에만, 항상** 걸리도록 통합했다
+(SubmitGate/KillScope의 범위 인자) — 미착수분은 CREATED로 되돌리고, 이미
+wrapper가 도는 분은 끝나 job_id가 잡힌 뒤 죽인다. 대상 아닌 job의 제출은
+계속된다. jobset 제출을 통째로 멈추려면 `mgr.cancel_submit(js)`를 먼저 부른다
+(구 `cancel_submit=True` 옵션은 삭제됐다).
 """
 from __future__ import annotations
 
@@ -83,8 +84,8 @@ def test_selection_kill_catches_submitting_jobs(qtbot):
 def test_selection_kill_leaves_other_jobs_submitting(qtbot):
     """선택 kill은 **대상 아닌** job의 제출까지 멈추지는 않는다.
 
-    (그것까지 멈추는 것은 cancel_submit=True의 역할 — 기본값이 jobset 전체를
-    멈추면 행 하나를 kill한 사용자가 제출 전체를 잃는다.)"""
+    (그것까지 멈추려면 mgr.cancel_submit(js) — kill이 jobset 전체를 멈추면
+    행 하나를 kill한 사용자가 제출 전체를 잃는다.)"""
     fake = SlowSubmitLsf(delay=0.1)
     mgr = _mgr(fake)
     try:
@@ -151,5 +152,39 @@ def test_full_kill_catches_submitting_jobs(qtbot):
             mgr.kill(js, verify=True)
         qtbot.waitUntil(lambda: bool(done), timeout=60000)
         assert not fake.alive_jobs()
+    finally:
+        mgr.shutdown()
+
+
+def test_explicit_cancel_submit_composes_with_selection_kill(qtbot):
+    """jobset 제출을 통째로 멈추는 의도는 `mgr.cancel_submit(js)`로 표현한다
+    (구 cancel_submit=True 옵션의 자리). 그 뒤 선택 kill은 평소대로 선택분만
+    죽이고, 나머지 미착수분은 제출되지 않은 채 CREATED로 남는다."""
+    fake = SlowSubmitLsf()
+    mgr = _mgr(fake)
+    try:
+        keys = [f"k{i}" for i in range(N)]
+        victims = keys[:20]
+        js = _jobset(mgr, keys)
+        done = []
+        mgr.submit_finished.connect(lambda j, r: done.append(r))
+        mgr.submit(js, auto_poll=False)
+        qtbot.waitUntil(
+            lambda: any(r.state is JobState.SUBMITTING
+                        for r in mgr.get_jobs(js.id)), timeout=10000)
+        with qtbot.waitSignal(mgr.kill_finished, timeout=60000):
+            mgr.cancel_submit(js)                 # 배치 전체 중단
+            mgr.kill_jobs(js, victims, verify=True)
+        qtbot.waitUntil(lambda: bool(done), timeout=60000)
+
+        by_key = {r.job_key: r for r in mgr.get_jobs(js.id)}
+        alive_ids = {j.job_id for j in fake.alive_jobs()}
+        # 선택 대상은 LSF에 하나도 안 남는다 (제출 중이던 것 포함)
+        assert not [k for k in victims if by_key[k].job_id in alive_ids]
+        assert not [k for k in victims
+                    if by_key[k].state.is_on_lsf
+                    or by_key[k].state is JobState.SUBMITTING]
+        # 배치 중단 효과: 미착수분은 제출되지 않고 CREATED로 남는다
+        assert any(by_key[k].state is JobState.CREATED for k in keys[20:])
     finally:
         mgr.shutdown()

@@ -75,13 +75,14 @@ barrier 확인과 submit 등록이 한 lock 아래 원자적이라, "kill의 취
 main                              killer pool worker
 ──────────────────────────       ─────────────────────────────────────
 mgr.kill(js)
- ├ cancel_submit()                # 응답성: 미착수 worker 즉시 중단 예약
- ├ abort_retries()                # RETRY_WAIT QTimer 부활 방지
+ ├ scope = gate.kill_scope(js, keys)   # 범위 = 겨냥한 job (None=전체)
+ ├ scope.begin()                  # barrier ↑ + 범위 내 제출 즉시 취소 (논블로킹)
+ │                                #   · 미착수 worker 중단 예약
+ │                                #   · RETRY_WAIT QTimer 부활 방지
  ├ killer.kill_jobset(scope)      # 등록 + task 큐잉 (동기)
  └ kill_started 발행(동기) ◀━━ UI 스피너는 여기서 켠다
                                   _KillTask:
-                                    scope.acquire()          # barrier ↑
-                                    │  ├ 그 시점 submit 활동 전부 취소
+                                    scope.acquire()          # 정지 대기만 (blocking)
                                     │  ├ pool 슬롯 반납(releaseThread)
                                     │  └ 정지 대기 (제출 완료까지, 상한 있음)
                                     │     · 미제출 → CREATED 복귀(kill 대상 아님)
@@ -107,13 +108,17 @@ mgr.kill(js)
 - `kill_status_policy="actual"`이면 EXIT 전이는 다음 폴링에서(최대 `poll_interval_s`
   지연) — GUI는 기본(optimistic) 유지 권장.
 - 정지 대기 초과는 `KillReport.errors`에 남고 optimistic 표시도 억제된다.
-- 선택 kill(`kill_jobs`)은 **대상 job만** 제출을 취소·정지 대기한다
-  (`JobCancelScope` — barrier 없음, 대상 아닌 job의 제출과 새 제출 사이클은 그대로).
+- 제출 우선권은 **kill이 겨냥한 job에만, 항상** 걸린다 — `KillScope(jobset_id, keys)`의
+  범위 인자 하나로 표현된다(`keys=None` = jobset 전체 = 전체 kill).
   제출 중인 대상은 job_id가 없어 `bkill` 대상이 될 수 없으므로, 기다리지 않으면
   key→id 해석에서 통째로 빠져 kill을 빠져나간다(→ 나중에 PEND→RUN으로 부활).
-- 부분 kill(`only_state=`)의 대상은 이미 on-LSF 상태라 제출을 건드릴 이유가 없다.
-- `cancel_submit=True`면 둘 다 전체 kill과 같은 우선권(사이클 전체 취소 +
-  SubmitGate barrier)으로 올라간다.
+- barrier도 같은 범위다 — kill 진행 중 도착한 제출에서 **그 key만** born-cancelled
+  되고(레코드는 리셋조차 안 됨), 나머지 job은 정상 제출된다.
+- 부분 kill(`only_state=`)의 대상은 이미 on-LSF 상태라 멈출 제출이 없다. "제출 폭주를
+  멈추면서 전부 정리"는 `mgr.cancel_submit(js)` + **전체 kill**의 조합이다.
+- barrier↑와 취소는 kill 접수 스레드에서 즉시(`scope.begin()`, 논블로킹),
+  정지 대기만 killer worker에서(`scope.acquire()`) — 취소가 worker 차례까지 밀리면
+  그동안 제출된 job이 전부 '제출됐다가 곧 죽는' 낭비가 된다.
 
 ## 3. 재실행 — replace_jobs + submit
 

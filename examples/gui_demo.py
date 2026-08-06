@@ -393,11 +393,14 @@ class Dashboard(QWidget):
         self.mgr.kill(js, verify=True)
 
     def kill_pend(self):
-        """PEND 만 kill — cancel_submit=True 로 전체 kill 과 같은 제출
-        우선권을 건다(제출 중인 것까지 확실히 멈춘다, v10.3 opt-in)."""
+        """PEND 만 kill — 지금 PEND 인 job 만 겨냥한다.
+
+        제출 중인 job 은 아직 PEND 가 아니므로 대상이 아니고, 그 제출도
+        멈추지 않는다. 배치 제출을 통째로 멈추려면 Cancel(mgr.cancel_submit)
+        을 먼저 누른다."""
         js = self._handle()
         if js:
-            self.mgr.kill(js, only_state=JobState.PEND, cancel_submit=True)
+            self.mgr.kill(js, only_state=JobState.PEND)
 
     def kill_selected(self):
         """테이블 선택 행만 kill (kill_jobs — array element 는 id[idx]).

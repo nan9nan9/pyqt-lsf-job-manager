@@ -242,7 +242,7 @@ class BulkSubmitter(QObject):
             log.warning("shutdown 후 재제출 요청 무시: %s", jobset_id)
             return False
         keyed = list(keyed_items)
-        ctx = self._new_context(jobset_id, len(keyed), options)
+        ctx = self._new_context(jobset_id, [k for k, _item in keyed], options)
         ctx.arm_token = arm_token
         if ctx.cancel_event.is_set():
             # born-cancelled (kill barrier 중 시작) — 아래 리셋은 기존
@@ -276,7 +276,16 @@ class BulkSubmitter(QObject):
             # EXIT(kill) → SUBMITTING → PEND로 자연스럽게 보인다.
             launch = []
             reset_recs = []
+            # barrier에 걸린 key(register의 refused + 그 사이 도착한 kill의
+            # 취소분)는 **리셋조차 하지 않는다** — 리셋은 job_id/이력을 지우는
+            # 파괴적 연산이라, 제출하지 않을 job에 하면 원상 유지 계약이 깨진다.
+            with ctx.lock:
+                blocked = set(ctx.cancelled_keys)
+            skipped = 0
             for key, item in keyed:
+                if key in blocked:
+                    skipped += 1
+                    continue
                 try:
                     rec = self.store.transition(
                         jobset_id, key, JobState.SUBMITTING,
@@ -300,6 +309,13 @@ class BulkSubmitter(QObject):
                 # 실어 subprocess cwd로 쓴다(rec None인 드문 경우만 부모 cwd).
                 launch.append((key, item,
                                rec.submit_cwd if rec is not None else None))
+            # barrier 거부분을 **한 번에** 계상한다 — 건당 _count는 대형
+            # 재제출에서 O(N)회 lock/신호 발화가 된다(born-cancelled를
+            # _gate_reject가 O(1)로 처리하는 것과 같은 이유).
+            if skipped:
+                log.info("kill barrier로 제출 보류 %s: %d건 (레코드 원상 유지)",
+                         jobset_id, skipped)
+                self._count_bulk(ctx, skipped, cancelled=True)
             # task 객체를 **먼저 전부** 만든다 — 생성이 실패하면 어느 task도
             # 시작하기 전에 예외가 난다. 부분 착수(일부 task는 이미 실행 중인데
             # do_launch가 죽어 _gate_fail이 그 레코드를 SUBMIT_FAILED로 되돌리면
@@ -384,19 +400,20 @@ class BulkSubmitter(QObject):
                 succeeded=ctx.succeeded, failed=ctx.failed,
                 cancelled=ctx.cancelled)
 
-    def _new_context(self, jobset_id: str, total: int,
+    def _new_context(self, jobset_id: str, keys: Sequence[str],
                      options: Options) -> _SubmitContext:
         """submit 사이클 1건의 pool/ctx 구성 + 등록 (submit/재제출 공통).
 
-        SubmitGate 등록까지 여기서 한다 — kill barrier가 올라가 있으면
-        born-cancelled(cancel_event가 켜진 채 시작): 어떤 job도 LSF에
-        제출되지 않고 기존 취소 경로(CREATED 복귀, finished(cancelled))로
-        마무리된다. barrier 확인과 등록이 게이트 lock 아래 원자적이라
+        SubmitGate 등록까지 여기서 한다 — kill barrier가 올라가 있으면 그
+        범위의 job은 시작 자체가 거부된다: 전 job이 걸리면 사이클 통째로
+        born-cancelled(cancel_event가 켜진 채 시작 — 레코드/LSF 미접촉,
+        전원 취소 계상), 일부만 걸리면 그 key만 `cancelled_keys`로 들어가
+        제출에서 빠진다. barrier 확인과 등록이 게이트 lock 아래 원자적이라
         'kill의 취소를 빠져나가는 늦은 사이클'이 구조적으로 불가능하다."""
         pool = QThreadPool()
         pool.setMaxThreadCount(options.workers)
         ctx = _SubmitContext(
-            jobset_id=jobset_id, total=total,
+            jobset_id=jobset_id, total=len(keys),
             max_retry=options.max_retry, pool=pool,
             limiter=TokenBucketLimiter(options.rate_limit_per_s),
             throttler=self._make_throttler(), options=options)
@@ -404,66 +421,57 @@ class BulkSubmitter(QObject):
             self._contexts[jobset_id] = ctx
         # 진행 중 bsub는 submit_timeout_s로 반드시 끝난다(subprocess timeout).
         # 취소된 나머지 worker는 즉시 빠지므로 여유만 더한 대기 상한.
-        ctx.gate_token = self._gate.register(
-            jobset_id, ctx.cancel_event,
-            lambda t: ctx.pool.waitForDone(int(t * 1000)),
+        reg = self._gate.register(
+            jobset_id, keys,
+            lambda scope: self._cancel_scope(ctx, scope),
+            lambda scope, t: self._wait_scope(ctx, scope, t),
             options.submit_timeout_s + 30.0)
-        if ctx.gate_token is None:
-            ctx.cancel_event.set()           # born-cancelled
+        ctx.gate_token = reg.activity
+        if reg.activity is None:
+            ctx.cancel_event.set()           # 전 job 거부 — born-cancelled
+        elif reg.refused:
+            with ctx.lock:                   # 일부만 거부 — 그 key만 제외
+                ctx.cancelled_keys |= set(reg.refused)
         return ctx
 
-    def _make_throttler(self) -> EmitThrottler:
-        """config의 progress throttle 설정으로 EmitThrottler 생성."""
-        return EmitThrottler(self.config.progress_min_interval_s,
-                             self.config.progress_min_step_ratio)
+    # ------------------------------------------------------------------
+    # SubmitGate 활동 콜백 — kill(KillScope)이 worker 스레드에서 부른다
+    # ------------------------------------------------------------------
+    def _cancel_scope(self, ctx: _SubmitContext, scope) -> None:
+        """범위 내 제출 취소. scope=None이면 사이클 전체.
 
-    def cancel_submit(self, jobset_id: str) -> None:
-        """진행 중 submit 중단. 이미 submit된 job은 유지."""
-        with self._ctx_lock:
-            ctx = self._contexts.get(jobset_id)
-        if ctx is not None:
+        pool/QTimer에 남은 잔여 task는 `_enter_inflight`가 막는다. 취소 표시는
+        사이클이 끝날 때까지 지우지 않는다 — 풀면 그 잔여 task가 kill 뒤에
+        job을 다시 제출해 되살린다."""
+        if scope is None:
             ctx.cancel_event.set()
+        else:
+            with ctx.lock:
+                ctx.cancelled_keys |= set(scope)
+        # QTimer 대기 중인 재시도 — 그대로 두면 kill 뒤 발화해 job이 부활한다
+        self.abort_retries(ctx.jobset_id, keys=scope)
 
-    def job_scope(self, jobset_id: str, keys: Sequence[str]) -> "JobCancelScope":
-        """선택 kill용 제출 우선권 — killer가 scope로 받아 쓴다."""
-        return JobCancelScope(self, jobset_id, list(keys))
+    def _wait_scope(self, ctx: _SubmitContext, scope,
+                    timeout_s: float) -> bool:
+        """범위 내 제출이 멎을 때까지 대기 — 반환: 시간 내 정지 여부.
 
-    def cancel_and_quiesce_jobs(self, jobset_id: str,
-                                keys: Sequence[str]) -> bool:
-        """**대상 job만** 제출을 취소하고, 이미 wrapper가 도는 job은 끝날
-        때까지 기다린다 (선택 kill의 우선권).
-
-        cancel_submit(사이클 전체 중단)과 달리 jobset의 다른 job 제출은 그대로
-        진행된다. 반환: 시간 내 전부 정지했으면 True — False면 caller(killer)가
-        KillReport.errors로 보고한다(그 사이 제출을 마친 job이 kill을 빠져나갈
-        수 있다는 뜻).
-
-        ctx 조회를 한 번만 해 취소와 대기가 **같은 사이클**을 겨냥하게 한다 —
-        따로 조회하면 그 사이 사이클이 교체돼 A를 취소하고 B를 기다릴 수 있다.
-        """
-        wanted = set(keys)
+        전체(scope=None)는 pool을 통째로 join한다. 범위 지정은 그 key가
+        **제출 구간(inflight)**에서 빠질 때까지만 기다린다 — 대상 아닌 job의
+        제출이 끝나기를 기다릴 이유가 없다(그게 선택 kill의 요점).
+        이미 wrapper가 도는 대상은 여기서 기다려야 job_id가 확보돼, killer의
+        key→id 해석이 그 id를 잡아 확실히 죽인다."""
+        if scope is None:
+            return ctx.pool.waitForDone(int(timeout_s * 1000))
+        wanted = set(scope)
         if not wanted:
             return True
-        with self._ctx_lock:
-            ctx = self._contexts.get(jobset_id)
-        if ctx is None:                      # 진행 중 제출 없음
-            return True
-        with ctx.lock:
-            ctx.cancelled_keys |= wanted
-        # QTimer 대기 중인 재시도 — 그대로 두면 kill 뒤 발화해 job이 부활한다.
-        # (pool/QTimer에 남은 잔여 task는 cancelled_keys가 막는다)
-        self.abort_retries(jobset_id, keys=wanted)
-        # 이미 wrapper가 도는 job은 job_id가 곧 잡힌다 — 그때까지 기다려야
-        # killer의 key→id 해석이 그 id를 잡아 확실히 죽인다. 안 기다리면
-        # 그 job이 kill을 빠져나가 PEND로 살아난다.
-        timeout_s = ctx.options.submit_timeout_s + 30.0
         deadline = time.monotonic() + timeout_s
         with ctx.inflight_cv:
             while wanted & ctx.inflight:
                 remain = deadline - time.monotonic()
                 if remain <= 0:
-                    log.warning("선택 kill quiesce 대기 초과: %s (%d건 제출 중)",
-                                jobset_id, len(wanted & ctx.inflight))
+                    log.warning("제출 정지 대기 초과 %s: %d건 제출 중",
+                                ctx.jobset_id, len(wanted & ctx.inflight))
                     return False
                 ctx.inflight_cv.wait(remain)
         return True
@@ -477,11 +485,23 @@ class BulkSubmitter(QObject):
             return True
 
     def _leave_inflight(self, ctx: _SubmitContext, job_key: str) -> None:
-        """제출 구간 이탈 — 대기 중인 quiesce를 깨운다 (멱등)."""
+        """제출 구간 이탈 — 대기 중인 정지 대기를 깨운다 (멱등)."""
         with ctx.inflight_cv:
             if job_key in ctx.inflight:
                 ctx.inflight.discard(job_key)
                 ctx.inflight_cv.notify_all()
+
+    def _make_throttler(self) -> EmitThrottler:
+        """config의 progress throttle 설정으로 EmitThrottler 생성."""
+        return EmitThrottler(self.config.progress_min_interval_s,
+                             self.config.progress_min_step_ratio)
+
+    def cancel_submit(self, jobset_id: str) -> None:
+        """진행 중 submit 중단. 이미 submit된 job은 유지."""
+        with self._ctx_lock:
+            ctx = self._contexts.get(jobset_id)
+        if ctx is not None:
+            ctx.cancel_event.set()
 
     def shutdown(self) -> None:
         """모든 submit 중단 요청 후 pool join.
@@ -511,8 +531,10 @@ class BulkSubmitter(QObject):
         발화해 job이 부활하는 것을 막는다. 이후 타이머가 발화해도 원장
         pop이 빈손이라 no-op(정확히 한 번).
 
-        keys 지정 시 그 job의 재시도만 포기한다 (선택 kill — 대상 아닌 job의
-        재시도는 계속 살려 둔다)."""
+        keys=None이면 이 jobset의 전 재시도, key 집합이면 그 job의 재시도만
+        포기한다 (범위 kill — 대상 아닌 job의 재시도는 살려 둔다).
+        SubmitGate의 Scope와 같은 규약(None=전체)이라 `_cancel_scope`가
+        받은 scope를 그대로 넘긴다."""
         with self._ctx_lock:
             ctx = self._contexts.get(jobset_id)
         if ctx is None:
@@ -746,6 +768,19 @@ class BulkSubmitter(QObject):
         self._emit_progress(ctx)
         self._finish_if_done(ctx)
 
+    def _count_bulk(self, ctx: _SubmitContext, n: int, *,
+                    cancelled: bool = False) -> None:
+        """n단위 일괄 계상 — 건당 _count가 O(N)회 lock/신호 발화가 되는
+        대량 경로(barrier 거부분) 전용. 통지는 한 번만 한다."""
+        if n <= 0:
+            return
+        with ctx.lock:
+            ctx.done += n
+            if cancelled:
+                ctx.cancelled += n
+        self._emit_progress(ctx)
+        self._finish_if_done(ctx)
+
     def _emit_progress(self, ctx: _SubmitContext) -> None:
         # 발화(progress·jobs_changed)를 ctx.lock 안에서 수행한다 — drain과 emit이
         # 원자적이어야, 다른 worker 스레드의 _finish_if_done가 그 사이에 끼어들어
@@ -883,37 +918,6 @@ class BulkSubmitter(QObject):
                 report = self._make_report(ctx)
                 self._safe_emit(self.finished, ctx.jobset_id, report)
         self._drop_ctx(ctx)
-
-
-class JobCancelScope:
-    """선택 kill의 제출 우선권 — **대상 job만** 제출을 멈춘다.
-
-    KillScope(SubmitGate barrier)와 같은 acquire/release 인터페이스라
-    killer는 둘을 구분하지 않는다. 차이는 범위다:
-
-        KillScope       — jobset의 제출 사이클 전체 취소 + 새 사이클 등록 거부
-        JobCancelScope  — 선택된 job만 제출 취소, 나머지 job의 제출은 계속
-
-    선택 kill이 barrier까지 올리면 "행 하나를 kill했더니 jobset 제출이 통째로
-    멈췄다"가 되므로 그건 cancel_submit=True의 opt-in으로 남긴다. 그래도 **선택
-    대상만은 확실히 죽어야** 하므로 그 job의 제출은 여기서 멈추고 정지를
-    기다린다 — 안 그러면 제출 중이던 대상이 kill을 빠져나가 PEND로 살아난다.
-    """
-
-    def __init__(self, submitter: "BulkSubmitter", jobset_id: str,
-                 keys: List[str]):
-        self._sub = submitter
-        self.jobset_id = jobset_id
-        self._keys = keys
-
-    def acquire(self) -> bool:
-        return self._sub.cancel_and_quiesce_jobs(self.jobset_id, self._keys)
-
-    def release(self) -> None:
-        # cancelled_keys는 되돌리지 않는다 — 풀면 pool/QTimer에 남은 잔여
-        # task가 kill 뒤에 그 job을 다시 제출해 되살린다. 사이클이 끝나면
-        # ctx째로 폐기되므로 다음 제출에는 영향이 없다.
-        pass
 
 
 class _GateTask(QRunnable):

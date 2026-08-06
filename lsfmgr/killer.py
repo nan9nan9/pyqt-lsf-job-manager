@@ -128,7 +128,7 @@ class Killer(QObject):
         job_keys: jobset 내 job_key — target id 해석을 **worker에서**(scope
         barrier 이후) 한다. 그래야 호출 순간 제출 중이라 job_id가 없던 job도
         quiesce로 id를 확보한 뒤 대상에 포함된다(유출 방지).
-        scope: KillScope (kill 우선권 — manager의 cancel_submit=True).
+        scope: KillScope (kill 우선권 — 범위는 선택한 job_key).
         반환: task를 실제 띄웠으면 True(shutdown 무시=False)."""
         with self._shutdown_lock:            # 체크+start 원자화 (shutdown 경합)
             if self._shutdown:

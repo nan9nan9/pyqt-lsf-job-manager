@@ -438,8 +438,7 @@ class LsfJobManager(QObject):
     # ------------------------------------------------------------------
     def kill(self, jobset_id, *,
                     only_state: Optional[JobState] = None,
-                    verify: Optional[bool] = None,
-                    cancel_submit: bool = False) -> None:
+                    verify: Optional[bool] = None) -> None:
         """[async→Signal] JobSet kill — 결과는 kill_finished.
         verify 미지정 시 verify_kill 옵션(②) 적용.
 
@@ -447,9 +446,11 @@ class LsfJobManager(QObject):
         `LsfJobManager(cluster_envpaths={클러스터명: cshrc경로})`로 켠다 —
         앱 환경 속성이라 호출마다 주지 않는다.
 
-        cancel_submit: 부분 kill(only_state)에 제출 우선권을 건다 — 진행 중
-        제출 취소·재시도 포기·barrier(quiesce)까지. **전체 kill은 항상 적용**
-        되므로 이 옵션이 필요 없다."""
+        **kill은 겨냥한 job의 제출에 항상 우선권을 갖는다** — 그 job이 제출
+        중이면 멈추고(미착수분 CREATED 복귀), 이미 wrapper가 돌면 job_id
+        확보를 기다렸다가 죽인다. 대상 아닌 job의 제출은 계속된다.
+        jobset의 제출 자체를 통째로 멈추려면 `mgr.cancel_submit(js)`를
+        먼저 부른다(취소는 되돌려지지 않으므로 순서만 지키면 된다)."""
         jobset_id = self._jsid(jobset_id)
         if self._shutdown_done:
             # shutdown 후 kill은 join되지 않는 worker를 만들고 kill_started만
@@ -458,25 +459,37 @@ class LsfJobManager(QObject):
             return
         if verify is None:
             verify = bool(self._defaults.get("verify_kill", False))
-        scope = None
-        if only_state is None or cancel_submit:
-            # 전체 kill은 진행 중 submit에 대해 우선권을 갖는다:
-            # ① 진행 중 submit 즉시 취소(응답성 — 빨리 멈출수록 kill 대상↓),
-            #    kill-phase 대기 중 재제출 plan 취소(kill 후 발화 부활 방지).
-            # ② 대기 중 submit 재시도 포기 확정 — 안 하면 RETRY_WAIT의
-            #    QTimer가 kill 뒤에 발화해 job이 부활한다.
-            # ③ killer가 SubmitGate barrier(scope)를 잡는다 — 정확성은 이게
-            #    보장한다: barrier와 등록이 한 lock 아래 원자적이라, ①이 못
-            #    잡은 늦은 사이클은 barrier가 넘겨받아 취소하거나(먼저 등록)
-            #    등록 자체가 거부된다(나중). 재취소 루프가 필요 없다.
-            # 부분 kill(only_state)은 살아있는 특정 상태만 겨냥하므로 기본은
-            # 제출을 건드리지 않는다 — cancel_submit=True로 opt-in할 때만
-            # 전체 kill과 같은 우선권을 건다(제출 폭주 중 PEND 정리 등).
-            self.submitter.cancel_submit(jobset_id)
-            self.submitter.abort_retries(jobset_id)
-            scope = self._gate.kill_scope(jobset_id)
-        queued = self.killer.kill_jobset(jobset_id, only_state=only_state,
-                                         verify=verify, scope=scope)
+        # kill 우선권(SubmitGate barrier) — 범위는 **겨냥한 job**이다:
+        #   전체 kill        → None (= 이 jobset 전 job)
+        #   부분 kill        → 지금 그 상태인 job의 key
+        # barrier와 등록이 게이트의 한 lock 아래 원자적이라, "kill의 취소를
+        # 빠져나가는 늦은 제출"이 타이밍이 아닌 규칙으로 막힌다: 먼저 등록된
+        # 사이클은 barrier가 넘겨받아 취소·대기하고, 나중 것은 등록이 거부된다.
+        # 재취소 루프가 필요 없는 이유다.
+        keys: Optional[List[str]] = None
+        if only_state is not None:
+            try:
+                keys = [r.job_key for r in
+                        self.store.get_jobs(jobset_id, states={only_state})]
+            except LsfmgrError:
+                # jobset이 없다 — 어차피 killer가 같은 예외로 보고한다.
+                # 여기서 터뜨리면 kill_started/finished 짝이 깨진다.
+                keys = []
+        scope = self._gate.kill_scope(jobset_id, keys)
+        # barrier↑ + 취소는 **여기서 즉시** 한다(논블로킹). killer worker 차례로
+        # 미루면 그동안 제출된 job이 전부 '제출됐다가 곧 죽는' 낭비가 된다.
+        # 정지 대기(blocking)만 worker의 scope.acquire()가 이어받는다.
+        scope.begin()
+        # barrier를 올린 뒤 task를 못 띄우면(shutdown 경합/예외) 아무도
+        # release하지 않아 그 jobset의 제출이 **영구 차단**된다.
+        try:
+            queued = self.killer.kill_jobset(jobset_id, only_state=only_state,
+                                             verify=verify, scope=scope)
+        except BaseException:
+            scope.release()
+            raise
+        if not queued:
+            scope.release()
         # 접수 즉시(동기) 착수 통지 — quiesce(진행 중 bsub 완료 대기)로
         # kill_finished가 수십 초 늦어지는 케이스에서도 UI가 '접수됨'을
         # 바로 표시할 수 있다. killer.kill_jobset(동기 — 등록+task 큐잉만)
@@ -490,8 +503,7 @@ class LsfJobManager(QObject):
     def kill_jobs(self, job_ids_or_jobset=None,
                   job_keys: Optional[Sequence[str]] = None, *,
                   jobset_id: Optional[str] = None,
-                  verify: Optional[bool] = None,
-                  cancel_submit: bool = False) -> None:
+                  verify: Optional[bool] = None) -> None:
         """[async→Signal] 개별 job kill (chunking 자동).
 
         세 형태를 받는다:
@@ -509,11 +521,11 @@ class LsfJobManager(QObject):
         wrapper를 안 돌린 대상은 CREATED로 되돌리고, 이미 도는 대상은 끝나길
         기다렸다가 확보된 job_id로 죽인다. 안 그러면 job_id가 없는 대상이
         key→id 해석에서 빠져 bkill이 안 나가고, 그 job은 제출을 마쳐 PEND→RUN
-        으로 살아난다. 대상 **아닌** job의 제출은 계속된다.
+        으로 살아난다. 대상 **아닌** job의 제출은 계속된다 — jobset의 제출을
+        통째로 멈추려면 `mgr.cancel_submit(js)`를 먼저 부른다.
 
-        cancel_submit: 그 범위를 jobset **전체** 제출로 넓힌다(jobset 컨텍스트
-        필수) — 진행 중 사이클 전체 취소 + SubmitGate barrier로 새 제출 사이클
-        등록까지 막는다. kill 대상은 선택분 그대로다."""
+        원시 id 경로는 대상이 이미 job_id를 가진(=제출이 끝난) job이므로
+        제출 우선권을 걸지 않는다."""
         if self._shutdown_done:
             log.warning("shutdown 후 kill_jobs 요청 무시")
             return
@@ -539,8 +551,8 @@ class LsfJobManager(QObject):
             # job의 id까지 잡는다). 여기서 미리 풀면 그 job이 kill을 빠져나간다.
             if job_keys is None:
                 # 선택 kill인데 선택이 없다 — 조용한 no-op은 위험하다
-                # (cancel_submit=True면 kill은 0건인데 제출만 전부 취소된다).
-                # 빈 선택은 job_keys=[]로 명시해야 한다.
+                # (호출자는 뭔가 죽었다고 믿는다). 빈 선택은 job_keys=[]로
+                # 명시해야 한다.
                 raise TypeError(
                     "kill_jobs: jobset을 넘겼으면 job_keys도 필요하다 "
                     "(전체 kill은 mgr.kill(js), 빈 선택은 job_keys=[])")
@@ -562,8 +574,7 @@ class LsfJobManager(QObject):
                     return
                 if len(owners) > 1:
                     for oid, okeys in owners.items():
-                        self.kill_jobs(oid, okeys, verify=verify,
-                                       cancel_submit=cancel_submit)
+                        self.kill_jobs(oid, okeys, verify=verify)
                     return
                 jsid, keys = next(iter(owners.items()))
         else:
@@ -586,26 +597,23 @@ class LsfJobManager(QObject):
             ids = list(job_ids_or_jobset)
             jsid = (self._jsid(jobset_id)
                     if jobset_id is not None else "")
-        scope = None
-        if cancel_submit:
-            if not jsid:
-                # 조용히 무시하면 '제출도 멈춘다'고 믿은 caller가 유출을 본다
-                raise ValueError(
-                    "cancel_submit=True는 jobset 컨텍스트가 필요하다 — "
-                    "kill_jobs(js, keys, ...) 또는 jobset_id=로 호출")
-            self.submitter.cancel_submit(jsid)
-            self.submitter.abort_retries(jsid)
-            scope = self._gate.kill_scope(jsid)
-        elif keys is not None and jsid:
-            # 선택 kill의 기본 우선권 — **대상 job만** 제출을 멈추고 정지를
-            # 기다린다. 안 하면 제출 중(job_id 미확보)인 대상이 key→id 해석에서
-            # 통째로 빠져 bkill이 안 나가고, 그 job은 제출을 마쳐 PEND→RUN으로
-            # 살아난다("kill했는데 안 죽는다" — 여러 번 kill해야 하는 증상).
-            # cancel_submit=True와 달리 barrier를 올리지 않으므로 대상 아닌
-            # job의 제출과 새 제출 사이클은 그대로다.
-            scope = self.submitter.job_scope(jsid, keys)
-        queued = self.killer.kill_jobs(ids, job_keys=keys, verify=verify,
-                                       jobset_id=jsid or "", scope=scope)
+        # 선택 kill의 우선권 — 범위는 **선택한 key**다. 제출 중(job_id 미확보)인
+        # 대상이 key→id 해석에서 빠지면 bkill이 안 나가고 그 job은 제출을 마쳐
+        # PEND→RUN으로 살아난다("kill했는데 안 죽는다"). barrier도 이 범위에만
+        # 걸려, 대상 아닌 job의 제출과 그들의 새 제출 사이클은 그대로다.
+        scope = (self._gate.kill_scope(jsid, keys)
+                 if keys is not None and jsid else None)
+        if scope is not None:
+            scope.begin()            # 즉시 취소 (논블로킹) — kill() 주석 참조
+        try:                         # 올린 barrier를 반드시 회수 (kill() 주석)
+            queued = self.killer.kill_jobs(ids, job_keys=keys, verify=verify,
+                                           jobset_id=jsid or "", scope=scope)
+        except BaseException:
+            if scope is not None:
+                scope.release()
+            raise
+        if not queued and scope is not None:
+            scope.release()
         if queued:                       # 실제 큐잉일 때만 (shutdown 경합 제외)
             # 전역 kill(jsid="")도 발화한다 — started/finished 짝 계약은
             # jobset 유무와 무관하다(안 그러면 전역 kill을 건 UI가 완료만

@@ -401,18 +401,19 @@ mgr.kill(js)                           # 전체 kill
 mgr.kill(js, only_state=JobState.PEND) # PEND만
 mgr.kill(js, verify=True)              # 실제 종료까지 확인
 mgr.kill_jobs(js, [job_key, ...])      # 선택 job만 kill (테이블 선택 행)
-mgr.kill(js, only_state=JobState.PEND, cancel_submit=True)  # 부분 kill에도 제출 우선권
 mgr.query_once(js)                     # 지금 즉시 1회 조회 요청
 mgr.stop_polling(js); mgr.start_polling(js, 30)
 mgr.remove_jobset(js)                  # jobset 자체 삭제 (전원 terminal일 때)
 ```
 
-**kill은 진행 중 submit에 우선권**을 갖습니다 — 전체 kill이면 진행 중 제출을 취소하고
-재시도를 포기시킨 뒤, barrier로 "kill을 빠져나가는 늦은 제출"을 구조적으로 막습니다.
-선택 kill(`kill_jobs`)은 **선택한 job의 제출만** 멈춥니다 — 아직 wrapper를 안 돌린
-대상은 `CREATED`로 되돌리고, 이미 도는 대상은 끝나 `job_id`가 잡힌 뒤 죽입니다
-(대상 아닌 job의 제출은 계속). 그 범위를 jobset 전체 제출로 넓히려면
-`cancel_submit=True`. 내부 도식은 [`docs/flows.md`](docs/flows.md).
+**kill은 겨냥한 job의 제출에 항상 우선권**을 갖습니다 — 아직 wrapper를 안 돌린 대상은
+`CREATED`로 되돌리고, 이미 도는 대상은 끝나 `job_id`가 잡힌 뒤 죽입니다. 재시도 대기도
+포기시키고, barrier로 "kill을 빠져나가는 늦은 제출"을 구조적으로 막습니다.
+
+**범위는 kill이 겨냥한 job입니다**: 전체 kill은 jobset 전체, 선택 kill(`kill_jobs`)은
+선택한 행만 — 행 하나를 kill한다고 나머지 job의 제출이 멈추지는 않습니다. jobset의
+제출을 통째로 멈추려면 `mgr.cancel_submit(js)`를 먼저 부르세요(취소는 되돌려지지
+않으므로 순서만 지키면 됩니다). 내부 도식은 [`docs/flows.md`](docs/flows.md).
 
 > 제출 중인 job은 아직 LSF job id가 없어 `bkill` 대상이 될 수 없습니다. 그래서
 > kill은 **id가 잡힐 때까지 기다리거나(quiesce) 제출 자체를 취소**합니다 — 기다리지
