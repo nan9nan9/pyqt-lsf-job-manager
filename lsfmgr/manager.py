@@ -834,10 +834,13 @@ class LsfJobManager(QObject):
         changed = self.jobsets.local_edit_jobs(jobset_id, records,
                                                policy=policy, force=force)
         if changed:
-            # 교체분의 handler 장부를 무효화한다 — job_key는 유지되므로
-            # 옛 _FINISHED가 남으면 그 키의 **새 job**에 handler가 영영
-            # 침묵한다. 추가분은 장부가 없어 no-op이다.
-            self.handlers.rearm(jobset_id, [r.job_key for r in changed])
+            # 교체분의 handler 장부·LOST 스트릭을 무효화한다 — job_key는
+            # 유지되므로 옛 _FINISHED가 남으면 그 키의 **새 job**에 handler가
+            # 영영 침묵하고, 옛 미발견 횟수가 남으면 새 job이 그만큼 빨리
+            # LOST로 확정된다. 추가분은 장부가 없어 no-op이다.
+            keys = [r.job_key for r in changed]
+            self.handlers.rearm(jobset_id, keys)
+            self.querier.forget(jobset_id, keys)
             self._relay_jobs_changed(jobset_id, list(changed))
         self._resume_polling_if_watchable(jobset_id)
         return changed
@@ -1081,6 +1084,14 @@ class LsfJobManager(QObject):
         _tok, keys, pp, interval = ent
         if keys:
             self.handlers.rearm(jsid, keys)
+            # 이전 실행의 **LOST 미발견 스트릭**도 버린다. querier는 사이클마다
+            # 스트릭을 재구축하지만, 조회 대상(on-LSF)이 하나도 없는 사이클은
+            # query()가 조기 반환해 옛 값이 그대로 남는다 — 재제출 사이에는
+            # 정확히 그 상태다(전원 terminal/CREATED). 그대로 두면 새 실행이
+            # 옛 실행의 미발견 횟수를 물려받아, 제출 직후 등록 지연으로 한 번만
+            # 안 보여도 LOST가 확정된다(grace가 막으려던 바로 그 상황이고,
+            # LOST는 되돌릴 수 없는 terminal이다).
+            self.querier.forget(jsid, keys)
         if pp is not None:
             self._post_process[jsid] = pp
         if interval is not None:
