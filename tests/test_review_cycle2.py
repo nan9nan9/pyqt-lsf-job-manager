@@ -76,16 +76,16 @@ def test_stale_gate_rejected_does_not_destroy_new_cycle(qtbot, manager, fake_lsf
     manager.submit(js, pre_submit=slow_gate,
                    post_process=lambda r: "R", auto_poll=False)
     assert gate_entered.wait(3)
-    assert js.id in manager._pending_arm
+    assert js.id in manager._completion._pending_arm
     # 이전 사이클의 낡은 거부 신호가 늦게 배달된 상황 — token이 다르므로 무시
     manager.submitter.gate_rejected.emit(js.id, object())
     qtbot.wait(50)
-    assert js.id in manager._pending_arm         # 보류분 생존
+    assert js.id in manager._completion._pending_arm         # 보류분 생존
 
     release.set()
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         pass
-    assert js.id in manager._post_process        # 무장 정상 승격
+    assert js.id in manager._completion._post_process        # 무장 정상 승격
     fake_lsf.set_all("DONE", 0)
     with qtbot.waitSignal(js.post_processing_finished, timeout=10000):
         manager.query_once(js)                   # 후처리 정상 발화

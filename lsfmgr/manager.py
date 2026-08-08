@@ -14,12 +14,12 @@ import atexit
 import logging
 import shlex
 from collections import Counter
-from dataclasses import dataclass
 from dataclasses import replace as dc_replace
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 from .command import LsfCommand, Runner
+from .completion import CompletionTracker
 from .config import LsfConfig
 from .errors import (
     JobEditNotAllowedError,
@@ -42,26 +42,13 @@ from .options import (
     validate_options,
 )
 from .pacer import StatePacer
-from .qt import (QCoreApplication, QObject, QRunnable, QThreadPool,
-                 QTimer, Signal)
+from .qt import QCoreApplication, QObject, QTimer, Signal
 from .reports import KillProgress, SubmitProgress
 from .states import JobRecord, JobSetRecord, JobState
 from .store.base import JobSetStore
 from .store.memory import InMemoryStore
 
 log = logging.getLogger("lsfmgr.manager")
-
-
-@dataclass(frozen=True)
-class _PendingArm:
-    """제출 사이클 1건의 보류 무장분 — submitter의 records_reset(착수 확정)
-    에서 무장하고 gate_rejected(착수 없음 확정)에서 폐기한다.
-    token은 사이클 정체성 — 큐에 남은 이전 사이클의 낡은 신호가 새 사이클의
-    보류분을 건드리지 못하게 한다."""
-    token: object
-    keys: List[str]                          # rearm 대상 job_key
-    post_process: Optional[Callable]
-    poll_interval_s: Optional[float]         # None이면 자동 폴링 없음
 
 
 class LsfJobManager(QObject):
@@ -201,22 +188,10 @@ class LsfJobManager(QObject):
 
         self._shutdown_done = False
 
-        # post_process — jobset이 전원 terminal에 도달하면 1회 실행되는 후처리
-        # 콜백. submit(post_process=fn)으로 등록되며 실제 무장은 착수 확정
-        # (records_reset) 시점에 _pending_arm에서 승격된다. 완료 감지
-        # (_on_poll_updated)에서 worker로 실행, post_processing_*로 통지.
-        self._post_process: Dict[str, Callable] = {}
-        self._post_pool = QThreadPool(self)
-        self._post_pool.setMaxThreadCount(2)
-
-        # jobset_finished 1회 latch — 전원 terminal을 이미 통지한 jobset.
-        # 완료 감지가 다시 non-terminal을 보면(재제출/add_jobs로 job 추가) 자동
-        # 해제되고, 착수 확정(records_reset)에서도 명시적으로 푼다 — 폴링
-        # 없이 곧장 전원 SUBMIT_FAILED로 끝나는 사이클도 새로 통지되도록.
-        self._finished_latch: Set[str] = set()
-
-        # 제출 사이클별 보류 무장분 (무장/폐기 규칙은 _PendingArm docstring)
-        self._pending_arm: Dict[str, _PendingArm] = {}
+        # 완료 추적 부품 — jobset_finished 1회 통지 latch + post_process
+        # 실행 + 제출 사이클 보류 무장분(token 프로토콜)을 한 몸으로 소유
+        # (규칙 전문은 completion.py).
+        self._completion = CompletionTracker(self)
 
         # 상태 전이 표시 pacer — min_state_dwell_s>0일 때만. jobs_updated를
         # job별로 dwell만큼 띄워 발화해 순식간에 지나가는 전이(SUBMITTING→PEND,
@@ -234,18 +209,15 @@ class LsfJobManager(QObject):
         # kill_finished보다 먼저 나가야 finished-last 계약이 핸들 계층에서도
         # 유지된다 (submit 경로는 submitter가 emit 순서로 보장).
         self.kill_finished.connect(self._emit_updates_after_kill)
-        self.submit_progress.connect(self._handle_relay("submit_progress"))
-        self.jobset_updated.connect(self._handle_relay("jobset_updated"))
-        self.kill_started.connect(self._handle_relay("kill_started"))
-        self.kill_finished.connect(self._handle_relay("kill_finished"))
-        self.kill_progress.connect(self._handle_relay("kill_progress"))
-        self.error_occurred.connect(self._handle_relay("error_occurred"))
-        self.handler_finished.connect(self._handle_relay("handler_finished"))
-        self.pre_submit_started.connect(self._handle_relay("pre_submit_started"))
-        self.pre_submit_finished.connect(self._handle_relay("pre_submit_finished"))
-        self.jobset_finished.connect(self._handle_relay("jobset_finished"))
-        self.post_processing_started.connect(self._handle_relay("post_processing_started"))
-        self.post_processing_finished.connect(self._handle_relay("post_processing_finished"))
+        # 동명 Signal 일괄 중계 — 목록에 이름만 추가하면 배선은 이 루프가
+        # 한다. submit_finished/jobs_updated는 파생 신호(jobs_failed 등)가
+        # 있어 아래 전용 slot으로 중계한다.
+        for name in ("submit_progress", "jobset_updated", "kill_started",
+                     "kill_finished", "kill_progress", "error_occurred",
+                     "handler_finished", "pre_submit_started",
+                     "pre_submit_finished", "jobset_finished",
+                     "post_processing_started", "post_processing_finished"):
+            getattr(self, name).connect(self._handle_relay(name))
         self.submit_finished.connect(self._h_finished)
         self.submit_finished.connect(self._emit_summary_after_submit)
         self.jobs_updated.connect(self._h_jobs_updated)
@@ -1086,9 +1058,6 @@ class LsfJobManager(QObject):
                 f"{jobset_id}: 활성(진행 중) job이 있어 submit 불가 — "
                 f"{busy[:5]} (먼저 kill 하거나 완료를 기다리세요)",
                 jobset_id=jobset_id, job_keys=busy)
-        # 이전 제출의 잔여 무장 해제 — 이번 호출 기준으로만 무장
-        self._post_process.pop(jobset_id, None)
-        self._pending_arm.pop(jobset_id, None)
         opts = self.resolve_options(kwargs, context="submit")
         keyed = [(r.job_key, self._record_to_item(r)) for r in jobs]
         keys = [k for k, _ in keyed]
@@ -1097,12 +1066,11 @@ class LsfJobManager(QObject):
         # 먼저 하면 ① 게이트/취소 창에서 이전 실행의 terminal 레코드에
         # end 핸들러가 중복 발화하고 post_process가 낡은 레코드로 오발화하며,
         # ② 폴링 tick이 리셋 전 옛 레코드를 평가하는 경합 창이 생긴다.
-        # token은 이 제출 사이클의 정체성 — 큐에 남은 이전 사이클의 낡은
-        # 거부 신호가 새 사이클의 보류분을 폐기하지 못하게 한다.
+        # token은 이 제출 사이클의 정체성 (completion.py 무장 프로토콜).
         token = object()
-        self._pending_arm[jobset_id] = _PendingArm(
-            token, keys, post_process,
-            opts.poll_interval_s if opts.auto_poll else None)
+        self._completion.stage(jobset_id, token, keys, post_process,
+                               opts.poll_interval_s if opts.auto_poll
+                               else None)
         # submit_started는 submitter가 실제 착수 지점(do_launch)에서 발화한다
         # (submitter.started → submit_started 릴레이). shutdown은 started/finished
         # 둘 다 안 나가 짝이 유지되고, born-cancelled는 finished를 내므로 짝을
@@ -1116,9 +1084,7 @@ class LsfJobManager(QObject):
             # records_reset/gate_rejected 어느 신호도 오지 않으므로 보류분을
             # 여기서 정리한다. (born-cancelled의 완료 정산은 _gate_reject의
             # finished(cancelled=N)가 이미 발행했다)
-            ent = self._pending_arm.get(jobset_id)
-            if ent is not None and ent.token is token:
-                self._pending_arm.pop(jobset_id, None)
+            self._completion.discard(jobset_id, token)
         return self.jobset(jobset_id)
 
     def _on_records_reset(self, jsid: str, token: object) -> None:
@@ -1126,29 +1092,18 @@ class LsfJobManager(QObject):
         보류분(rearm/post_process/폴링)을 무장한다. 리셋 완료 후라 폴링
         tick이 봐도 레코드는 이미 SUBMITTING — 옛 terminal 오발화 창이 없다.
         token 불일치(다른 사이클의 낡은 신호)면 무시한다."""
-        ent = self._pending_arm.get(jsid)
-        if ent is None or ent.token is not token:
+        ent = self._completion.confirm(jsid, token)   # post_process 무장 포함
+        if ent is None:
             return
-        self._pending_arm.pop(jsid, None)
-        # 새 실행 착수 — 이전 완료 통지 latch를 푼다. 폴링 없이 곧장 전원
-        # terminal로 끝나는 사이클(예: bsub 전량 거부)은 그 사이 완료 감지가
-        # 한 번도 안 돌아 latch가 자동 해제되지 못한다.
-        self._finished_latch.discard(jsid)
         if ent.keys:
             self._rearm_tracking(jsid, ent.keys)
-        if ent.post_process is not None:
-            self._post_process[jsid] = ent.post_process
         if ent.poll_interval_s is not None:
             self.start_polling(jsid, ent.poll_interval_s)   # 자동 폴링 시작
 
     def _on_gate_rejected(self, jsid: str, token: object) -> None:
         """[main] 게이트가 착수 없이 끝남(거부/예외/통과 직후 취소/shutdown) —
-        이 사이클의 보류분을 폐기한다. token 불일치면 다른 사이클의 낡은
-        신호이므로 무시(새 사이클의 보류분을 파괴하지 않는다)."""
-        ent = self._pending_arm.get(jsid)
-        if ent is None or ent.token is not token:
-            return
-        self._pending_arm.pop(jsid, None)
+        이 사이클의 보류분을 폐기한다 (token 불일치는 tracker가 무시)."""
+        self._completion.discard(jsid, token)
 
     @staticmethod
     def _record_to_item(r: JobRecord):
@@ -1216,9 +1171,7 @@ class LsfJobManager(QObject):
         self._forget_paced(jobset_id)    # dwell 보류분 — 삭제된 jobset의
                                          # 늦은 발행 방지
         self._poll_intervals.pop(jobset_id, None)
-        self._post_process.pop(jobset_id, None)
-        self._pending_arm.pop(jobset_id, None)
-        self._finished_latch.discard(jobset_id)
+        self._completion.forget(jobset_id)   # 무장분·latch 일괄 정리
         self._invalidate_handle(jobset_id)
         return removed
 
@@ -1270,7 +1223,7 @@ class LsfJobManager(QObject):
         # 발화(submitter.shutdown의 취소 배치 등)를 지연 없이 통과시킨다.
         steps = [("handlers", self.handlers.shutdown),
                  ("submitter", self.submitter.shutdown),
-                 ("post_pool", lambda: self._post_pool.waitForDone(-1)),
+                 ("completion", self._completion.shutdown),
                  ("polling", self.polling.shutdown),
                  ("killer", self.killer.shutdown),
                  ("store", self.store.store_dispose)]
@@ -1300,67 +1253,7 @@ class LsfJobManager(QObject):
         if changed:
             self._emit_jobs(jobset_id, changed)
         self.handlers.tick(jobset_id)
-        self._maybe_finish(jobset_id)
-
-    @staticmethod
-    def _all_terminal(recs: list) -> bool:
-        """완료 판정 공용 술어 — job이 1개 이상 있고 전원 terminal.
-        (핸들의 is_done은 intended_count 기준 summary 판정 — 별개 계약)"""
-        return bool(recs) and all(r.state.is_terminal for r in recs)
-
-    def _maybe_finish(self, jobset_id: str) -> None:
-        """전원 terminal 도달 감지의 **공통 지점** — 폴링/query_once/submit
-        완료에서 호출된다. 두 가지를 처리한다:
-
-          1. jobset_finished(요약) 발화 — post_process 등록과 **무관**하게
-             LSF 상태만 보고 전원 terminal이면 1회.
-          2. 등록돼 있으면 post_process를 worker에서 1회 실행.
-
-        1회성은 서로 다른 방식으로 보장한다 — post_process는 무장 해제(pop),
-        jobset_finished는 latch. latch는 다시 non-terminal이 보이면(재제출 등)
-        스스로 풀려 다음 완료에 또 발화한다."""
-        if self._shutdown_done:
-            return
-        if self.submitter.is_active(jobset_id):
-            # 제출(게이트 포함) 진행 중 — 레코드가 아직 이전 실행의 terminal
-            # 상태로 남아 있는 창이다. 이번 실행의 완료가 아니므로 미룬다.
-            return
-        try:
-            recs = self.store.get_jobs(jobset_id)
-        except LsfmgrError:
-            self._post_process.pop(jobset_id, None)   # jobset 소멸 — 무장 해제
-            self._finished_latch.discard(jobset_id)
-            return
-        if not self._all_terminal(recs):
-            self._finished_latch.discard(jobset_id)   # 다시 활성 — 재무장
-            return
-        fn = self._post_process.pop(jobset_id, None)  # 한 번만
-        if all(r.killed for r in recs):
-            # 전원이 내 kill로 끝났다 — 사용자가 스스로 끝낸 완료라 통지하지
-            # 않는다(latch만). kill 완료 시점에 걸러지는 경우(_mute_finish_
-            # after_kill)와 달리, 이 판정은 EXIT가 나중에 확인돼도(actual
-            # 정책·verify·폴링 수렴) 레코드 표식만으로 성립한다.
-            self._finished_latch.add(jobset_id)
-        if jobset_id not in self._finished_latch:
-            try:
-                summary = self.store.summary(jobset_id)
-            except LsfmgrError:
-                return       # jobset이 방금 사라짐 — 빈 요약을 쏘면 구독자가
-                             # s["total"]에서 깨진다. latch도 세우지 않는다.
-            self._finished_latch.add(jobset_id)
-            self.jobset_finished.emit(jobset_id, summary)
-        if fn is None:
-            return
-        if self._shutdown_done:
-            # jobset_finished slot이 그 자리에서 shutdown한 경우 — 이미 drain된
-            # pool에 join되지 않는 스레드를 만들지 않는다.
-            # ※ 여기서 is_active(재제출)까지 막지는 않는다. 이 실행은 전원
-            #   terminal에 **도달했으므로** post_process는 실행돼야 한다
-            #   (콜백은 위에서 뜬 recs 스냅샷만 쓴다). 새 사이클의 무장은
-            #   _pending_arm이 따로 들고 있어 서로 간섭하지 않는다.
-            return
-        self.post_processing_started.emit(jobset_id)
-        self._post_pool.start(_PostProcessTask(self, jobset_id, fn, recs))
+        self._completion.maybe_finish(jobset_id)
 
     def _emit_jobs(self, jsid: str, records: list) -> None:
         """jobs_updated 발화 **단일 지점** — min_state_dwell_s가 켜져 있으면
@@ -1391,10 +1284,10 @@ class LsfJobManager(QObject):
             return                    # jobset이 이미 사라짐(remove_jobset 등)
         self.jobset_updated.emit(jsid, summary)
         # 제출 시점에 이미 전원 terminal인 경우(예: bsub 전량 거부 → 전원
-        # SUBMIT_FAILED)는 폴링 tick의 _maybe_finish가 ctx.finished
-        # 확정 전 창에 걸려 완료 감지를 놓칠 수 있다(is_active 방어에 막힘).
+        # SUBMIT_FAILED)는 폴링 tick의 완료 감지가 ctx.finished
+        # 확정 전 창에 걸려 놓칠 수 있다(is_active 방어에 막힘).
         # ctx가 확정된 이 시점(submit_finished)에 한 번 더 확인해 유실을 막는다.
-        self._maybe_finish(jsid)
+        self._completion.maybe_finish(jsid)
 
     def _emit_updates_after_kill(self, jsid: str, report) -> None:
         """kill 완료 시 상태 반영을 update Signal로 발화. optimistic 정책이면
@@ -1414,32 +1307,7 @@ class LsfJobManager(QObject):
             if recs:
                 self._emit_jobs(j, recs)
             self._emit_summary(j)
-            self._mute_finish_after_kill(j)
-
-    def _mute_finish_after_kill(self, jsid: str) -> None:
-        """**사용자가 건 kill로** 전원 terminal이 된 완료는 통지하지 않는다 —
-        스스로 끝낸 것이라 "다 끝났다"는 알림이 필요 없다. 발화 없이 latch만
-        세워, 이어지는 폴링 tick의 완료 감지가 조용히 지나가게 한다.
-
-        의도치 않은 종료(자연 종료, LSF/관리자의 외부 bkill, EXIT)는 이 경로를
-        타지 않으므로 그대로 통지된다 — 사용자가 알아야 하는 쪽만 남는다.
-
-        여기서 '전원 terminal'인지를 보므로 **부분 kill은 억제되지 않는다**:
-        PEND만/선택 행만 죽이면 남은 job이 아직 non-terminal이라 latch가 안
-        서고, 그 job들이 나중에 끝나면 정상적으로 통지된다.
-
-        ※ kill_status_policy="actual"이면 이 시점에 레코드가 아직 EXIT가
-          아니라 억제되지 않는다 — 폴링이 EXIT를 확인하는 순간 통지가 나간다.
-        ※ post_process는 억제하지 않는다 — "전원 terminal이면 실행"이라는
-          별개 계약이고, kill로 끝난 결과도 수집 대상이다."""
-        if not jsid or jsid in self._finished_latch:
-            return
-        try:
-            recs = self.store.get_jobs(jsid)
-        except LsfmgrError:
-            return
-        if self._all_terminal(recs):
-            self._finished_latch.add(jsid)
+            self._completion.mute_after_kill(j)
 
     def _handle_of(self, jobset_id: str) -> Optional[JobSet]:
         h = self._handles.get(jobset_id)
@@ -1475,29 +1343,4 @@ class LsfJobManager(QObject):
         failed = [r for r in changed if r.state.is_failed]
         if failed:
             h.jobs_failed.emit(failed)
-
-
-class _PostProcessTask(QRunnable):
-    """전원 terminal 도달 후처리 콜백을 worker 스레드에서 1회 실행.
-    반환값은 post_processing_finished로, 예외는 error_occurred +
-    post_processing_finished(None)으로 통지 (예외 격리)."""
-
-    def __init__(self, mgr: "LsfJobManager", jsid: str, fn, records: list):
-        super().__init__()
-        self.setAutoDelete(True)
-        self.mgr = mgr
-        self.jsid = jsid
-        self.fn = fn
-        self.records = records
-
-    def run(self):
-        try:
-            result = self.fn(self.records)
-        except Exception as e:               # noqa: BLE001
-            log.exception("post_process 예외: %s", self.jsid)
-            self.mgr.error_occurred.emit(self.jsid, f"post_process: {e!r}")
-            self.mgr.post_processing_finished.emit(self.jsid, None)
-            return
-        log.info("post_process 완료 %s", self.jsid)
-        self.mgr.post_processing_finished.emit(self.jsid, result)
 
