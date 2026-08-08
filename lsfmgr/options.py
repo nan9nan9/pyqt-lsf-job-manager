@@ -108,99 +108,112 @@ BUILTIN_DEFAULTS: Dict[str, Any] = {
 
 
 # ----------------------------------------------------------------------
-# 검증
+# 검증 — 옵션별 검증기 레지스트리 (선언적).
+# 새 옵션은 키 집합(SHARED/MANAGER_ONLY)과 여기 한 줄이면 끝난다 —
+# if-체인 시절엔 분기 추가를 빠뜨리면 검증 없이 통과했다.
 # ----------------------------------------------------------------------
+def _int_in(lo: int, hi: Optional[int] = None):
+    """정수 범위 검증기 — hi=None이면 하한만."""
+    label = f"{lo}~{hi}" if hi is not None else f"{lo} 이상"
+
+    def check(key: str, value: Any) -> int:
+        v = int(value)
+        if v < lo or (hi is not None and v > hi):
+            raise ValueError(f"{key}는 {label} (got {value})")
+        return v
+    return check
+
+
+def _float_in(lo: float, hi: float):
+    label = f"{lo:g}~{hi:g}"
+
+    def check(key: str, value: Any) -> float:
+        v = float(value)
+        if not (lo <= v <= hi):                  # NaN도 거른다
+            raise ValueError(f"{key}는 {label} (got {value})")
+        return v
+    return check
+
+
+def _float_min(lo: float = 0.0, *, positive: bool = False):
+    label = "양수" if positive else f"{lo:g} 이상"
+
+    def check(key: str, value: Any) -> float:
+        v = float(value)
+        if v < lo or (positive and v <= 0):
+            raise ValueError(f"{key}는 {label} (got {value})")
+        return v
+    return check
+
+
+def _bool(_key: str, value: Any) -> bool:
+    return bool(value)
+
+
+def _backoff(_key: str, value: Any) -> str:
+    parse_retry_backoff(value)                   # 형식 검증만
+    return str(value)
+
+
+def _rate_limit(key: str, value: Any) -> Optional[float]:
+    if value is not None and float(value) <= 0:
+        raise ValueError(f"{key}는 양수 또는 None (got {value})")
+    return None if value is None else float(value)
+
+
+def _policy(key: str, value: Any) -> str:
+    if value not in ("optimistic", "actual"):
+        raise ValueError(f"{key}는 optimistic/actual (got {value!r})")
+    return value
+
+
+def _envpaths(key: str, value: Any) -> dict:
+    if not isinstance(value, dict) or not all(
+            isinstance(k, str) and isinstance(v, str)
+            for k, v in value.items()):
+        raise ValueError(
+            f"{key}는 {{클러스터명: cshrc경로}} 형태의 dict (got {value!r})")
+    return dict(value)
+
+
+def _cmd_path(key: str, value: Any) -> Any:
+    validate_cmd_path(value, key)
+    return value
+
+
+#: key → 검증기(key, value) -> 정규화 값. 없는 키는 무검증 통과
+#: (test_submit_wrapper_pattern_cmd는 LsfConfig.__post_init__가 구조 검증).
+_VALIDATORS: Dict[str, Any] = {
+    "workers": _int_in(1, 64),
+    "max_retry": _int_in(0),
+    "retry_backoff": _backoff,
+    "rate_limit_per_s": _rate_limit,
+    "poll_interval_s": _float_in(5.0, 60.0),
+    "submit_timeout_s": _float_min(positive=True),
+    "auto_poll": _bool,
+    "verify_kill": _bool,
+    "chunk_size": _int_in(1, 5000),
+    "arg_max": _int_in(4096),
+    "bjobs_path": _cmd_path,
+    "bkill_path": _cmd_path,
+    "kill_status_policy": _policy,
+    "kill_max_retry": _int_in(0),
+    "kill_retry_delay_s": _float_min(0.0),
+    "progress_min_interval_s": _float_min(0.0),
+    "progress_min_step_ratio": _float_in(0.0, 1.0),
+    "poll_runtime_updates": _bool,
+    "submit_finished_on_gate_reject": _bool,
+    "lost_after_missing_polls": _int_in(1),
+    "collect_clusters": _bool,
+    "min_state_dwell_s": _float_min(0.0),
+    "cluster_envpaths": _envpaths,
+}
+
+
 def _validate(key: str, value: Any) -> Any:
     """옵션 1개 검증/정규화. 위반 시 ValueError."""
-    if key == "workers":
-        v = int(value)
-        if not 1 <= v <= 64:
-            raise ValueError(f"workers는 1~64 (got {value})")
-        return v
-    if key == "max_retry":
-        v = int(value)
-        if v < 0:
-            raise ValueError(f"max_retry는 0 이상 (got {value})")
-        return v
-    if key == "retry_backoff":
-        parse_retry_backoff(value)               # 형식 검증만
-        return str(value)
-    if key == "rate_limit_per_s":
-        if value is not None and float(value) <= 0:
-            raise ValueError(f"rate_limit_per_s는 양수 또는 None (got {value})")
-        return None if value is None else float(value)
-    if key == "poll_interval_s":
-        v = float(value)
-        if not 5.0 <= v <= 60.0:
-            raise ValueError(f"poll_interval_s는 5~60 (got {value})")
-        return v
-    if key == "submit_timeout_s":
-        v = float(value)
-        if v <= 0:
-            raise ValueError(f"submit_timeout_s는 양수 (got {value})")
-        return v
-    if key == "chunk_size":
-        v = int(value)
-        if not 1 <= v <= 5000:
-            raise ValueError(f"chunk_size는 1~5000 (got {value})")
-        return v
-    if key == "kill_status_policy":
-        if value not in ("optimistic", "actual"):
-            raise ValueError(
-                f"kill_status_policy는 optimistic/actual (got {value!r})")
-        return value
-    if key == "kill_max_retry":
-        v = int(value)
-        if v < 0:
-            raise ValueError(f"kill_max_retry는 0 이상 (got {value})")
-        return v
-    if key == "cluster_envpaths":
-        if not isinstance(value, dict) or not all(
-                isinstance(k, str) and isinstance(v, str)
-                for k, v in value.items()):
-            raise ValueError(
-                "cluster_envpaths는 {클러스터명: cshrc경로} 형태의 dict "
-                f"(got {value!r})")
-        return dict(value)
-    if key == "lost_after_missing_polls":
-        v = int(value)
-        if v < 1:
-            raise ValueError(
-                f"lost_after_missing_polls는 1 이상 (got {value})")
-        return v
-    if key == "kill_retry_delay_s":
-        v = float(value)
-        if v < 0:
-            raise ValueError(f"kill_retry_delay_s는 0 이상 (got {value})")
-        return v
-    if key == "progress_min_interval_s":
-        v = float(value)
-        if v < 0:
-            raise ValueError(f"progress_min_interval_s는 0 이상 (got {value})")
-        return v
-    if key == "min_state_dwell_s":
-        v = float(value)
-        if v < 0:
-            raise ValueError(f"min_state_dwell_s는 0 이상 (got {value})")
-        return v
-    if key == "progress_min_step_ratio":
-        v = float(value)
-        if not (0.0 <= v <= 1.0):
-            raise ValueError(f"progress_min_step_ratio는 0~1 (got {value})")
-        return v
-    if key in ("auto_poll", "verify_kill", "poll_runtime_updates",
-               "submit_finished_on_gate_reject", "collect_clusters"):
-        return bool(value)
-    if key == "arg_max":
-        v = int(value)
-        if v < 4096:
-            raise ValueError(f"arg_max는 4096 이상 (got {value})")
-        return v
-    if key in ("bjobs_path", "bkill_path"):
-        validate_cmd_path(value, key)
-        return value
-    # test_submit_wrapper_pattern_cmd는 LsfConfig.__post_init__가 구조 검증한다
-    return value
+    fn = _VALIDATORS.get(key)
+    return fn(key, value) if fn is not None else value
 
 
 def validate_options(kwargs: Dict[str, Any], *, allowed: frozenset,
