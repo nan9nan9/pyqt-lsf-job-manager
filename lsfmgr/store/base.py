@@ -1,6 +1,6 @@
 """JobSetStore 추상 인터페이스 (Qt 비의존 순수 Python).
 
-공통 API(§4.2)는 두 백엔드가 동일 계약으로 구현하고,
+백엔드(현재 InMemoryStore 하나)는 이 계약을 그대로 구현해야 하고,
 모든 public 메서드는 thread-safe여야 한다.
 """
 from __future__ import annotations
@@ -75,38 +75,35 @@ class JobSetStore(ABC):
     def find_jobs(self, job_ids: Set[int]) -> List[JobRecord]:
         """job_id 집합에 해당하는 레코드를 jobset 무관 전역 검색 (kill_jobs
         optimistic 전이용 — 어느 jobset 소속인지 모를 때). 기본 구현은
-        jobset 순회이고, 백엔드가 최적화(WHERE IN)해도 된다."""
+        jobset 순회이고, 백엔드가 최적화해도 된다."""
         if not job_ids:
             return []
-        out: List[JobRecord] = []
-        for js in self.list_jobsets():
-            # list_jobsets() 스냅샷과 get_jobs() 사이에 main 스레드가 그 jobset을
-            # remove_jobset/merge로 지우면 get_jobs가 JobSetNotFoundError를 던진다 —
-            # 전역 kill worker에서 이게 전파되면 이미 성공한 bkill이 내부 오류로
-            # 오보된다. 사라진 jobset은 건너뛴다(그 job은 어차피 대상 밖).
-            try:
-                jobs = self.get_jobs(js.jobset_id)
-            except JobSetNotFoundError:
-                continue
-            out.extend(r for r in jobs if r.job_id in job_ids)
-        return out
+        return self._find_jobs_where(lambda r: r.job_id in job_ids)
 
     def find_jobs_by_keys(self, job_keys: Set[str]) -> List[JobRecord]:
         """job_key 집합의 레코드를 jobset 무관 전역 검색 — GUI가 테이블 행의
         job_key만 들고 jobset 핸들 없이 kill할 때 쓴다(find_jobs의 key판).
         job_key는 **jobset 안에서만** 유일하므로 같은 key가 여러 jobset에
         존재할 수 있다 — 반환은 jobset별 다건일 수 있고, 소비자가 key로
-        dict을 만들면 조용히 하나를 잃는다(레코드 목록 그대로 다뤄라).
-        기본 구현은 jobset 순회, 백엔드가 최적화해도 된다."""
+        dict을 만들면 조용히 하나를 잃는다(레코드 목록 그대로 다뤄라)."""
         if not job_keys:
             return []
+        return self._find_jobs_where(lambda r: r.job_key in job_keys)
+
+    def _find_jobs_where(self, pred) -> List[JobRecord]:
+        """전역 검색 공용 몸통 — 전 jobset을 순회하며 pred에 맞는 레코드 수집.
+
+        list_jobsets() 스냅샷과 get_jobs() 사이에 main 스레드가 그 jobset을
+        remove_jobset으로 지우면 get_jobs가 JobSetNotFoundError를 던진다 —
+        전역 kill worker에서 이게 전파되면 이미 성공한 bkill이 내부 오류로
+        오보된다. 사라진 jobset은 건너뛴다(그 job은 어차피 대상 밖)."""
         out: List[JobRecord] = []
         for js in self.list_jobsets():
-            try:                          # find_jobs와 같은 이유 — 소실 무시
+            try:
                 jobs = self.get_jobs(js.jobset_id)
             except JobSetNotFoundError:
                 continue
-            out.extend(r for r in jobs if r.job_key in job_keys)
+            out.extend(r for r in jobs if pred(r))
         return out
 
     @abstractmethod

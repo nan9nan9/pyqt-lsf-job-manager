@@ -436,10 +436,15 @@ class LsfCommand:
         보류하고, 성공 chunk에서 미발견된 job은 부재로 확정할 수 있다."""
         out: List[JobStatus] = []
         ids = [str(i) for i in job_ids]
-        base = self._prog_len(self.config.bjobs_path) + 40
         failed = self._query_chunks_isolated(
-            ids, base, lambda chunk: out.extend(self._bjobs(chunk)), "bjobs")
+            ids, self._bjobs_base_len(),
+            lambda chunk: out.extend(self._bjobs(chunk)), "bjobs")
         return out, failed
+
+    def _bjobs_base_len(self) -> int:
+        """bjobs chunk의 base_len 예약치 — 프로그램 토큰 + 옵션
+        (-noheader -o <fmt>) 여유분."""
+        return self._prog_len(self.config.bjobs_path) + 40
 
     #: kill 직전 cluster 분류 전용 최소 포맷 — 상태/시간 필드는 묻지 않는다
     #: (필요한 것만 물어야 필드 하나가 조회를 통째로 비게 만드는 사고를 안
@@ -454,7 +459,6 @@ class LsfCommand:
         미상은 caller가 기본 env로 처리하므로 kill 자체는 반드시 나간다."""
         out: Dict[str, str] = {}
         ids = [str(i) for i in job_ids]
-        base = self._prog_len(self.config.bjobs_path) + 40
 
         def run_chunk(chunk: List[str]) -> None:
             argv = cmd_tokens(self.config.bjobs_path) + [
@@ -470,7 +474,8 @@ class LsfCommand:
                 out[parts[0]] = cluster          # "id" 또는 "id[idx]" 원문
                 out[m.group(1)] = cluster        # parent id 표기로도 매칭
 
-        self._query_chunks_isolated(ids, base, run_chunk, "bjobs(cluster)")
+        self._query_chunks_isolated(ids, self._bjobs_base_len(),
+                                    run_chunk, "bjobs(cluster)")
         return out
 
     def _query_chunks_isolated(self, ids: List[str], base: int,
