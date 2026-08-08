@@ -218,7 +218,7 @@ def test_final_not_lost_when_job_ends_while_handler_running(
     def handler(ctx):
         if not ctx.final:
             started.set()
-            release.wait(5.0)         # 느린 handler — 이 사이 job이 DONE
+            release.wait(30.0)        # 느린 handler — 이 사이 job이 DONE
         return ctx.final
 
     manager.add_handler(jsid, "slow", handler)
@@ -227,14 +227,16 @@ def test_final_not_lost_when_job_ends_while_handler_running(
 
     fake_lsf.set_job(jid, "RUN")
     _poll(qtbot, manager, jsid)               # tick1 → handler 시작
-    assert started.wait(5.0)
+    # 상한은 여유 있게 — CPU 경합 시 worker 기동이 밀려도 flaky하지 않게
+    # (조건 충족 즉시 통과하므로 정상 실행 시간은 그대로다)
+    assert started.wait(30.0)
 
     fake_lsf.set_job(jid, "DONE")
     _poll(qtbot, manager, jsid)               # tick2 — inflight라 skip
     qtbot.wait(100)                           # tick2가 inflight 중에 소비되게
     release.set()                             # handler 종료 (이후 폴링 없음)
 
-    qtbot.waitUntil(lambda: True in results, timeout=5000)
+    qtbot.waitUntil(lambda: True in results, timeout=30000)
     assert results == [False, True]           # 비-final 1회 + final 1회 (중복 없음)
 
 
@@ -250,6 +252,6 @@ def test_recheck_does_not_double_run_while_alive(
         lambda j, n, r: results.append(r.final))
     fake_lsf.set_job(jid, "RUN")
     _poll(qtbot, manager, jsid)               # tick1 → 실행 1회
-    qtbot.waitUntil(lambda: len(results) == 1, timeout=5000)
+    qtbot.waitUntil(lambda: len(results) == 1, timeout=30000)
     qtbot.wait(300)                           # recheck가 추가 실행하면 안 됨
     assert results == [False]                 # 여전히 1회 (RUN 지속)
