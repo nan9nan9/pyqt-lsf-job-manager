@@ -14,6 +14,7 @@ import atexit
 import logging
 import shlex
 from collections import Counter
+from dataclasses import dataclass
 from dataclasses import replace as dc_replace
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set
@@ -49,6 +50,19 @@ from .store.base import JobSetStore
 from .store.memory import InMemoryStore
 
 log = logging.getLogger("lsfmgr.manager")
+
+
+@dataclass(frozen=True)
+class _PendingArm:
+    """제출 사이클 1건의 보류 무장분 — submitter의 records_reset(착수 확정)
+    에서 무장하고 gate_rejected(착수 없음 확정)에서 폐기한다.
+    token은 사이클 정체성 — 큐에 남은 이전 사이클의 낡은 신호가 새 사이클의
+    보류분을 건드리지 못하게 한다."""
+    token: object
+    keys: List[str]                          # rearm 대상 job_key
+    post_process: Optional[Callable]
+    poll_interval_s: Optional[float]         # None이면 자동 폴링 없음
+
 
 class LsfJobManager(QObject):
     """Facade — 컴포넌트 조립 + Facade Signal + JobSet 핸들 발급."""
@@ -182,7 +196,7 @@ class LsfJobManager(QObject):
         self.handlers = JobSetHandlerService(self.store, parent=self)
         self.handlers.finished.connect(self.handler_finished)
 
-        # jobset별 마지막 polling interval — merge 시 폴링 설정 이관에 사용
+        # jobset별 마지막 polling interval — 편집/재제출 후 폴링 재개에 사용
         self._poll_intervals: Dict[str, float] = {}
 
         self._shutdown_done = False
@@ -196,16 +210,13 @@ class LsfJobManager(QObject):
         self._post_pool.setMaxThreadCount(2)
 
         # jobset_finished 1회 latch — 전원 terminal을 이미 통지한 jobset.
-        # 완료 감지가 다시 non-terminal을 보면(재제출/merge로 job 추가) 자동
+        # 완료 감지가 다시 non-terminal을 보면(재제출/add_jobs로 job 추가) 자동
         # 해제되고, 착수 확정(records_reset)에서도 명시적으로 푼다 — 폴링
         # 없이 곧장 전원 SUBMIT_FAILED로 끝나는 사이클도 새로 통지되도록.
         self._finished_latch: Set[str] = set()
 
-        # 제출 사이클별 보류 무장분 — jobset_id → (token, rearm keys,
-        # post_process, 폴링 interval). submitter의 records_reset(리셋 완료
-        # =착수 확정)에서 무장하고, gate_rejected(착수 없음 확정)에서 폐기한다.
-        # token(사이클 정체성)으로 낡은 신호가 새 사이클을 건드리지 못한다.
-        self._pending_arm: Dict[str, tuple] = {}
+        # 제출 사이클별 보류 무장분 (무장/폐기 규칙은 _PendingArm docstring)
+        self._pending_arm: Dict[str, _PendingArm] = {}
 
         # 상태 전이 표시 pacer — min_state_dwell_s>0일 때만. jobs_updated를
         # job별로 dwell만큼 띄워 발화해 순식간에 지나가는 전이(SUBMITTING→PEND,
@@ -327,7 +338,7 @@ class LsfJobManager(QObject):
 
     def jobset(self, jobset_id: str) -> JobSet:
         """[sync, snapshot] JobSet 핸들 재획득 (복원/검색 결과에서).
-        삭제된(remove_jobset/merge source) jobset은 레코드가 없으므로
+        삭제된(remove_jobset) jobset은 레코드가 없으므로
         JobSetNotFoundError — 새 열린 핸들이 발급될 여지가 없다."""
         handle = self._handles.get(jobset_id)
         if handle is not None:
@@ -385,7 +396,7 @@ class LsfJobManager(QObject):
             # LSF master를 두들긴다 (옵션 경로의 5~60초 검증과 달리
             # 직접 호출은 무검증이었음)
             raise ValueError(f"interval_s는 양수여야 합니다 (got {eff})")
-        self._poll_intervals[jobset_id] = eff    # merge 이관/재개용 기억
+        self._poll_intervals[jobset_id] = eff    # 편집/재제출 재개용 기억
         self.polling.start_polling(jobset_id, eff)
 
     def stop_polling(self, jobset_id: str) -> None:
@@ -393,7 +404,8 @@ class LsfJobManager(QObject):
         jobset_id = self._jsid(jobset_id)
         # 재개 기억도 지운다 — 재제출(_on_records_reset)이 옛 interval로
         # 마음대로 되살리지 않게.
-        # ※ merge는 예외다: 흡수 후 target에 관찰할 job이 남으면 기본 interval
+        # ※ job 편집(add/replace/upsert)은 예외다: 편집 후 관찰할 job이 남으면
+        #   기본 interval
         #   로라도 폴링을 다시 켠다(관찰 대상이 있는데 멈춰 있으면 handler가
         #   조용히 죽는다). 껐다는 사실보다 볼 것이 있다는 사실이 우선한다.
         self._poll_intervals.pop(jobset_id, None)
@@ -417,7 +429,7 @@ class LsfJobManager(QObject):
         읽으므로, 최신 LSF 상태는 각 jobset이 폴링되고 있어야 반영된다.
 
         list_jobsets() 스냅샷과 이후 summary() 사이에 다른 스레드가 그 jobset을
-        remove_jobset/merge로 지울 수 있다(find_jobs와 동일한 경합) — 사라진 것은
+        remove_jobset으로 지울 수 있다(find_jobs와 동일한 경합) — 사라진 것은
         건너뛴다."""
         agg: Counter = Counter()
         for js in self.store.list_jobsets():
@@ -476,29 +488,41 @@ class LsfJobManager(QObject):
                 # 여기서 터뜨리면 kill_started/finished 짝이 깨진다.
                 keys = []
         scope = self._gate.kill_scope(jobset_id, keys)
-        # barrier↑ + 취소는 **여기서 즉시** 한다(논블로킹). killer worker 차례로
-        # 미루면 그동안 제출된 job이 전부 '제출됐다가 곧 죽는' 낭비가 된다.
-        # 정지 대기(blocking)만 worker의 scope.acquire()가 이어받는다.
-        scope.begin()
-        # barrier를 올린 뒤 task를 못 띄우면(shutdown 경합/예외) 아무도
-        # release하지 않아 그 jobset의 제출이 **영구 차단**된다.
-        try:
-            queued = self.killer.kill_jobset(jobset_id, only_state=only_state,
-                                             verify=verify, scope=scope)
-        except BaseException:
-            scope.release()
-            raise
-        if not queued:
-            scope.release()
-        # 접수 즉시(동기) 착수 통지 — quiesce(진행 중 bsub 완료 대기)로
-        # kill_finished가 수십 초 늦어지는 케이스에서도 UI가 '접수됨'을
-        # 바로 표시할 수 있다. killer.kill_jobset(동기 — 등록+task 큐잉만)
-        # **이후**에 발행해야 kill_started slot에서 is_killing()/
-        # kill_snapshot()을 pull해도 True/값이 나온다 (신호-pull 일치).
-        # task를 실제 띄웠을 때만 — shutdown 경합으로 no-op이면 kill_finished도
-        # 안 오므로 kill_started를 발화하면 UI가 영구 'killing' 고착된다.
+        queued = self._launch_kill(scope, lambda: self.killer.kill_jobset(
+            jobset_id, only_state=only_state, verify=verify, scope=scope))
         if queued:
             self.kill_started.emit(jobset_id)
+
+    @staticmethod
+    def _launch_kill(scope, queue_fn: Callable[[], bool]) -> bool:
+        """kill 우선권 barrier의 수명 관리 **단일 지점** — kill()/kill_jobs()
+        공용.
+
+        barrier↑ + 취소(begin)는 **접수 스레드에서 즉시** 한다(논블로킹).
+        killer worker 차례로 미루면 그동안 제출된 job이 전부 '제출됐다가 곧
+        죽는' 낭비가 된다. 정지 대기(blocking)만 worker의 scope.acquire()가
+        이어받는다.
+
+        barrier를 올린 뒤 task를 못 띄우면(shutdown 경합/예외) 아무도
+        release하지 않아 그 jobset의 제출이 **영구 차단**된다 — 미큐잉/예외
+        경로에서 반드시 회수한다.
+
+        반환: 실제 큐잉 여부. True일 때만 caller가 kill_started를 발화한다 —
+        killer 등록(동기) **이후** 발행이라 kill_started slot에서
+        is_killing()/kill_snapshot()을 pull해도 True/값이 나오고(신호-pull
+        일치), shutdown 경합 no-op이면 kill_finished도 안 오므로 started를
+        내지 않아 UI의 영구 'killing' 고착을 막는다(started/finished 짝)."""
+        if scope is not None:
+            scope.begin()
+        try:
+            queued = queue_fn()
+        except BaseException:
+            if scope is not None:
+                scope.release()
+            raise
+        if not queued and scope is not None:
+            scope.release()
+        return queued
 
     def kill_jobs(self, job_ids_or_jobset=None,
                   job_keys: Optional[Sequence[str]] = None, *,
@@ -531,8 +555,6 @@ class LsfJobManager(QObject):
             return
         if verify is None:
             verify = bool(self._defaults.get("verify_kill", False))
-        ids: Optional[List[object]] = None
-        keys: Optional[Sequence[str]] = None
         # 문자열은 시퀀스라 list()가 **글자 단위로 분해**된다 — jobset_id나
         # key 하나를 실수로 넘기면 "js_2026..." 이 한 글자짜리 target이 되어
         # 무관한 job id에 bkill이 나간다. 조용히 통과시키지 않는다.
@@ -545,10 +567,6 @@ class LsfJobManager(QObject):
                 f"이면 job_keys와 함께 넘기고, 원시 id면 목록으로 넘겨라 "
                 f"(got {job_ids_or_jobset!r})")
         if job_keys is not None or isinstance(job_ids_or_jobset, JobSet):
-            # key 경로. 첫 인자는 JobSet 핸들이거나 jobset_id 문자열이거나
-            # (핸들 없는 호출이면) None — _jsid가 핸들/문자열을 모두 받는다.
-            # key→id 해석은 killer worker에서 한다 (barrier 이후 — 제출 중이던
-            # job의 id까지 잡는다). 여기서 미리 풀면 그 job이 kill을 빠져나간다.
             if job_keys is None:
                 # 선택 kill인데 선택이 없다 — 조용한 no-op은 위험하다
                 # (호출자는 뭔가 죽었다고 믿는다). 빈 선택은 job_keys=[]로
@@ -556,64 +574,69 @@ class LsfJobManager(QObject):
                 raise TypeError(
                     "kill_jobs: jobset을 넘겼으면 job_keys도 필요하다 "
                     "(전체 kill은 mgr.kill(js), 빈 선택은 job_keys=[])")
-            keys = list(job_keys)
             owner = (job_ids_or_jobset if job_ids_or_jobset is not None
                      else jobset_id)
-            if owner is not None:
-                jsid = self._jsid(owner)
-            else:
-                # 핸들 없는 key 호출 — 소유 jobset을 역추적한다. 여러 jobset에
-                # 걸치면 jobset별로 나눠 각각 정식 kill을 건다(컨텍스트를 ""로
-                # 뭉개면 verify/신호/우선권/진행표시가 전부 무력해진다).
-                owners: Dict[str, List[str]] = {}
-                for r in self.store.find_jobs_by_keys(set(keys)):
-                    owners.setdefault(r.jobset_id, []).append(r.job_key)
-                if not owners:
-                    log.warning("kill_jobs: 알 수 없는 job_key %d건 — 무시",
-                                len(keys))
-                    return
-                if len(owners) > 1:
-                    for oid, okeys in owners.items():
-                        self.kill_jobs(oid, okeys, verify=verify)
-                    return
-                jsid, keys = next(iter(owners.items()))
+            self._kill_selected(owner, list(job_keys), verify)
+            return
+        # 원시 id 경로 — caller가 문자열을 그대로 넘긴다. array element를
+        # "id[idx]"로 지정하는데 그 array를 monitor가 (id, None) 단일
+        # 레코드로 접은 상태면, verify는 element 단위 생사를 판정할 수 없어
+        # (집계 레코드=여러 element의 합) 그 target을 잔존 집계에서 제외한다.
+        # 즉 접힌 array의 특정 element만 겨냥한 raw kill은 verify가 과소집계
+        # 할 수 있다 — 접힌 array는 bare id(전체)로 kill·verify하거나,
+        # jobset+job_key 경로(위)를 쓰면 안전하다(None 레코드에 bare id 생성).
+        # 대상이 이미 job_id를 가진(=제출이 끝난) job이므로 제출 우선권
+        # (scope)은 걸지 않는다.
+        if job_ids_or_jobset is None:
+            # 셋 중 어느 형태도 아니다(kill_jobs() / kill_jobs(jobset_id=..)).
+            # 그대로 두면 list(None)의 "'NoneType' object is not iterable"만
+            # 나와 어느 인자를 빠뜨렸는지 알 수 없다 — 위 오용 검사들과
+            # 같은 격으로 쓸 형태를 짚어 준다.
+            raise TypeError(
+                "kill_jobs: kill 대상이 없다 — 원시 id 목록을 첫 인자로 "
+                "넘기거나(kill_jobs([123, ...], jobset_id=...)), 선택 kill은 "
+                "job_keys=로 넘겨라. jobset 전체 kill은 mgr.kill(js)")
+        jsid = self._jsid(jobset_id) if jobset_id is not None else ""
+        self._queue_kill_jobs(jsid, ids=list(job_ids_or_jobset), keys=None,
+                              verify=verify, scope=None)
+
+    def _kill_selected(self, owner, keys: List[str], verify: bool) -> None:
+        """선택(key) kill — 소유 jobset 해석 + 제출 우선권 scope 부여.
+
+        owner는 JobSet 핸들/jobset_id 문자열/None(핸들 없는 key 호출).
+        key→id 해석은 killer worker에서 한다 (barrier 이후 — 제출 중이던
+        job의 id까지 잡는다). 여기서 미리 풀면 그 job이 kill을 빠져나간다."""
+        if owner is not None:
+            jsid = self._jsid(owner)
         else:
-            # 원시 id 경로 — caller가 문자열을 그대로 넘긴다. array element를
-            # "id[idx]"로 지정하는데 그 array를 monitor가 (id, None) 단일
-            # 레코드로 접은 상태면, verify는 element 단위 생사를 판정할 수 없어
-            # (집계 레코드=여러 element의 합) 그 target을 잔존 집계에서 제외한다.
-            # 즉 접힌 array의 특정 element만 겨냥한 raw kill은 verify가 과소집계
-            # 할 수 있다 — 접힌 array는 bare id(전체)로 kill·verify하거나,
-            # jobset+job_key 경로(위)를 쓰면 안전하다(None 레코드에 bare id 생성).
-            if job_ids_or_jobset is None:
-                # 셋 중 어느 형태도 아니다(kill_jobs() / kill_jobs(jobset_id=..)).
-                # 그대로 두면 list(None)의 "'NoneType' object is not iterable"만
-                # 나와 어느 인자를 빠뜨렸는지 알 수 없다 — 위 오용 검사들과
-                # 같은 격으로 쓸 형태를 짚어 준다.
-                raise TypeError(
-                    "kill_jobs: kill 대상이 없다 — 원시 id 목록을 첫 인자로 "
-                    "넘기거나(kill_jobs([123, ...], jobset_id=...)), 선택 kill은 "
-                    "job_keys=로 넘겨라. jobset 전체 kill은 mgr.kill(js)")
-            ids = list(job_ids_or_jobset)
-            jsid = (self._jsid(jobset_id)
-                    if jobset_id is not None else "")
+            # 핸들 없는 key 호출 — 소유 jobset을 역추적한다. 여러 jobset에
+            # 걸치면 jobset별로 나눠 각각 정식 kill을 건다(컨텍스트를 ""로
+            # 뭉개면 verify/신호/우선권/진행표시가 전부 무력해진다).
+            owners: Dict[str, List[str]] = {}
+            for r in self.store.find_jobs_by_keys(set(keys)):
+                owners.setdefault(r.jobset_id, []).append(r.job_key)
+            if not owners:
+                log.warning("kill_jobs: 알 수 없는 job_key %d건 — 무시",
+                            len(keys))
+                return
+            if len(owners) > 1:
+                for oid, okeys in owners.items():
+                    self._kill_selected(oid, okeys, verify)
+                return
+            jsid, keys = next(iter(owners.items()))
         # 선택 kill의 우선권 — 범위는 **선택한 key**다. 제출 중(job_id 미확보)인
         # 대상이 key→id 해석에서 빠지면 bkill이 안 나가고 그 job은 제출을 마쳐
         # PEND→RUN으로 살아난다("kill했는데 안 죽는다"). barrier도 이 범위에만
         # 걸려, 대상 아닌 job의 제출과 그들의 새 제출 사이클은 그대로다.
-        scope = (self._gate.kill_scope(jsid, keys)
-                 if keys is not None and jsid else None)
-        if scope is not None:
-            scope.begin()            # 즉시 취소 (논블로킹) — kill() 주석 참조
-        try:                         # 올린 barrier를 반드시 회수 (kill() 주석)
-            queued = self.killer.kill_jobs(ids, job_keys=keys, verify=verify,
-                                           jobset_id=jsid or "", scope=scope)
-        except BaseException:
-            if scope is not None:
-                scope.release()
-            raise
-        if not queued and scope is not None:
-            scope.release()
+        scope = self._gate.kill_scope(jsid, keys) if jsid else None
+        self._queue_kill_jobs(jsid, ids=None, keys=keys,
+                              verify=verify, scope=scope)
+
+    def _queue_kill_jobs(self, jsid: str, *, ids, keys, verify, scope) -> None:
+        """kill_jobs 큐잉 + 착수 통지 — barrier 수명은 _launch_kill이 관리."""
+        queued = self._launch_kill(scope, lambda: self.killer.kill_jobs(
+            ids, job_keys=keys, verify=verify, jobset_id=jsid or "",
+            scope=scope))
         if queued:                       # 실제 큐잉일 때만 (shutdown 경합 제외)
             # 전역 kill(jsid="")도 발화한다 — started/finished 짝 계약은
             # jobset 유무와 무관하다(안 그러면 전역 kill을 건 UI가 완료만
@@ -656,7 +679,7 @@ class LsfJobManager(QObject):
         디렉토리 지정 수단). None인 항목은 부모 cwd. 재제출에도 보존.
         work_dir/work_dirs 미지정 시 부모(GUI) 프로세스의 cwd.
         job_keys/user_datas/work_dirs는 commands와 같은 길이(생략 시 전부 None).
-        commands가 비면 **빈 jobset** — 이후 merge로만 채운다.
+        commands가 비면 **빈 jobset** — 이후 add_jobs로 채운다.
         생성 즉시 jobs_updated/jobset_updated가 발행돼 표가 갱신된다."""
         if isinstance(tags, str):             # 편의: 단일 태그 문자열 허용
             tags = [tags]
@@ -777,7 +800,7 @@ class LsfJobManager(QObject):
         self.handlers.remove_handler(jobset_id, name)
 
     # ------------------------------------------------------------------
-    # job 편집 3형제 — 하려는 일이 이름에 드러난다 (merge를 대체)
+    # job 편집 3형제 — 하려는 일이 이름에 드러난다
     #   add_jobs     : 추가 전용 (job_key가 이미 있으면 ValueError)
     #   replace_jobs : 교체 전용 (job_key가 없으면 JobNotFoundError)
     #   upsert_jobs  : 있으면 교체, 없으면 추가
@@ -854,16 +877,26 @@ class LsfJobManager(QObject):
         changed = self.jobsets.local_edit_jobs(jobset_id, records,
                                                policy=policy, force=force)
         if changed:
-            # 교체분의 handler 장부·LOST 스트릭을 무효화한다 — job_key는
-            # 유지되므로 옛 _FINISHED가 남으면 그 키의 **새 job**에 handler가
-            # 영영 침묵하고, 옛 미발견 횟수가 남으면 새 job이 그만큼 빨리
-            # LOST로 확정된다. 추가분은 장부가 없어 no-op이다.
-            keys = [r.job_key for r in changed]
-            self.handlers.rearm(jobset_id, keys)
-            self.querier.forget(jobset_id, keys)
+            # 교체분은 job_key가 유지되므로 추적 장부를 리셋해야 새 내용에
+            # handler/LOST 판정이 정상 동작한다. 추가분은 장부가 없어 no-op.
+            self._rearm_tracking(jobset_id, [r.job_key for r in changed])
             self._relay_jobs_changed(jobset_id, list(changed))
         self._resume_polling_if_watchable(jobset_id)
         return changed
+
+    def _rearm_tracking(self, jobset_id: str, keys: List[str]) -> None:
+        """재실행/교체될 job의 추적 장부 무효화 — 항상 **쌍으로** 리셋한다.
+
+        - handler 진행 상태(rearm): 옛 _FINISHED가 남으면 같은 key의 새
+          실행에 handler가 영영 침묵한다.
+        - LOST 미발견 스트릭(forget): querier는 사이클마다 스트릭을
+          재구축하지만, 조회 대상(on-LSF)이 하나도 없는 사이클은 query()가
+          조기 반환해 옛 값이 그대로 남는다 — 재제출 사이가 정확히 그
+          상태다(전원 terminal/CREATED). 그대로 두면 새 실행이 옛 실행의
+          미발견 횟수를 물려받아, 제출 직후 등록 지연으로 한 번만 안 보여도
+          LOST(되돌릴 수 없는 terminal)가 확정된다."""
+        self.handlers.rearm(jobset_id, keys)
+        self.querier.forget(jobset_id, keys)
 
     def _resume_polling_if_watchable(self, jobset_id: str) -> None:
         """관찰할 job(비terminal)이 생겼으면 폴링을 (재)시작한다.
@@ -908,8 +941,8 @@ class LsfJobManager(QObject):
         """[sync] jobset의 **job 전부** 삭제 — remove_jobs과 동일 가드.
 
         jobset 자체는 남는다 — id/label/tags/handler/폴링/GUI 행이 그대로
-        유지되므로 새 batch jobset을 만들어 merge()로 흡수시키면 **같은
-        jobset을 그대로 재사용**할 수 있다(v9: job 추가는 merge 전용).
+        유지되므로 add_jobs/upsert_jobs로 새 batch를 채우면 **같은 jobset을
+        그대로 재사용**할 수 있다.
         jobset 자체를 없애려면 remove_jobset()."""
         jobset_id = self._jsid(jobset_id)
         removed = self.jobsets.local_clear_jobs(jobset_id, force=force)
@@ -923,7 +956,7 @@ class LsfJobManager(QObject):
 
         - pacer: 보류 중인 표시 전이 — dwell 창 안에 삭제되면 늦게 도착한
           전이가 지워진 행을 되살린다.
-        - querier: LOST 미발견 스트릭 — jobset이 통째로 사라지면(merge source)
+        - querier: LOST 미발견 스트릭 — jobset이 통째로 사라지면(remove_jobset)
           그 jobset으로는 다시 query()가 안 불려 항목이 영영 남는다."""
         if self._pacer is not None:
             self._pacer.forget(jobset_id, job_keys)
@@ -1067,9 +1100,9 @@ class LsfJobManager(QObject):
         # token은 이 제출 사이클의 정체성 — 큐에 남은 이전 사이클의 낡은
         # 거부 신호가 새 사이클의 보류분을 폐기하지 못하게 한다.
         token = object()
-        self._pending_arm[jobset_id] = (token, keys, post_process,
-                                        opts.poll_interval_s
-                                        if opts.auto_poll else None)
+        self._pending_arm[jobset_id] = _PendingArm(
+            token, keys, post_process,
+            opts.poll_interval_s if opts.auto_poll else None)
         # submit_started는 submitter가 실제 착수 지점(do_launch)에서 발화한다
         # (submitter.started → submit_started 릴레이). shutdown은 started/finished
         # 둘 다 안 나가 짝이 유지되고, born-cancelled는 finished를 내므로 짝을
@@ -1084,7 +1117,7 @@ class LsfJobManager(QObject):
             # 여기서 정리한다. (born-cancelled의 완료 정산은 _gate_reject의
             # finished(cancelled=N)가 이미 발행했다)
             ent = self._pending_arm.get(jobset_id)
-            if ent is not None and ent[0] is token:
+            if ent is not None and ent.token is token:
                 self._pending_arm.pop(jobset_id, None)
         return self.jobset(jobset_id)
 
@@ -1094,35 +1127,26 @@ class LsfJobManager(QObject):
         tick이 봐도 레코드는 이미 SUBMITTING — 옛 terminal 오발화 창이 없다.
         token 불일치(다른 사이클의 낡은 신호)면 무시한다."""
         ent = self._pending_arm.get(jsid)
-        if ent is None or ent[0] is not token:
+        if ent is None or ent.token is not token:
             return
         self._pending_arm.pop(jsid, None)
         # 새 실행 착수 — 이전 완료 통지 latch를 푼다. 폴링 없이 곧장 전원
         # terminal로 끝나는 사이클(예: bsub 전량 거부)은 그 사이 완료 감지가
         # 한 번도 안 돌아 latch가 자동 해제되지 못한다.
         self._finished_latch.discard(jsid)
-        _tok, keys, pp, interval = ent
-        if keys:
-            self.handlers.rearm(jsid, keys)
-            # 이전 실행의 **LOST 미발견 스트릭**도 버린다. querier는 사이클마다
-            # 스트릭을 재구축하지만, 조회 대상(on-LSF)이 하나도 없는 사이클은
-            # query()가 조기 반환해 옛 값이 그대로 남는다 — 재제출 사이에는
-            # 정확히 그 상태다(전원 terminal/CREATED). 그대로 두면 새 실행이
-            # 옛 실행의 미발견 횟수를 물려받아, 제출 직후 등록 지연으로 한 번만
-            # 안 보여도 LOST가 확정된다(grace가 막으려던 바로 그 상황이고,
-            # LOST는 되돌릴 수 없는 terminal이다).
-            self.querier.forget(jsid, keys)
-        if pp is not None:
-            self._post_process[jsid] = pp
-        if interval is not None:
-            self.start_polling(jsid, interval)     # 자동 폴링 시작
+        if ent.keys:
+            self._rearm_tracking(jsid, ent.keys)
+        if ent.post_process is not None:
+            self._post_process[jsid] = ent.post_process
+        if ent.poll_interval_s is not None:
+            self.start_polling(jsid, ent.poll_interval_s)   # 자동 폴링 시작
 
     def _on_gate_rejected(self, jsid: str, token: object) -> None:
         """[main] 게이트가 착수 없이 끝남(거부/예외/통과 직후 취소/shutdown) —
         이 사이클의 보류분을 폐기한다. token 불일치면 다른 사이클의 낡은
         신호이므로 무시(새 사이클의 보류분을 파괴하지 않는다)."""
         ent = self._pending_arm.get(jsid)
-        if ent is None or ent[0] is not token:
+        if ent is None or ent.token is not token:
             return
         self._pending_arm.pop(jsid, None)
 
@@ -1162,7 +1186,7 @@ class LsfJobManager(QObject):
         """[sync] jobset **자체를 삭제** (전원 terminal일 때) — 핸들도 파괴.
 
         레코드가 실제로 지워지므로 이후 list_jobsets/search_jobsets/get_jobs
-        어디에도 남지 않는다(merge source와 동일). **결과를 나중에 다시 볼
+        어디에도 남지 않는다. **결과를 나중에 다시 볼
         수 없으니** 필요하면 삭제 전에 스냅샷을 떠 둘 것 — 반환값이 삭제
         직전의 JobSetRecord다.
         job만 비우고 jobset은 재사용하려면 clear_jobs()."""
@@ -1171,7 +1195,7 @@ class LsfJobManager(QObject):
                 or self.killer.is_active(jobset_id)):
             # pre_submit 게이트 대기 중엔 레코드가 아직 전원 terminal이라
             # 아래 local_remove_jobset 검사를 통과해 버린다 — 게이트가 통과하면
-            # 이미 사라진 jobset에 실제 LSF job이 제출되므로(merge와 동일 가드)
+            # 이미 사라진 jobset에 실제 LSF job이 제출되므로(job 편집과 동일 가드)
             # 진행 중 submit/kill이 있으면 삭제를 거부한다.
             # force=True(강제 삭제 계약)면 거부 대신 진행 중 제출을 취소시키고
             # 진행한다 — RETRY_WAIT 장기 backoff 중에도 강제 정리가 가능해야
@@ -1185,12 +1209,12 @@ class LsfJobManager(QObject):
             self.submitter.abort_retries(jobset_id)
         # 실패 시 예외 — 아래 정리는 하지 않는다(polling/핸들 그대로 유지)
         removed = self.jobsets.local_remove_jobset(jobset_id, force=force)
-        # 사라진 jobset에 매달린 것들을 merge source와 같은 순서로 정리한다 —
+        # 사라진 jobset에 매달린 것들을 정리한다 —
         # 남기면 매 주기 JobSetNotFoundError가 터진다.
         self.polling.stop_polling(jobset_id)
         self.handlers.remove_all(jobset_id)
         self._forget_paced(jobset_id)    # dwell 보류분 — 삭제된 jobset의
-                                         # 늦은 발행 방지 (merge/remove 대칭)
+                                         # 늦은 발행 방지
         self._poll_intervals.pop(jobset_id, None)
         self._post_process.pop(jobset_id, None)
         self._pending_arm.pop(jobset_id, None)
@@ -1358,7 +1382,7 @@ class LsfJobManager(QObject):
         try:
             summary = self.store.summary(jsid)
         except LsfmgrError:
-            return                    # jobset이 이미 사라짐(merge/remove 등)
+            return                    # jobset이 이미 사라짐(remove_jobset 등)
         self.jobset_updated.emit(jsid, summary)
         # 제출 시점에 이미 전원 terminal인 경우(예: bsub 전량 거부 → 전원
         # SUBMIT_FAILED)는 폴링 tick의 _maybe_finish가 ctx.finished
