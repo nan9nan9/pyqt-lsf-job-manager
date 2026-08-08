@@ -89,6 +89,50 @@ class JobStatus:
 
 _JOB_ID_RE = re.compile(r"Job <(\d+)>")
 _ARRAY_ID_RE = re.compile(r"^(\d+)(?:\[(\d+)\])?$")
+
+# ----------------------------------------------------------------------
+# kill/verify target 문자열 문법 — "id" / "id[idx]" / "id[m-n]".
+# 해석은 여기 한 곳이 소유한다 (killer가 공유) — 문자열 슬라이싱이 여러
+# 모듈에 흩어져 표기 변화에 제각기 깨지는 것을 막는다.
+# ----------------------------------------------------------------------
+_TARGET_RE = re.compile(r"^(\d+)(?:\[(\d+)(?:-(\d+))?\])?$")
+
+
+def target_parent_id(target) -> Optional[int]:
+    """target의 parent job_id — "1000[3]" → 1000. 비수치 형식이면 None."""
+    head = str(target).split("[", 1)[0]
+    return int(head) if head.isdigit() else None
+
+
+def classify_targets(targets) -> Tuple[Set[int], set, List[Tuple[int, int, int]]]:
+    """target 목록을 (whole, exact, ranges)로 분류한다.
+
+    whole: bare id — 그 job_id 전체(비array job, 또는 array element 전부).
+    exact: (job_id, array_index) — element 1개 지정.
+    ranges: (job_id, lo, hi) — element 범위 지정.
+    파싱 불가 target은 bare id로 관대 처리한다(강건성 — 예외로
+    kill_finished가 오보되지 않게), 그래도 안 되면 경고 후 무시."""
+    whole: Set[int] = set()
+    exact: set = set()
+    ranges: List[Tuple[int, int, int]] = []
+    for t in targets:
+        t = str(t)
+        m = _TARGET_RE.match(t)
+        if m is None:
+            pid = target_parent_id(t)
+            if pid is None:
+                log.warning("파싱 불가 target 무시: %r", t)
+            else:
+                whole.add(pid)
+            continue
+        pid = int(m.group(1))
+        if m.group(2) is None:                 # bare id
+            whole.add(pid)
+        elif m.group(3) is None:               # 단일 element [idx]
+            exact.add((pid, int(m.group(2))))
+        else:                                  # 범위 [m-n]
+            ranges.append((pid, int(m.group(2)), int(m.group(3))))
+    return whole, exact, ranges
 # bjobs가 매칭 결과 없음을 알릴 때의 메시지들
 _NO_JOB_PATTERNS = ("no unfinished job", "no matching job", "is not found",
                     "no job found")
@@ -251,6 +295,10 @@ class LsfCommand:
         # 동시에 시도할 수 있다 — 무락 증가면 같은 필드 오류에 이중 강등돼
         # FULL을 건너뛰고 CORE로 떨어진다. 사용한 인덱스 기준 CAS로 1단만.
         self._bjobs_fmt_lock = threading.Lock()
+        # MC 분류 조회(cluster 필드) 지원 여부 — 필드 오류를 한 번 보면
+        # 영구히 끈다. 안 끄면 미지원 사이트에서 매 kill마다 전 chunk가
+        # 조용히 실패하며 bjobs를 헛돌린다(결과는 어차피 기본 env 폴백).
+        self._cluster_fmt_ok = True
 
     @property
     def _bjobs_fmt(self) -> str:
@@ -456,14 +504,29 @@ class LsfCommand:
 
         반환: target 문자열("id" 및 "id[idx]" 양쪽) → cluster
         (forward 우선, 없으면 source). 조회 실패 chunk는 그냥 빠진다 —
-        미상은 caller가 기본 env로 처리하므로 kill 자체는 반드시 나간다."""
+        미상은 caller가 기본 env로 처리하므로 kill 자체는 반드시 나간다.
+        cluster 필드 미지원 사이트(필드 오류)는 1회 감지 후 영구 스킵."""
         out: Dict[str, str] = {}
+        if not self._cluster_fmt_ok:
+            return out
         ids = [str(i) for i in job_ids]
 
         def run_chunk(chunk: List[str]) -> None:
             argv = cmd_tokens(self.config.bjobs_path) + [
                 "-noheader", "-o", self._BJOBS_CLUSTER_FMT] + chunk
-            for line in self._run_query(argv).stdout.splitlines():
+            try:
+                res = self._run_query(argv)
+            except LsfCommandError as e:
+                if _looks_like_field_error(e.stderr or ""):
+                    with self._bjobs_fmt_lock:       # 경고 1회 보장
+                        if self._cluster_fmt_ok:
+                            self._cluster_fmt_ok = False
+                            log.warning(
+                                "bjobs cluster 필드 미지원 — MC 분류 조회를 "
+                                "끕니다(이후 kill은 기본 env 폴백). 원인: %s",
+                                (e.stderr or str(e)).strip()[:200])
+                raise                                # chunk 실패 계상은 골격이
+            for line in res.stdout.splitlines():
                 parts = [p.strip() for p in line.strip().split(";")]
                 if len(parts) != 3:
                     continue
