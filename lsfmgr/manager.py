@@ -1302,6 +1302,12 @@ class LsfJobManager(QObject):
         self.handlers.tick(jobset_id)
         self._maybe_finish(jobset_id)
 
+    @staticmethod
+    def _all_terminal(recs: list) -> bool:
+        """완료 판정 공용 술어 — job이 1개 이상 있고 전원 terminal.
+        (핸들의 is_done은 intended_count 기준 summary 판정 — 별개 계약)"""
+        return bool(recs) and all(r.state.is_terminal for r in recs)
+
     def _maybe_finish(self, jobset_id: str) -> None:
         """전원 terminal 도달 감지의 **공통 지점** — 폴링/query_once/submit
         완료에서 호출된다. 두 가지를 처리한다:
@@ -1325,7 +1331,7 @@ class LsfJobManager(QObject):
             self._post_process.pop(jobset_id, None)   # jobset 소멸 — 무장 해제
             self._finished_latch.discard(jobset_id)
             return
-        if not recs or not all(r.state.is_terminal for r in recs):
+        if not self._all_terminal(recs):
             self._finished_latch.discard(jobset_id)   # 다시 활성 — 재무장
             return
         fn = self._post_process.pop(jobset_id, None)  # 한 번만
@@ -1432,7 +1438,7 @@ class LsfJobManager(QObject):
             recs = self.store.get_jobs(jsid)
         except LsfmgrError:
             return
-        if recs and all(r.state.is_terminal for r in recs):
+        if self._all_terminal(recs):
             self._finished_latch.add(jsid)
 
     def _handle_of(self, jobset_id: str) -> Optional[JobSet]:
