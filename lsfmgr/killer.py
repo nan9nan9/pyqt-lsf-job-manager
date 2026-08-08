@@ -204,31 +204,32 @@ class _KillTask(QRunnable):
             try:
                 report = self._run()
             except Exception as e:           # noqa: BLE001
-                log.exception("kill 실패: %s", self.jobset_id)
-                self.killer.error.emit(self.jobset_id, repr(e))
                 # 착수/완료 짝 계약 — 예외에도 kill_finished는 발행한다.
                 # 안 하면 kill_started로 스피너를 켠 UI가 영구 고착된다.
+                log.exception("kill 실패: %s", self.jobset_id)
+                self.killer.error.emit(self.jobset_id, repr(e))
                 report = KillReport(
                     jobset_id=self.jobset_id, requested=0,
                     errors=[f"internal: {e!r}"])
-                self.killer._unreg(self.jobset_id, self.slot)
-                self.killer.finished.emit(self.jobset_id, report)
-                return
-            log.info("kill 완료 %s: 요청 %d / 미확인 %d / 잔존 %s "
-                     "(전략 %s, LSF호출 %d회%s)",
-                     target, report.requested, report.unconfirmed,
-                     "미검증" if report.still_alive is None
-                     else report.still_alive,
-                     "+".join(report.strategies) or "-", report.command_calls,
-                     f", 오류 {len(report.errors)}건" if report.errors else "")
-            # 완료 시 항상 100% 보장 (미확인이 남아도 작업은 끝) — submit과 대칭
-            self.killer._set_progress(self.slot, report.requested,
-                                      report.requested)
-            self.killer.progress.emit(self.jobset_id, report.requested,
-                                      report.requested)
-            # finished보다 먼저 등록 해제 — queued 신호를 받은 slot이
-            # is_killing을 pull하면 반드시 False여야 한다 (결정적 계약).
-            # finally의 중복 해제는 멱등이라 무해.
+            else:
+                log.info("kill 완료 %s: 요청 %d / 미확인 %d / 잔존 %s "
+                         "(전략 %s, LSF호출 %d회%s)",
+                         target, report.requested, report.unconfirmed,
+                         "미검증" if report.still_alive is None
+                         else report.still_alive,
+                         "+".join(report.strategies) or "-",
+                         report.command_calls,
+                         f", 오류 {len(report.errors)}건"
+                         if report.errors else "")
+                # 완료 시 항상 100% 보장 (미확인이 남아도 작업은 끝) —
+                # submit과 대칭. 예외 경로는 진행 보장 대상이 아니다.
+                self.killer._set_progress(self.slot, report.requested,
+                                          report.requested)
+                self.killer.progress.emit(self.jobset_id, report.requested,
+                                          report.requested)
+            # 종료 시퀀스 **단일 출구** — finished보다 먼저 등록 해제:
+            # queued 신호를 받은 slot이 is_killing을 pull하면 반드시 False여야
+            # 한다 (결정적 계약). finally의 중복 해제는 멱등이라 무해.
             self.killer._unreg(self.jobset_id, self.slot)
             self.killer.finished.emit(self.jobset_id, report)
         finally:
