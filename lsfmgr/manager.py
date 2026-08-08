@@ -154,7 +154,7 @@ class LsfJobManager(QObject):
 
         from .submitter import BulkSubmitter
         self.submitter = BulkSubmitter(self.store, self.command,
-                                       self.jobsets, self.config, parent=self,
+                                       self.config, parent=self,
                                        gate=self._gate)
         self.submitter.progress.connect(self.submit_progress)
         self.submitter.finished.connect(self.submit_finished)
