@@ -55,11 +55,19 @@ class JobsetQuerier:
         self.command = command
         # jobset → {job_key: 연속 미발견 횟수}. 살아있는 jobset의 job_key는
         # 사이클마다 통째로 갈아끼워(발견되면 자연히 사라짐) 정리가 필요 없다.
-        # 다만 **jobset 자체가 사라지면**(merge source 소멸 등) 그 jobset으로는
+        # 다만 **jobset 자체가 사라지면**(remove_jobset) 그 jobset으로는
         # 다시 query()가 안 불려 항목이 영영 남는다 — manager가 소멸 지점에서
         # forget()으로 지운다 (pacer.forget과 같은 계약).
         self._missing_streak: Dict[str, Dict[str, int]] = {}
         self._streak_lock = threading.Lock()
+        # query() 직렬화 — jobset별. 호출자가 둘이다(폴링 스레드 + killer
+        # verify 워커). 같은 jobset을 동시에 조회하면 스트릭의
+        # read-modify-write(_pop_streaks → 계산 → _set_streaks)가 겹쳐
+        # 유실/이중 증가한다 — '연속 N회 미발견' 유예(LOST 안전장치 ②)가
+        # 흔들린다. 서로 다른 jobset의 병행 조회는 그대로 둔다.
+        # lock은 jobset 소멸 후에도 남지만 세션당 jobset 수만큼(수 바이트)이라
+        # 정리하지 않는다.
+        self._query_locks: Dict[str, threading.Lock] = {}
 
     def _pop_streaks(self, jobset_id: str) -> Dict[str, int]:
         with self._streak_lock:
@@ -74,7 +82,7 @@ class JobsetQuerier:
 
     def forget(self, jobset_id: str,
                job_keys: Optional[List[str]] = None) -> None:
-        """사라진 job(remove/clear)·jobset(merge source)의 미발견 스트릭을
+        """사라진 job(remove/clear)·jobset(remove_jobset)의 미발견 스트릭을
         버린다. job_keys=None이면 그 jobset 전체.
 
         **살아있는 job의 스트릭까지 지우면 안 된다** — 지우면 LOST 유예가
@@ -92,7 +100,15 @@ class JobsetQuerier:
             if not streaks:
                 self._missing_streak.pop(jobset_id, None)
 
+    def _qlock(self, jobset_id: str) -> threading.Lock:
+        with self._streak_lock:
+            return self._query_locks.setdefault(jobset_id, threading.Lock())
+
     def query(self, jobset_id: str) -> QueryResult:
+        with self._qlock(jobset_id):         # 직렬화 근거는 __init__ 주석
+            return self._query_serialized(jobset_id)
+
+    def _query_serialized(self, jobset_id: str) -> QueryResult:
         self.store.get_jobset(jobset_id)     # 존재 검증 (없으면 예외)
         # 조회 대상(is_on_lsf)만 store 단에서 걸러 가져온다 — 대다수가
         # terminal인 대형 jobset에서 매 사이클 terminal 레코드까지 재구성해
@@ -199,8 +215,8 @@ class JobsetQuerier:
         waiting: List[str] = []              # ② 유예 중 (미발견이지만 미확정)
         prev = self._pop_streaks(jobset_id)
         cur: Dict[str, int] = {}
+        grace = max(1, self.command.config.lost_after_missing_polls)
         if missing:
-            grace = max(1, self.command.config.lost_after_missing_polls)
             for rec in missing:
                 if rec.job_id is None or rec.job_id in bjobs_failed:
                     # job_id 없는 레코드는 id 조회로 확인 자체가 불가하고,
@@ -225,13 +241,11 @@ class JobsetQuerier:
                         len(deferred), _brief(deferred))
         if waiting:
             log.warning("bjobs 미발견 %d건 — LOST 유예 중(연속 %d회 필요): "
-                        "id=%s", len(waiting),
-                        max(1, self.command.config.lost_after_missing_polls),
+                        "id=%s", len(waiting), grace,
                         _brief([f"{k}({cur[k]}회)" for k in waiting]))
         if lost_specs:
             log.warning("LOST 확정 %d건 — 연속 %d회 bjobs 미발견: %s",
-                        len(lost_specs),
-                        max(1, self.command.config.lost_after_missing_polls),
+                        len(lost_specs), grace,
                         _brief([spec[0] for spec in lost_specs]))
 
         # 전이 대상 소실(사이클 도중 remove_jobs)·guard 거부는 transition_many가
@@ -301,7 +315,6 @@ class _PollWorker(QObject):
         self.querier = querier
         self._timers: Dict[str, QTimer] = {}
         self._in_progress: set = set()       # 중복 polling 방지
-        self._auto_stop = True
         self._idle_counts: Dict[str, int] = {}   # 활동 없음 연속 사이클 수
         #: stop_all 완료(타이머 정리)를 shutdown이 quit 전에 확인하는 신호
         self.stopped_event = threading.Event()
@@ -354,7 +367,7 @@ class _PollWorker(QObject):
         try:
             result = self.querier.query(jobset_id)
         except JobSetNotFoundError:
-            # merge/삭제된 jobset — 계속 polling하면 매 주기 error 폭주
+            # 삭제된 jobset(remove_jobset) — 계속 polling하면 매 주기 error 폭주
             log.info("jobset %s 삭제됨 — polling 자동 중지", jobset_id)
             self.stop_polling(jobset_id)
             return
@@ -381,7 +394,7 @@ class _PollWorker(QObject):
            연속이면 중지 — 1사이클 유예는 submit 직후 전원 CREATED인
            정상 순간을 조기 중지하지 않기 위함.
         """
-        if not self._auto_stop or jobset_id not in self._timers:
+        if jobset_id not in self._timers:
             return
         try:
             remaining = self.querier.store.get_jobs(jobset_id)
