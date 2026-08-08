@@ -24,19 +24,21 @@ SHARED_KEYS = frozenset({
     "poll_interval_s", "auto_poll",
     "submit_timeout_s", "verify_kill",
 })
-#: ③(call) 전용
-CALL_ONLY_KEYS = frozenset({"label", "tags", "description"})
 #: 제거된 옵션 — 받으면 TypeError 대신 경고 후 무시 (기존 앱 하위 호환).
 #: script_dir: array dispatch 제거(v9)로 무용.
 #: queue/resource_req/output_dir/default_queue/lsf_group_root/bsub_path/
 #: bgdel_path: bsub 인자 조립 제출·group 부착물 제거(v10)로 무용 —
 #: 제출 옵션은 wrapper 커맨드 문자열에 직접 쓴다.
 #: bhist_path: bhist 조회(LOST 판정 fallback·상세 원문) 제거(v10.3)로 무용.
+#: label/tags/description: submit이 jobset을 만들던 시절(v9 이전)의 메타
+#: 인자 — jobset 메타는 create_jobset 인자다. 받아서 검증만 하고 아무도
+#: 읽지 않던 함정이라 경고-무시로 강등.
 DEPRECATED_KEYS = frozenset({
     "script_dir",
     "queue", "resource_req", "output_dir",
     "default_queue", "lsf_group_root", "bsub_path", "bgdel_path",
     "bhist_path",
+    "label", "tags", "description",
 })
 
 #: ②(manager) 전용 — Options에 포함되지 않고 config/store 구성에 쓰이는 키
@@ -51,22 +53,6 @@ MANAGER_ONLY_KEYS = frozenset({
     "collect_clusters", "min_state_dwell_s", "cluster_envpaths",
     "test_submit_wrapper_pattern_cmd",
 })
-
-#: ① 라이브러리 내장 기본값
-BUILTIN_DEFAULTS: Dict[str, Any] = {
-    "workers": 32,
-    "max_retry": 3,
-    "retry_backoff": "fixed:2",
-    "rate_limit_per_s": None,
-    "poll_interval_s": 10.0,
-    "auto_poll": True,
-    "submit_timeout_s": 30.0,
-    "verify_kill": False,
-    "label": "",
-    "tags": (),
-    "description": "",
-}
-
 
 #: 재시도 대기 상한(1일) — QTimer int32(ms) 한도(~24.8일) 안쪽으로 clamp
 MAX_RETRY_DELAY_S = 86400.0
@@ -83,9 +69,6 @@ class Options:
     auto_poll: bool = True
     submit_timeout_s: float = 30.0
     verify_kill: bool = False
-    label: str = ""
-    tags: Tuple[str, ...] = ()
-    description: str = ""
 
     def retry_delay_s(self, attempt: int) -> float:
         """attempt번째(0부터) 실패 후 재시도 대기 시간.
@@ -115,6 +98,13 @@ def parse_retry_backoff(value: str) -> Tuple[str, float]:
         raise ValueError(
             f"retry_backoff 형식 오류: {value!r} — 'fixed:N' 또는 'expo:N'")
     return kind, base
+
+
+#: ① 라이브러리 내장 기본값 — Options 필드 기본값에서 **파생**한다.
+#: 별도 dict를 손으로 이중 유지하면 필드 추가/변경 때 드리프트가 생긴다.
+BUILTIN_DEFAULTS: Dict[str, Any] = {
+    f.name: getattr(Options(), f.name) for f in fields(Options)
+}
 
 
 # ----------------------------------------------------------------------
@@ -201,12 +191,6 @@ def _validate(key: str, value: Any) -> Any:
     if key in ("auto_poll", "verify_kill", "poll_runtime_updates",
                "submit_finished_on_gate_reject", "collect_clusters"):
         return bool(value)
-    if key == "tags":
-        if isinstance(value, str):
-            return (value,)               # tuple("ab") == ('a','b') 방지
-        return tuple(value)
-    if key in ("label", "description"):
-        return str(value)
     if key == "arg_max":
         v = int(value)
         if v < 4096:
@@ -245,12 +229,10 @@ def resolve_options(defaults: Dict[str, Any], call_kwargs: Dict[str, Any], *,
 
     defaults(①내장+②manager가 이미 merge된 값) 위에 ③call kwargs를 덮어
     frozen Options를 만든다. context에 따라 허용 키가 다르다:
-    - "submit": 공통 + label/tags/description
+    - "submit": 공통(SHARED_KEYS)
     - "kill":   verify_kill만
     """
-    if context == "submit":
-        allowed = SHARED_KEYS | CALL_ONLY_KEYS
-    elif context == "kill":
+    if context == "kill":
         allowed = frozenset({"verify_kill"})
     else:
         allowed = SHARED_KEYS

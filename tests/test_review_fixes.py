@@ -71,8 +71,11 @@ def test_failed_close_keeps_polling_and_handle(qtbot, manager, fake_lsf):
 # 버그 5: tags="sweep" (str) → ('s','w','e','e','p')로 분해
 # ----------------------------------------------------------------------
 def test_tags_string_not_exploded():
+    # v10.5: submit 경로의 tags는 경고-무시(잔재 강등) — 문자열이 글자
+    # 단위로 분해되는 함정 자체가 소멸했다. create_jobset 경로의 분해
+    # 방지는 아래 end-to-end 테스트가 계속 지킨다.
     opts = resolve_options({}, {"tags": "sweep"})
-    assert opts.tags == ("sweep",)
+    assert not hasattr(opts, "tags")
 
 
 def test_tags_string_end_to_end(qtbot, manager, fake_lsf):
