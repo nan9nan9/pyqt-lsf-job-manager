@@ -60,8 +60,8 @@ js = mgr.create_jobset(
 - **`work_dir`(단일)** 과 **`work_dirs`(job 별 리스트)** 는 **동시 지정 불가** —
   둘 중 하나만 쓴다(같이 주면 `ValueError`). 둘 다 없으면 부모(GUI) 프로세스의 cwd.
 - 각 job 의 `submit_cwd` 레코드 필드로 저장돼 **재제출·교체 에도 보존**된다.
-  merge 시 `job_key` 가 일치하는 job 은 replace 규칙에 따라 내용 전체가 신규
-  레코드로 교체되므로 `work_dir` 도 신규 값으로 바뀐다.
+  `replace_jobs`/`upsert_jobs` 로 같은 `job_key` 를 교체하면 내용 전체가 신규
+  레코드로 바뀌므로 `work_dir` 도 신규 값으로 바뀐다.
 - 존재하지 않는 디렉토리를 주면 그 job 은 `SUBMIT_FAILED`(fail_reason
   `BSUB_OSERROR`) 로 분류돼 마무리된다(불투명 크래시 아님).
 

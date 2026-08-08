@@ -126,7 +126,7 @@ class LsfConfig:
     def __post_init__(self):
         self.workers = max(1, min(64, int(self.workers)))
         if self.chunk_size < 1:
-            self.chunk_size = 200
+            self.chunk_size = 500            # 필드 기본값과 동일한 폴백
         # retry_backoff는 여기선 숫자다(>1.0이면 지수 backoff). 같은 이름의
         # submit()/LsfJobManager() kwarg는 'fixed:N'/'expo:N' 문자열이라 헷갈려
         # LsfConfig에 문자열을 넘기면, 예전엔 조용히 통과하다 manager 생성 시

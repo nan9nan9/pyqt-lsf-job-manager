@@ -1,9 +1,9 @@
 """JobSet 핸들 — jobset 1개의 **조회(pull) + Signal 전용 뷰** (v9).
 
-명령(submit/kill/merge/…)은 전부 manager 한 곳에 있다 —
+명령(submit/kill/add_jobs/…)은 전부 manager 한 곳에 있다 —
 `mgr.submit(js, ...)` / `mgr.kill(js)` / `mgr.add_jobs(js, ...)` 처럼 이 핸들을
 인자로 넘긴다. 핸들은 GUI 위젯이 바인딩할 상태 스냅샷과 신호만 제공한다.
-삭제된(remove_jobset / merge source) 핸들 접근 시 JobSetRemovedError.
+삭제된(remove_jobset) 핸들 접근 시 JobSetRemovedError.
 """
 from __future__ import annotations
 
