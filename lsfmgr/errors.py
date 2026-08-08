@@ -52,16 +52,22 @@ class RemoveJobSetNotAllowedError(JobSetStateError):
 
 
 class JobSetNotFoundError(LsfmgrError):
-    """존재하지 않는 jobset_id 접근 — 삭제된(remove_jobset/merge source)
-    jobset도 여기에 해당한다."""
+    """존재하지 않는 jobset_id 접근 — 삭제된(remove_jobset) jobset도
+    여기에 해당한다."""
 
 
 class JobSetRemovedError(LsfmgrError):
-    """삭제되어 파괴된 JobSet 핸들 접근 (remove_jobset / merge source)."""
+    """삭제되어 파괴된 JobSet 핸들 접근 (remove_jobset)."""
 
 
 class JobNotFoundError(LsfmgrError):
     """jobset 내에 없는 job_key 접근."""
+
+
+#: 대상 job/jobset 레코드가 **동시 삭제로 사라졌다**는 신호 묶음.
+#: worker의 부기(전이/마킹/계상) 경로는 이를 장애가 아니라 정상 소실로
+#: 흡수한다 — submitter/killer가 공유하는 단일 정의.
+RECORD_GONE = (JobNotFoundError, JobSetNotFoundError)
 
 
 class LsfCommandError(LsfmgrError):
