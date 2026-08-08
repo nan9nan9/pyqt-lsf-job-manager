@@ -603,7 +603,7 @@ class BulkSubmitter(QObject):
         log.warning("submit 실패 [%s] %s: %s", err.fail_reason, job_key, err)
         if (getattr(err, "retryable", True) and attempt < ctx.options.max_retry
                 and not ctx.cancel_event.is_set() and not self._shutdown):
-            # RETRY_WAIT → QTimer 스케줄 (스레드 sleep 점유 금지, §3.2)
+            # RETRY_WAIT → QTimer 스케줄 (스레드 sleep 점유 금지, §4)
             # fail_message: 재시도 대기 중에도 마지막 시도의 터미널 메시지를
             # 표에 보여줄 수 있고, 포기 확정(_finalize_retry) 시에도 잔존한다
             try:

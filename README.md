@@ -129,7 +129,9 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)     # 이번 submit만
 | `poll_interval_s` | 10 | polling 주기 (5~60) |
 | `auto_poll` | True | submit 후 polling 자동 시작 |
 | `verify_kill` | False | kill 후 실제 종료 확인 (`kill()` 인자로도 지정 가능) |
-| `label` / `tags` / `description` | 빈 값 | JobSet 메타데이터 (`submit()` 전용) |
+
+> JobSet 메타(`label`/`tags`)는 옵션이 아니라 **`create_jobset` 인자**다 —
+> `submit()`에 넘기면 경고 후 무시된다(v9 잔재 하위 호환).
 
 **앱 전역 동작 (생성자 전용)**
 

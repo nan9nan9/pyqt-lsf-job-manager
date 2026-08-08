@@ -126,18 +126,13 @@ class JobRecord:
 @dataclass(frozen=True)
 class JobSetRecord:
     """논리적 job 묶음 — 추적은 JobRecord의 job_id 목록으로만 한다.
-    (v10.1: 사장 필드 일괄 삭제 — 부착물(lsf_group_paths/name_patterns/
-    array_job_ids)은 v10부터 생성 자체가 없고, session_id(세션복원)/
-    parent_jobset_id/created_by는 쓰기만 되고 어디서도 읽지 않았다.
-    영속 저장소가 v9에서 제거돼 과거 데이터 호환 부담도 없다.
 
-    closed 플래그도 삭제됐다 — 종결은 mgr.remove_jobset()이 레코드를 실제로
-    지우므로 '닫혔지만 목록에 남아있는' 중간 상태가 아예 없다.
-    merged_from도 삭제됐다 — merge API가 사라지면서(job 추가는 add_jobs/
-    replace_jobs/upsert_jobs로 직접) 기록할 대상 자체가 없어졌다.)"""
+    쓰기만 되고 읽히지 않던 사장 필드(부착물/session_id/closed/merged_from/
+    description 등)는 v10.1~v10.5에 걸쳐 일괄 삭제됐다 — 근거와 경위는
+    git 이력. 되살리지 말 것(종결은 remove_jobset의 실제 삭제, job 추가는
+    add_jobs/replace_jobs/upsert_jobs가 대신한다)."""
     jobset_id: str
     intended_count: int                          # 손실 감지 기준
     label: str = ""
     tags: List[str] = field(default_factory=list)   # search_jobsets(tag=) 필터
-    description: str = ""
     created_at: Optional[datetime] = None        # search_jobsets(since=) 필터

@@ -55,12 +55,12 @@ class JobSetManager:
     # 생성
     # ------------------------------------------------------------------
     def local_create_jobset(self, intended_count: int, *, label: str = "",
-                            tags: Sequence[str] = (), description: str = "",
+                            tags: Sequence[str] = (),
                             jobset_id: Optional[str] = None) -> JobSetRecord:
         jsid = jobset_id or generate_jobset_id()
         record = JobSetRecord(
             jobset_id=jsid, intended_count=intended_count,
-            label=label, tags=list(tags), description=description,
+            label=label, tags=list(tags),
             created_at=datetime.now())
         return self.store.store_insert_jobset(record)
 
