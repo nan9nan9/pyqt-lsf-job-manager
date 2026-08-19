@@ -311,7 +311,10 @@ class LsfCommand:
                 job_status_fetcher,
                 refresh_min_s=self.config.effective_internal_refresh_min_s,
                 wait_timeout_s=self.config.query_timeout_s,
-                retention_days=self.config.internal_retention_days)
+                retention_days=self.config.internal_retention_days,
+                # 앱이 값을 명시하지 않았으면(=폴링 주기에서 유도) 실제
+                # 폴링 주기를 알게 될 때 자동으로 낮출 수 있게 한다.
+                auto_refresh=self.config.internal_refresh_min_s is None)
             log.info("상태 조회원: job_status_fetcher 콜백 (bjobs 미사용, 최소 "
                      "갱신 간격 %.1fs, 종료 job 보존 %.0f일)",
                      self.config.effective_internal_refresh_min_s,
@@ -328,6 +331,18 @@ class LsfCommand:
     def internal_status(self) -> Optional[InternalStatusSource]:
         """콜백 조회원 (job_status_fetcher 미지정이면 None) — 테스트/진단용."""
         return self._internal
+
+    def note_poll_interval(self, interval_s: float) -> None:
+        """실제 폴링 주기 통지 — 콜백 조회원의 갱신 간격을 그에 맞춘다.
+        bjobs 경로면 아무 일도 하지 않는다."""
+        if self._internal is not None:
+            self._internal.note_poll_interval(interval_s)
+
+    def shutdown_status_source(self) -> None:
+        """콜백 조회원 종료 — 대기 중인 폴링/verify 스레드를 즉시 풀어 준다.
+        (bjobs 경로면 no-op)"""
+        if self._internal is not None:
+            self._internal.shutdown()
 
     @property
     def _bjobs_fmt(self) -> str:
