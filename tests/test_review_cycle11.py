@@ -31,7 +31,7 @@ def test_folded_reaggregation_uses_latest_not_stale(qtbot, manager):
     # (v10: probe/leftover 2단이 사라져 원래의 'stale probe 행 혼입' 시나리오는
     # 구조적으로 불가능해졌다 — by-id 단일 조회의 element 행들로 folded 레코드
     # R=(910,None)이 _aggregate_elements 집계되는지만 검증)
-    def fake_by_ids(ids):
+    def fake_by_ids(ids, *, fresh=False):
         if 910 in set(ids):
             return ([JobStatus(910, 0, JobState.DONE, 0),
                      JobStatus(910, 5, JobState.DONE, 0)], set())

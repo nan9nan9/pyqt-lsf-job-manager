@@ -19,8 +19,9 @@ from typing import (
     Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple,
 )
 
-from .config import LsfConfig, cmd_tokens
+from .config import DEFAULT_BJOBS_PATH, LsfConfig, cmd_tokens
 from .errors import ArgMaxExceededError, LsfCommandError, SubmitError
+from .internal_status import InternalStatusSource, JobStatusFetcher
 from .states import LSF_STAT_MAP, JobState
 
 log = logging.getLogger("lsfmgr.command")
@@ -272,7 +273,8 @@ class LsfCommand:
     """LSF 명령 래퍼. runner를 주입하면 subprocess 없이 단위 테스트 가능."""
 
     def __init__(self, config: Optional[LsfConfig] = None,
-                 runner: Optional[Runner] = None):
+                 runner: Optional[Runner] = None,
+                 job_status_fetcher: Optional[JobStatusFetcher] = None):
         self.config = config or LsfConfig()
         # 구 2-arg runner도 받아들인다(계약 확장 하위호환) — 아래 _run은 항상
         # cwd를 3번째 인자로 넘기므로, cwd 미지원 runner는 어댑터로 감싼다.
@@ -299,6 +301,33 @@ class LsfCommand:
         # 영구히 끈다. 안 끄면 미지원 사이트에서 매 kill마다 전 chunk가
         # 조용히 실패하며 bjobs를 헛돌린다(결과는 어차피 기본 env 폴백).
         self._cluster_fmt_ok = True
+        # --- 조회원 선택: 앱 콜백 / bjobs subprocess ---
+        # 갈림은 **job_status_fetcher 하나뿐**이다 — 주면 콜백, 안 주면 bjobs.
+        # 위쪽(monitor/killer)은 bjobs_by_ids 계약만 보므로 어느 쪽이든 flow가
+        # 같다. 이 판정은 생성 시점 1회로 끝난다(조회마다 다시 보지 않는다).
+        self._internal: Optional[InternalStatusSource] = None
+        if job_status_fetcher is not None:
+            self._internal = InternalStatusSource(
+                job_status_fetcher,
+                refresh_min_s=self.config.effective_internal_refresh_min_s,
+                wait_timeout_s=self.config.query_timeout_s,
+                retention_days=self.config.internal_retention_days)
+            log.info("상태 조회원: job_status_fetcher 콜백 (bjobs 미사용, 최소 "
+                     "갱신 간격 %.1fs, 종료 job 보존 %.0f일)",
+                     self.config.effective_internal_refresh_min_s,
+                     self.config.internal_retention_days)
+            if self.config.bjobs_path != DEFAULT_BJOBS_PATH:
+                # 조회는 콜백으로 가므로 이 경로는 아무 데도 안 쓰인다.
+                # 앱이 mock bjobs를 가리켜 놓고 "왜 안 불리지" 하는 것을 막는다.
+                log.warning(
+                    "bjobs_path=%r는 무시됩니다 — job_status_fetcher가 "
+                    "지정되어 상태 조회는 콜백으로 합니다",
+                    self.config.bjobs_path)
+
+    @property
+    def internal_status(self) -> Optional[InternalStatusSource]:
+        """콜백 조회원 (job_status_fetcher 미지정이면 None) — 테스트/진단용."""
+        return self._internal
 
     @property
     def _bjobs_fmt(self) -> str:
@@ -473,7 +502,7 @@ class LsfCommand:
                 raise
         return self._parse_bjobs(res.stdout)
 
-    def bjobs_by_ids(self, job_ids: Sequence[int]
+    def bjobs_by_ids(self, job_ids: Sequence[int], *, fresh: bool = False
                      ) -> Tuple[List[JobStatus], Set[int]]:
         """job_id 목록 chunked 조회 — 유일한 bjobs 조회 수단 (v10에서
         group/name 조회 제거 — wrapper 제출 job은 부착물로 커버되지 않아
@@ -481,7 +510,13 @@ class LsfCommand:
 
         반환: (조회 성공분, 조회 실패한 chunk의 job_id 집합) — monitor와
         동일한 chunk 단위 실패 격리. caller는 실패 집합의 job만 판단을
-        보류하고, 성공 chunk에서 미발견된 job은 부재로 확정할 수 있다."""
+        보류하고, 성공 chunk에서 미발견된 job은 부재로 확정할 수 있다.
+
+        fresh=True는 콜백 조회원에서만 의미가 있다 — 스냅샷 캐시를 건너뛰고
+        이 호출 이후에 받은 결과만 쓴다(kill verify용). bjobs 경로는 매번
+        subprocess를 돌리므로 항상 fresh라 무시된다."""
+        if self._internal is not None:
+            return self._internal.statuses_by_ids(job_ids, fresh=fresh)
         out: List[JobStatus] = []
         ids = [str(i) for i in job_ids]
         failed = self._query_chunks_isolated(
@@ -506,6 +541,10 @@ class LsfCommand:
         (forward 우선, 없으면 source). 조회 실패 chunk는 그냥 빠진다 —
         미상은 caller가 기본 env로 처리하므로 kill 자체는 반드시 나간다.
         cluster 필드 미지원 사이트(필드 오류)는 1회 감지 후 영구 스킵."""
+        if self._internal is not None:
+            # internal payload의 cluster를 그대로 쓴다 — 같은 '미상은 기본
+            # env 폴백' 계약이라 kill 경로는 무변경.
+            return self._internal.clusters_by_ids(job_ids)
         out: Dict[str, str] = {}
         if not self._cluster_fmt_ok:
             return out

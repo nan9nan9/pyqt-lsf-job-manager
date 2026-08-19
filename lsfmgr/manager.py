@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 from .command import LsfCommand, Runner
+from .internal_status import JobStatusFetcher
 from .completion import CompletionTracker
 from .config import LsfConfig
 from .errors import (
@@ -97,9 +98,17 @@ class LsfJobManager(QObject):
                  config: Optional[LsfConfig] = None,
                  runner: Optional[Runner] = None,
                  parent: Optional[QObject] = None,
+                 *,
+                 job_status_fetcher: Optional[JobStatusFetcher] = None,
                  **kwargs: Any):
         """kwargs = §1.2 옵션 카탈로그의 ②(manager) 계층.
-        config와 동시 지정 시 kwargs 우선."""
+        config와 동시 지정 시 kwargs 우선.
+
+        job_status_fetcher: 상태를 가져오는 앱 콜백. **주면** 상태 조회가
+        bjobs subprocess 대신 이 콜백으로 간다(안 주면 종전대로 bjobs).
+        인자 없이 호출되고 REST 응답 JSON({"jobs": [...]})을 그대로 반환하면
+        된다 — 파싱·캐시·동시 호출 합치기는 라이브러리가 한다. runner와
+        마찬가지로 '바깥과 닿는 지점'의 주입이라 config가 아닌 생성자 인자다."""
         super().__init__(parent)
 
         # --- 옵션 분리: manager 전용 / 공통(②) — 오타는 TypeError ---
@@ -142,7 +151,7 @@ class LsfJobManager(QObject):
                         "않습니다", cfg.retry_backoff)
 
         # --- 컴포넌트 조립 ---
-        self.command = LsfCommand(self.config, runner)
+        self.command = LsfCommand(self.config, runner, job_status_fetcher)
         self.jobsets = JobSetManager(self.store)
         self.querier = JobsetQuerier(self.store, self.command)
 

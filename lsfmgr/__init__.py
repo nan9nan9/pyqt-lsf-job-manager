@@ -19,6 +19,7 @@ from .errors import (
 )
 from .errors import JobSetRemovedError
 from .handle import JobSet
+from .internal_status import parse_internal_jobs
 from .handlers import HandlerContext, HandlerResult
 from .manager import LsfJobManager
 from .options import Options
@@ -45,6 +46,7 @@ __all__ = [
     "JobSetRecord",
     "JobSetStore",
     "InMemoryStore",
+    "parse_internal_jobs",
     "SubmitReport",
     "SubmitProgress",
     "KillReport",

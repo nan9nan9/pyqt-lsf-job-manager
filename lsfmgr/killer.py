@@ -522,7 +522,9 @@ class _KillTask(QRunnable):
         if not pids:
             return []
         try:
-            sts, failed = self.killer.command.bjobs_by_ids(pids)
+            # fresh — 방금 bkill한 job의 생사는 캐시로 답할 수 없다
+            # (internal 조회원의 스냅샷 TTL을 건너뛴다).
+            sts, failed = self.killer.command.bjobs_by_ids(pids, fresh=True)
         except LsfmgrError as e:
             log.warning("kill verify 직접 조회 실패: %s", e)
             return None
@@ -620,7 +622,8 @@ class _KillTask(QRunnable):
         잔존을 센다. 조회가 전이시킨 레코드를 셋째 값으로 반환한다."""
         k = self.killer
         try:
-            qr = k.querier.query(self.jobset_id)   # Store 갱신 + 전이 수집
+            # fresh — _verify_direct와 같은 이유(캐시된 스냅샷은 kill 이전일 수 있다)
+            qr = k.querier.query(self.jobset_id, fresh=True)  # Store 갱신 + 전이 수집
         except LsfmgrError as e:
             log.warning("kill verify 조회 실패: %s", e)
             # 조회 실패는 '미확인'이다 — 수(-1 같은 센티넬)로 뭉개지 않는다.

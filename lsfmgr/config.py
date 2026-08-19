@@ -10,13 +10,19 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 #: ("Job <id> ...")을 그대로 뱉으면 된다 — 파싱/추적은 bsub와 동일하다.
 CmdPath = Union[str, Sequence[str]]
 
+#: bjobs_path 기본값 — "앱이 명시로 지정했나"를 이 값과의 비교로 판정한다
+#: (job_status_fetcher와 함께 주면 무시된다는 경고를 낼지 결정).
+DEFAULT_BJOBS_PATH = "bjobs"
+
 
 @dataclass
 class LsfConfig:
     """LSF 명령 경로/타임아웃/chunk 등 환경 설정."""
     # (v10: bsub_path/bgdel_path 삭제 — bsub 조립 제출·bgdel group 정리가
     #  제거됨. 제출은 wrapper 커맨드를 그대로 실행한다.)
-    bjobs_path: CmdPath = "bjobs"
+    #: 조회 명령. `LsfJobManager(job_status_fetcher=...)`로 콜백을 주면 조회가
+    #: 그 콜백으로 넘어가고 이 값은 쓰이지 않는다 (lsfmgr/internal_status.py).
+    bjobs_path: CmdPath = DEFAULT_BJOBS_PATH
     bkill_path: CmdPath = "bkill"
 
     #: MultiCluster kill — {클러스터명: cshrc 경로}. 지정하면 kill이 대상의
@@ -88,6 +94,41 @@ class LsfConfig:
     #: 클러스터와 wrapper가 실제 제출한 클러스터가 달라 한두 사이클 안 보이는
     #: 경우에 멀쩡한 job을 LOST로 만들지 않기 위한 유예다.
     lost_after_missing_polls: int = 3
+
+    #: 콜백 조회원(job_status_fetcher)이 켜졌을 때 상태 스냅샷의
+    #: **최소 갱신 간격**(초).
+    #: 이 간격 안에 다시 들어온 조회는 직전 스냅샷을 재사용한다 — REST는 유저의
+    #: 전 job을 한 번에 주므로 폴링 1사이클에 콜백을 여러 번 돌릴 이유가 없다.
+    #: None(기본)이면 poll_interval_s의 절반 — 폴링 사이클마다 정확히 1회
+    #: 갱신되면서, 사이클 중간에 낀 killer verify·detect_lost는 같은 스냅샷을
+    #: 공유한다. 0이면 캐시 없음(조회마다 콜백).
+    #: ※ kill verify는 이 값과 무관하게 항상 새로 받는다(fresh 조회) — 방금
+    #:   죽인 job의 생사는 캐시로 답할 수 없다.
+    internal_refresh_min_s: Optional[float] = None
+
+    #: internal 원장의 **종료 job 보존 기간**(일). 콜백이 증분(`updatefrom`)으로
+    #: 돌면 내부 원장은 계속 누적되므로, 끝난 지(finish_time) 이만큼 지난
+    #: DONE/EXIT은 버려 메모리가 무한정 늘지 않게 한다. finish_time을 안 주는
+    #: payload면 그 항목을 마지막으로 받은 시각을 대신 쓴다.
+    #: 진행 중(PEND/RUN/...) job은 아무리 오래돼도 버리지 않는다 — 아직 조회
+    #: 대상이기 때문. 0이면 만료 없음(무한 누적 — 단기 실행 프로세스 전용).
+    internal_retention_days: float = 14.0
+
+    #: internal 모드의 **제출 직후 LOST 유예**(초). 원장(REST 집계)이 아직
+    #: 이 job을 모르는 구간에서 미발견을 LOST 스트릭으로 세지 않는다.
+    #:
+    #: bjobs 경로의 유예(lost_after_missing_polls)와 목적이 다르다. 거기서
+    #: 미발견은 대부분 진짜 부재(purge)이고 등록 지연은 초 단위라 '연속 N회'로
+    #: 충분했다. 반면 누적 원장은 non-terminal job을 지우지 않으므로 internal
+    #: 모드의 미발견은 사실상 **항상** "아직 집계 안 됨"이다 — 이걸 회수로 세면
+    #: 폴링 주기에 따라 유예가 조용히 늘었다 줄고(주기 10초·3회=30초), 집계가
+    #: 그보다 조금만 늦어도 멀쩡한 job이 LOST(되돌릴 수 없음)로 죽는다.
+    #: 그래서 기준을 **제출 후 경과 시간**으로 잡는다 — 폴링 주기와 무관하다.
+    #:
+    #: 이 시간이 지나도 안 보이면 그때부터 정상 스트릭이 시작된다(진짜 소실은
+    #: 여전히 확정된다). 0이면 유예 없음 = bjobs 경로와 같은 판정.
+    #: 기준 시각은 JobRecord.submit_time, 없으면 updated_at.
+    internal_lost_grace_s: float = 60.0
 
     #: LSF MultiCluster(job forwarding) 정보 수집 — bjobs -o 에 source_cluster·
     #: forward_cluster 필드를 추가해 JobRecord.source_cluster/forward_cluster 로
@@ -184,6 +225,31 @@ class LsfConfig:
             if value is None or float(value) <= 0:
                 raise ValueError(f"{name}는 양수 (got {value!r})")
             setattr(self, name, float(value))
+        # internal 갱신 간격은 0(캐시 끔) 허용 — 음수만 막는다.
+        if self.internal_refresh_min_s is not None:
+            if float(self.internal_refresh_min_s) < 0:
+                raise ValueError("internal_refresh_min_s는 0 이상 "
+                                 f"(got {self.internal_refresh_min_s!r})")
+            self.internal_refresh_min_s = float(self.internal_refresh_min_s)
+        if float(self.internal_retention_days) < 0:
+            raise ValueError("internal_retention_days는 0 이상 "
+                             f"(got {self.internal_retention_days!r})")
+        self.internal_retention_days = float(self.internal_retention_days)
+        if float(self.internal_lost_grace_s) < 0:
+            raise ValueError("internal_lost_grace_s는 0 이상 "
+                             f"(got {self.internal_lost_grace_s!r})")
+        self.internal_lost_grace_s = float(self.internal_lost_grace_s)
+
+    @property
+    def effective_internal_refresh_min_s(self) -> float:
+        """internal 스냅샷 갱신 간격의 실효값 — 미지정이면 폴링 주기의 절반.
+
+        절반인 이유: 폴링 사이클(poll_interval_s)마다 반드시 한 번은 새로
+        받으면서, 그 사이클 안에서 겹쳐 들어오는 조회는 캐시로 흡수한다.
+        """
+        if self.internal_refresh_min_s is not None:
+            return float(self.internal_refresh_min_s)
+        return float(self.poll_interval_s) / 2.0
 
 
 def cmd_tokens(path: CmdPath) -> List[str]:

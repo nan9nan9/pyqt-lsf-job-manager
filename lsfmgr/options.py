@@ -50,6 +50,8 @@ MANAGER_ONLY_KEYS = frozenset({
     "progress_min_interval_s", "progress_min_step_ratio",
     "poll_runtime_updates", "submit_finished_on_gate_reject",
     "lost_after_missing_polls",
+    "internal_refresh_min_s", "internal_retention_days",
+    "internal_lost_grace_s",
     "collect_clusters", "min_state_dwell_s", "cluster_envpaths",
     "test_submit_wrapper_pattern_cmd",
 })
@@ -161,6 +163,18 @@ def _rate_limit(key: str, value: Any) -> Optional[float]:
     return None if value is None else float(value)
 
 
+def _opt_float_min(lo: float = 0.0):
+    """None 허용 float 하한 검증 — None은 '기본값에 맡김'."""
+    def check(key: str, value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        v = float(value)
+        if v < lo:
+            raise ValueError(f"{key}는 {lo:g} 이상 또는 None (got {value})")
+        return v
+    return check
+
+
 def _policy(key: str, value: Any) -> str:
     if value not in ("optimistic", "actual"):
         raise ValueError(f"{key}는 optimistic/actual (got {value!r})")
@@ -204,6 +218,9 @@ _VALIDATORS: Dict[str, Any] = {
     "poll_runtime_updates": _bool,
     "submit_finished_on_gate_reject": _bool,
     "lost_after_missing_polls": _int_in(1),
+    "internal_refresh_min_s": _opt_float_min(0.0),
+    "internal_retention_days": _float_min(0.0),
+    "internal_lost_grace_s": _float_min(0.0),
     "collect_clusters": _bool,
     "min_state_dwell_s": _float_min(0.0),
     "cluster_envpaths": _envpaths,
