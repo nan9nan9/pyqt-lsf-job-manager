@@ -87,6 +87,9 @@ _STATE_COLOR = {
     JobState.DONE: "#2e7d32", JobState.EXIT: "#c62828",
     JobState.SUBMIT_FAILED: "#c62828", JobState.LOST: "#8e24aa",
     JobState.RETRY_WAIT: "#ef6c00",
+    # 취소는 실패가 아니다(is_failed=False) — 실패 계열의 빨강과 구분되는
+    # 중립색을 쓴다. 색이 없으면 기본 검정이라 terminal인지도 안 보인다.
+    JobState.CANCELLED: "#546e7a",
 }
 
 
@@ -197,8 +200,10 @@ class SubmitForm(QGroupBox):
 
 
 class Dashboard(QWidget):
+    # CANCEL 열이 없으면 제출 중 kill로 접힌 job이 어느 열에도 안 잡혀
+    # 상태 합계가 total과 안 맞는다(요약 불변식 위반이 화면에 드러남).
     COLS = ["jobset", "label", "total", "PEND", "RUN", "DONE",
-            "EXIT", "FAILED", "LOST"]
+            "EXIT", "FAILED", "CANCEL", "LOST"]
     JOBCOLS = ["job key", "job id", "state", "exit", "retry",
                "fail reason", "cluster"]
 
@@ -469,6 +474,7 @@ class Dashboard(QWidget):
         c = Counter(r.state.name for r in records)
         return {"total": len(records), "DONE": c.get("DONE", 0),
                 "EXIT": c.get("EXIT", 0),
+                "cancelled": c.get("CANCELLED", 0),
                 "failed": c.get("SUBMIT_FAILED", 0) + c.get("LOST", 0)}
 
     def _on_post_process(self, jsid, result):
@@ -476,8 +482,8 @@ class Dashboard(QWidget):
             self._log(jsid, "post_processing_finished — 후처리 실패")
             return
         self._log(jsid, f"post_processing_finished — DONE {result['DONE']} / "
-                        f"EXIT {result['EXIT']} / 실패 {result['failed']} "
-                        f"(총 {result['total']})")
+                        f"EXIT {result['EXIT']} / 취소 {result['cancelled']} / "
+                        f"실패 {result['failed']} (총 {result['total']})")
 
     def _on_handler(self, jsid, name, res):
         if name != HANDLER:
@@ -544,7 +550,7 @@ class Dashboard(QWidget):
         vals = [s.get("total", 0), s.get("PEND", 0), s.get("RUN", 0),
                 s.get("DONE", 0), s.get("EXIT", 0),
                 s.get("SUBMIT_FAILED", 0) + s.get("RETRY_WAIT", 0),
-                s.get("LOST", 0)]
+                s.get("CANCELLED", 0), s.get("LOST", 0)]
         for col, v in enumerate(vals, start=2):
             item.setText(col, str(v))
 

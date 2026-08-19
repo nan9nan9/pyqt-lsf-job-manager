@@ -24,7 +24,7 @@ python examples/gui_demo.py   # 통합 GUI 데모
 | handler | 체크 시 `add_handler` — RUN 중 폴링마다 job 출력 파싱 + 종료 시 최종 1회 → `handler_finished` 로그 |
 | post_process | 전원 terminal 도달 시 worker 에서 1회 종합 집계 → `post_processing_finished` |
 | job 상세 | 테이블 더블클릭 → 로컬 레코드 상세 (LSF 호출 0) |
-| 실패 처리 | retry(비정상 종료만), `SUBMIT_FAILED`/`EXIT`, `detect_lost()` |
+| 실패 처리 | retry(비정상 종료만), `SUBMIT_FAILED`/`EXIT`, `detect_lost()`. 제출 중 kill로 접힌 job은 `CANCELLED`(실패 아님) — 요약 표의 CANCEL 열 |
 
 기본으로 제출 실패율(0.12)·EXIT 확률(0.12)을 주입해 retry/EXIT 상태가 자연스럽게
 관찰됩니다.
