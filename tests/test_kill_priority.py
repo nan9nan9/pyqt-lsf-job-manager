@@ -473,3 +473,26 @@ def test_cancelled_job_can_be_resubmitted(qtbot, manager, fake_lsf):
     rec = js.jobs()[0]
     assert rec.state is JobState.PEND          # 재제출 성공
     assert rec.fail_reason is None             # 취소 이력은 리셋됐다
+
+
+def test_cancelled_by_kill_does_not_notify_completion(qtbot, manager,
+                                                      fake_lsf):
+    """사용자가 kill한 jobset에 "다 끝났다" 알림이 가면 안 된다.
+
+    CANCELLED가 killed 표식을 안 달면 completion의 '전원 내 kill로 끝났으면
+    통지 안 함' 판정이 깨진다 — 제출이 끝나기 전에 kill이 들어와
+    mute_after_kill 시점에 아직 non-terminal이면, 나중에 CANCELLED로 확정될 때
+    통지가 새어 나간다(타이밍에 따라 오기도 하고 안 오기도 했다)."""
+    fins = []
+    manager.jobset_finished.connect(lambda j, s: fins.append(s))
+    js = mk_jobset(manager, [f"echo {i}" for i in range(30)])
+    with qtbot.waitSignals([manager.submit_finished, manager.kill_finished],
+                           timeout=15000):
+        manager.submit(js, auto_poll=False)
+        manager.kill(js.id)                 # 제출이 채 끝나기 전에
+    qtbot.waitUntil(lambda: all(r.state.is_terminal for r in js.jobs()),
+                    timeout=15000)
+    qtbot.wait(200)
+    assert all(r.killed for r in js.jobs()), \
+        [(r.job_key, r.state.name, r.killed) for r in js.jobs()][:5]
+    assert not fins, f"kill한 jobset에 완료 통지 {len(fins)}회"

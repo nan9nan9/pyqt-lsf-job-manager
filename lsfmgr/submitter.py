@@ -665,6 +665,9 @@ class BulkSubmitter(QObject):
         - fail_reason은 "CANCELLED"로 남기고 이전 시도의 잔재
           (fail_message/retry_count)는 지운다 — 취소는 실패가 아니므로
           bsub 실패 메시지를 달고 남으면 원인 표시가 오해된다.
+        - killed 표식도 남긴다 — "이 종료는 내가 끝낸 것"이라는 같은 뜻이다.
+          안 남기면 completion의 '전원 내 kill로 끝났으면 통지 안 함' 판정이
+          깨져, 제출 도중 kill한 jobset에 "다 끝났다" 알림이 간다.
         - 반드시 changed로 발행한다 — CANCELLED는 폴링 대상(is_on_lsf)이
           아니라 여기서 안 알리면 UI 표가 SUBMITTING에 영구 고착된다.
         """
@@ -674,7 +677,7 @@ class BulkSubmitter(QObject):
             ctx.jobset_id,
             [(k, JobState.CANCELLED, guard,
               {"fail_reason": "CANCELLED", "fail_message": None,
-               "retry_count": 0})
+               "retry_count": 0, "killed": True})
              for k in keys]))
         self._count(ctx, cancelled=True, changed=changed)
 
@@ -756,6 +759,7 @@ class BulkSubmitter(QObject):
             if rec.state is JobState.RETRY_WAIT:
                 new = self.store.transition(ctx.jobset_id, key,
                                             JobState.CANCELLED,
+                                            killed=True,
                                             fail_reason=rec.fail_reason
                                             or default_reason)
                 if new is not None:

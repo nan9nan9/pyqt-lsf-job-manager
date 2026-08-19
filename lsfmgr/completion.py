@@ -141,7 +141,8 @@ class CompletionTracker:
             return
         fn = self._post_process.pop(jobset_id, None)  # 한 번만
         if all(r.killed for r in recs):
-            # 전원이 내 kill로 끝났다 — 사용자가 스스로 끝낸 완료라 통지하지
+            # 전원이 내 kill로 끝났다(EXIT는 bkill, CANCELLED는 제출 취소 —
+            # 둘 다 killed 표식을 단다) — 사용자가 스스로 끝낸 완료라 통지하지
             # 않는다(latch만). kill 완료 시점에 걸러지는 경우(mute_after_kill)
             # 와 달리, 이 판정은 EXIT가 나중에 확인돼도(actual 정책·verify·
             # 폴링 수렴) 레코드 표식만으로 성립한다.

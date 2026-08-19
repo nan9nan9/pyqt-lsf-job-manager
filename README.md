@@ -475,9 +475,10 @@ mgr.jobset(jobset_id)      # ID로 핸들 재획득
 
 요약 dict 예:
 ```python
-{"total": 5000, "RUN": 2100, "PEND": 2800, "DONE": 80, "EXIT": 12,
- "SUBMIT_FAILED": 5, "RETRY_WAIT": 2, "CANCELLED": 0, "LOST": 1}
+{"total": 5000, "RUN": 2100, "PEND": 2797, "DONE": 80, "EXIT": 12,
+ "SUBMIT_FAILED": 5, "RETRY_WAIT": 2, "CANCELLED": 3, "LOST": 1}
 # 불변식: 상태 합계 == total (손실 job도 반드시 어딘가에 집계됨)
+# ※ 0건인 상태는 **키 자체가 없다** — 반드시 s.get("EXIT", 0)로 읽을 것
 ```
 
 > **`is_active` / `is_inactive`** — 이 JobSet을 다시 수행할지 판단할 때 씁니다.

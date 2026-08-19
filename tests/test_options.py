@@ -149,3 +149,25 @@ def test_jobset_meta_kwargs_deprecated():
     assert not hasattr(opts, "tags")
     assert not hasattr(opts, "label")
     assert opts.workers == 32                  # 나머지 해석은 정상
+
+
+def test_options_defaults_match_lsfconfig():
+    """Options 필드 기본값과 LsfConfig 기본값이 어긋나면, manager를 안 거치는
+    resolve_options({}, {}) 경로가 다른 값을 준다 — 둘 다 손으로 유지하다
+    한쪽만 고치는 드리프트를 여기서 잡는다(rate_limit_per_s에서 실제로 겪음)."""
+    from dataclasses import fields
+    from lsfmgr import LsfConfig
+    from lsfmgr.options import Options
+
+    # retry_backoff는 표현이 일부러 다르다 — LsfConfig는 지수 밑(float),
+    # Options는 v7 옵션 문자열("fixed:2"). manager가 변환해서 넘긴다.
+    DIFFERENT_BY_DESIGN = {"retry_backoff"}
+
+    cfg, opts = LsfConfig(), Options()
+    shared = ({f.name for f in fields(Options)}
+              & {f.name for f in fields(LsfConfig)}) - DIFFERENT_BY_DESIGN
+    assert shared, "공유 필드가 하나도 없다 — 이 가드가 무의미해졌다"
+    mismatch = {name: (getattr(opts, name), getattr(cfg, name))
+                for name in sorted(shared)
+                if getattr(opts, name) != getattr(cfg, name)}
+    assert not mismatch, f"Options/LsfConfig 기본값 불일치 {{필드: (Options, LsfConfig)}}: {mismatch}"

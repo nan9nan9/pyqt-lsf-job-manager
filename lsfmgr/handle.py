@@ -140,11 +140,15 @@ class JobSet(QObject):
 
     @property
     def failed_jobs(self) -> List[JobRecord]:
-        """[sync, snapshot] 실패 상태(EXIT/SUBMIT_FAILED/LOST) job 목록."""
+        """[sync, snapshot] 실패 상태(EXIT/SUBMIT_FAILED/LOST) job 목록.
+
+        집합을 손으로 나열하지 않고 `is_failed`에서 파생한다 — 상태가 늘 때
+        여기만 빠뜨리면 조용히 어긋난다(CANCELLED 추가 때 실제로 걸렸다).
+        판정의 단일 소유자는 states.JobState.is_failed다."""
         self._check_open()
         return self._manager.get_jobs(
             self._jobset_id,
-            states={JobState.EXIT, JobState.SUBMIT_FAILED, JobState.LOST})
+            states={s for s in JobState if s.is_failed})
 
     def jobs(self, states: Optional[Set[JobState]] = None) -> List[JobRecord]:
         """[sync, snapshot] job 상세 목록 (상태 필터 가능)."""
