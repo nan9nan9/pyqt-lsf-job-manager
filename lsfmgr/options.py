@@ -52,7 +52,7 @@ MANAGER_ONLY_KEYS = frozenset({
     "lost_after_missing_polls",
     "internal_refresh_min_s", "internal_retention_days",
     "internal_lost_grace_s",
-    "collect_clusters", "min_state_dwell_s", "cluster_envpaths",
+    "collect_clusters", "min_state_dwell_s",
     "test_submit_wrapper_pattern_cmd",
 })
 
@@ -181,15 +181,6 @@ def _policy(key: str, value: Any) -> str:
     return value
 
 
-def _envpaths(key: str, value: Any) -> dict:
-    if not isinstance(value, dict) or not all(
-            isinstance(k, str) and isinstance(v, str)
-            for k, v in value.items()):
-        raise ValueError(
-            f"{key}는 {{클러스터명: cshrc경로}} 형태의 dict (got {value!r})")
-    return dict(value)
-
-
 def _cmd_path(key: str, value: Any) -> Any:
     validate_cmd_path(value, key)
     return value
@@ -223,7 +214,6 @@ _VALIDATORS: Dict[str, Any] = {
     "internal_lost_grace_s": _float_min(0.0),
     "collect_clusters": _bool,
     "min_state_dwell_s": _float_min(0.0),
-    "cluster_envpaths": _envpaths,
 }
 
 

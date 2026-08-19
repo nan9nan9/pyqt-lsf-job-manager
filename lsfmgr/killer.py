@@ -185,8 +185,6 @@ class _KillTask(QRunnable):
         self.job_ids = job_ids
         self.job_keys = job_keys       # 지연 해석 대상 (worker에서 job_ids로)
         self.verify = verify
-        #: MC 분류 kill 매핑 — 앱 환경 속성이라 config에서 읽는다
-        self.cluster_envpaths = killer.command.config.cluster_envpaths
         self.scope = scope
         self.slot = slot                     # 진행 스냅샷 slot (killer._reg 발급)
         cfg = killer.command.config          # chunk progress throttle (submit 대칭)
@@ -198,8 +196,8 @@ class _KillTask(QRunnable):
         mode = (f"only={self.only_state.value}" if self.only_state
                 else ("keys" if self.job_keys is not None
                       else ("ids" if self.job_ids is not None else "전체")))
-        log.info("kill 착수 %s (%s%s)", target, mode,
-                 ", MC분류" if self.cluster_envpaths else "")
+        log.info("kill 착수 %s (%s)", target, mode)
+
         try:
             try:
                 report = self._run()
@@ -305,20 +303,9 @@ class _KillTask(QRunnable):
         calls = unconfirmed = retries = 0
         resolved: set = set()
         if targets:
-            groups = self._split_by_envpath(recs, targets, rec_target)
-            done_base = 0            # env 그룹이 여러 개여도 진행률은 누적
-            for envpath, group in groups.items():
-                c, u, rt, res = self._kill_confirm(
-                    group, errors, envpath=envpath,
-                    total=len(targets), done_base=done_base)
-                done_base += len(group)
-                calls += c
-                unconfirmed += u
-                retries = max(retries, rt)
-                resolved |= res
+            calls, unconfirmed, retries, resolved = self._kill_confirm(
+                targets, errors)
             strategies.append(label)
-            if any(groups):              # env를 source한 그룹이 하나라도
-                strategies.append("sourced")
         # 마킹 대상 — per-id 확인이 있으므로 errors 유무와 무관하게
         # **확인된 target만** 마킹한다(미확인분은 on-LSF로 남아 폴링/재kill).
         # 정책과 무관하게 산출한다: optimistic은 EXIT 전이 + killed 표식,
@@ -421,48 +408,6 @@ class _KillTask(QRunnable):
         return (f"{rec.job_id}[{rec.array_index}]"
                 if rec.array_index is not None else str(rec.job_id))
 
-    def _split_by_envpath(self, recs, targets: List[str],
-                          rec_target) -> Dict[str, List[str]]:
-        """target을 실행 envpath별로 분류 (MC — cluster_envpaths 모드).
-
-        cluster는 ① 이미 관측된 store 레코드에서 얻고 ② 그래도 모르는
-        target만 **bkill 직전에** 최소 포맷(jobid+cluster)으로 조회해
-        채운다 — 제출 직후라 아직 아무 관측이 없어도 어느 env로 죽여야
-        할지 알고 나간다. 조회가 실패해도 미상으로 진행할 뿐 kill은 반드시
-        나간다(기본 env = 매핑의 `"*"`, 없으면 env source 없는 plain bkill).
-        cluster_envpaths 미지정이면 전부 plain bkill 한 그룹."""
-        if not self.cluster_envpaths:
-            return {"": list(targets)}
-        default_env = self.cluster_envpaths.get("*", "")
-        env_of: Dict[str, str] = {}
-        for r in recs or ():
-            if r.job_id is None:
-                continue
-            cluster = r.forward_cluster or r.source_cluster
-            if cluster and cluster in self.cluster_envpaths:
-                env_of[rec_target(r)] = self.cluster_envpaths[cluster]
-        unknown = sorted({t for t in targets if t not in env_of})
-        if unknown:
-            log.info("kill 전 cluster 조회 — 미상 %d건", len(unknown))
-            try:
-                found = self.killer.command.bjobs_clusters_by_ids(
-                    sorted({pid for pid in map(target_parent_id, unknown)
-                            if pid is not None}))
-            except Exception as e:       # noqa: BLE001 — 미상인 채 진행
-                log.warning("kill 전 cluster 조회 실패(미상 진행): %r", e)
-                found = {}
-            for t in unknown:
-                env = self.cluster_envpaths.get(found.get(t, ""))
-                if env is not None:
-                    env_of[t] = env
-        groups: Dict[str, List[str]] = {}
-        for t in targets:
-            groups.setdefault(env_of.get(t, default_env), []).append(t)
-        if len(groups) > 1 or any(e for e in groups):
-            log.info("kill env 분류: %s",
-                     {e or "None": len(g) for e, g in groups.items()})
-        return groups
-
     def _record_pool(self) -> List:
         """kill_jobs(원시 id) 대상의 레코드 후보 풀 — jobset_id를 알면 그
         jobset에서, 모르면 parent id로 전역 검색 ("id[idx]"도 정규화,
@@ -534,19 +479,14 @@ class _KillTask(QRunnable):
             return None
         return sts
 
-    def _kill_confirm(self, targets: List[str], errors: List[str],
-                      envpath: str = "", total: Optional[int] = None,
-                      done_base: int = 0) -> Tuple[int, int, int, set]:
+    def _kill_confirm(self, targets: List[str],
+                      errors: List[str]) -> Tuple[int, int, int, set]:
         """concrete-id kill — bkill 출력의 확인('is being terminated' 등)을
         보고 미확인분을 재시도한다 (submit retry와 대칭).
-        envpath 미지정(빈 문자열)이면 env source 없는 plain bkill — MC 분류
-        kill(_split_by_envpath)은 그룹별 envpath를 명시 전달한다.
-        total/done_base는 진행률 통지용 — env 그룹으로 나눠 여러 번 부를 때
-        그룹 크기로 통지하면 UI 진행바가 그룹마다 0부터 다시 찬다.
         반환: (LSF 호출 횟수, 최종 미확인 수, 재시도 라운드 수, 해소된 id 집합)."""
         k = self.killer
         cfg = k.command.config
-        total = len(targets) if total is None else total
+        total = len(targets)
         pending = set(targets)
         resolved_all: set = set()
         calls = 0
@@ -554,9 +494,9 @@ class _KillTask(QRunnable):
         while True:
             base = len(resolved_all)         # 이번 라운드 시작 시 확인분
             resolved, c = k.command.bkill_targets_confirm(
-                sorted(pending), envpath=envpath,
+                sorted(pending),
                 on_progress=lambda done: self._emit_progress(
-                    done_base + base + done, total))
+                    base + done, total))
             calls += c
             resolved_all |= resolved
             pending -= resolved

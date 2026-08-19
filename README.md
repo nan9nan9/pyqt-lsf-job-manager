@@ -154,7 +154,6 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)     # 이번 submit만
 | `internal_lost_grace_s` | 60 | 콜백 조회원에서 **제출 후 이 시간 안**의 미발견은 LOST로 세지 않음 — 상태 원본(REST) 집계 지연 유예. 0이면 유예 없음 (§5.8) |
 | `poll_runtime_updates` | True | RUN 중 `run_time_s`(경과시간) 변화도 `jobs_updated`로 live 발행. 수만 개 규모면 False 권장 |
 | `collect_clusters` | False | MultiCluster forwarding 정보 수집 — `JobRecord.source_cluster`/`forward_cluster`를 폴링으로 채움 |
-| `cluster_envpaths` | 없음 | MC 분류 kill — `{클러스터명: cshrc경로}`. 지정하면 kill이 대상 cluster별로 env를 `source`한 bkill을 실행(§5.4). 와일드카드 `"*"`는 미상/미매핑의 기본 env |
 | `kill_status_policy` | `"optimistic"` | `"optimistic"`=kill 수락 확인 시 즉시 EXIT / `"actual"`=실제 LSF 상태(폴링)로만 |
 | `kill_max_retry` | 2 | kill 확인 실패 시 재시도 횟수 |
 | `kill_retry_delay_s` | 3.0 | kill 재확인 간격(초) — `bkill`이 비동기라 확인까지 여유를 둠 |
@@ -441,35 +440,20 @@ mgr.remove_jobset(js)                  # jobset 자체 삭제 (전원 terminal�
 > - **`"actual"`** — 수락 확인만으론 상태를 안 바꾸고, **실제 LSF 상태**
 >   (`verify=True` 또는 폴링)로만 EXIT를 반영. 정확하지만 반영이 한 박자 늦습니다.
 
-### 5.4 MultiCluster kill — 자동 분류 (`cluster_envpaths`)
+### 5.4 MultiCluster — forward된 job
 
-forward된 job은 로컬 `bkill`로 안 죽고 그 클러스터 env를 source해야 죽는 환경에서,
-**매니저 생성 시** `{클러스터명: cshrc경로}` 매핑 하나만 주면 이후 모든 kill을
-라이브러리가 알아서 처리합니다(앱 환경 속성이라 호출마다 주지 않습니다):
+`kill`은 항상 **plain `bkill`** 한 경로입니다. cluster별로 env를 `source`한
+bkill로 나눠 죽이던 자동 분류(`cluster_envpaths`)는 **삭제됐습니다** — 그에 딸린
+"bkill 직전 cluster 1회 조회"도 함께 사라졌습니다.
 
-```python
-mgr = LsfJobManager(collect_clusters=True,
-                    cluster_envpaths={"cluster_a": "/env/a.cshrc",
-                                      "cluster_b": "/env/b.cshrc"})
-mgr.kill(js)              # 이후 kill/kill_jobs 전부 자동 분류
-```
+forward된 job이 로컬 `bkill`로 안 죽는 사이트라면, 그 job은 **잔존으로 정직하게
+보고**됩니다 — `KillReport.still_alive`에 잡히고 레코드는 on-LSF로 남아 폴링이
+계속 봅니다(조용히 죽은 척하지 않습니다). 그런 환경에서는 앱/실행 환경 쪽에서
+올바른 클러스터 컨텍스트를 잡아 주세요.
 
-동작:
-1. 대상 중 cluster 미상(제출 직후 — 첫 폴링 전)이 있으면 **bkill 전에** 그 id들만
-   **최소 포맷(`jobid source_cluster forward_cluster`)으로 1회 조회**해 채웁니다
-   (jobset 컨텍스트 유무와 무관하게 동일).
-2. 관측 cluster(forward 우선, 없으면 source)별로 그 env를 `source`한
-   bkill(`tcsh -c "source ... && exec bkill ..."`)로 나눠 실행합니다.
-3. 그래도 미상이면 **기본 env**로 죽입니다 — 기본 env는 매핑의 와일드카드 키 `"*"`,
-   없으면 env source 없이 실행합니다(로그에 `env=None` — 앱 프로세스의 환경을
-   그대로 씁니다).
-
-**제출 직후 즉시 kill해도 cluster를 알고 죽는다**는 게 핵심입니다.
-cluster 관측은 `collect_clusters=True`가 전제입니다.
-
-> GUI 프로세스 환경은 대화형 셸에서 rc를 source한 환경과 다를 수 있습니다.
-> 그 경우 `{"*": cshrc}`로 기본 env를 명시하세요. 분류 없이 **전부 한 env로**
-> 돌리려면 `cluster_envpaths={"*": "<cshrc>"}` 하나만 주면 됩니다.
+cluster **관측**은 그대로 있습니다 — `collect_clusters=True`면 폴링이
+`JobRecord.source_cluster`/`forward_cluster`를 채우므로 표에 보여 주거나
+직접 분기하는 데 쓸 수 있습니다.
 
 ### 5.5 조회 (동기 — 로컬 스냅샷, LSF 호출 없음)
 
@@ -690,7 +674,7 @@ mgr = LsfJobManager(config=LsfConfig(job_status_fetcher=fetch_status))
 | **시작** | `startTime` · `start_time` | ISO-8601 또는 unix epoch(10자리 초 / 13자리 ms) | `start_time` |
 | **종료** | `finishTime` · `finish_time` · `endTime` · `end_time` | 위와 같음 | `finish_time` — **종료 상태에서만** 채움 |
 | **종료코드** | `exitStatus` · `exitCode` · `exit_code` · `exit_status` | 정수 또는 정수 문자열 | `exit_code` (없으면 `None`) |
-| **클러스터** | `cluster` · `clusterName` · `cluster_name`, 없으면 `dataId` 접미사 | 문자열 | `source_cluster` — MC 분류 kill(§5.4)이 씀 |
+| **클러스터** | `cluster` · `clusterName` · `cluster_name`, 없으면 `dataId` 접미사 | 문자열 | `source_cluster` — 표시·앱 분기용(§5.4) |
 | **경과시간** | — (payload에 없음) | — | `run_time_s`를 시각 두 개로 **유도** |
 
 **"값 없음" 표기**는 전부 같게 취급합니다 (대소문자 무시):
@@ -850,42 +834,6 @@ timeout 없는 콜백(`requests.get(...)`에 `timeout=` 누락) 하나가 폴링
 jobset을 여러 개 돌려도 같은 원장을 공유하므로 응답을 여러 벌 들고 있지 않습니다.
 반대로 `LsfJobManager`를 여러 개 만들면 원장도 콜백도 그만큼 늘어납니다 — 앱에서
 manager는 하나만 두세요.
-
-#### MC 분류 kill은 어떻게 되나
-
-`cluster_envpaths`(§5.4)를 쓰면 kill 직전에 대상의 클러스터를 알아내 그 env를
-`source`한 `bkill`로 나눠 죽입니다. 콜백 조회원에서도 **동작이 같고, bjobs는
-안 나갑니다** — 같은 원장에서 답합니다.
-
-```
-kill(targets)
-  │
-  ├─① store 레코드에 cluster가 이미 있으면 그걸 쓴다 (폴링이 채워 둔 값)
-  │
-  ├─② 모르는 target만 조회 — bjobs 경로면 최소 포맷 bjobs,
-  │   콜백 경로면 **원장 조회**(subprocess 0회)
-  │
-  └─③ 그래도 미상이면 기본 env(`"*"` 매핑, 없으면 plain bkill)로 진행
-      — 조회 실패로 kill이 안 나가는 일은 없다
-```
-
-원장에서는 `dataId`의 클러스터 접미사(또는 `cluster` 필드)가 그대로 답이 됩니다.
-`id`와 `id[idx]` 양쪽 표기로 돌려주므로 array element kill도 분류됩니다.
-
-```python
-cmd.bjobs_clusters_by_ids([1001, 1002, 1003, 9999])
-# → {"1001": "cluster1", "1002": "cluster2",
-#    "1003": "cluster2", "1003[2]": "cluster2"}     # 9999는 원장에 없어 빠짐
-```
-
-두 가지가 bjobs 경로와 다릅니다.
-
-- **`source_cluster` 하나만 채워집니다.** bjobs는 `source_cluster`/
-  `forward_cluster`를 따로 주고 forward를 우선하는데, payload에는 클러스터가
-  하나뿐입니다. 분류 로직은 `forward or source`라 그 하나가 그대로 쓰입니다.
-- **캐시를 씁니다**(kill verify와 달리 `fresh`가 아닙니다). 클러스터 배정은
-  job 수명 동안 안 바뀌므로 최신값일 필요가 없습니다. 대신 **아직 원장에 안
-  올라온 job**(제출 직후)은 미상 → 기본 env 폴백입니다.
 
 #### 실패와 LOST — 두 가지 유예
 

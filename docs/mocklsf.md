@@ -112,8 +112,8 @@ bjobs -a -json -o "jobid stat exec_host"
 ### MultiCluster (job forwarding) 흉내
 
 `MOCKLSF_FORWARD_CLUSTERS`를 주면 제출된 job 중 일부(`MOCKLSF_FORWARD_RATE`)가
-그 원격 클러스터로 **forward**된 것처럼 동작한다. 실제 LSF MC 환경과 lsfmgr 의
-MC 분류 kill(`cluster_envpaths`)을 실제 LSF 없이 재현·검증할 수 있다.
+그 원격 클러스터로 **forward**된 것처럼 동작한다. 실제 LSF MC 환경에서
+lsfmgr가 어떻게 보이는지를 LSF 없이 재현할 수 있다.
 
 ```bash
 export MOCKLSF_FORWARD_CLUSTERS="cluster_b,cluster_c"
@@ -123,40 +123,19 @@ export MOCKLSF_FORWARD_RATE=1.0          # 전부 forward (데모용)
 - **bjobs**: `bjobs -o "source_cluster forward_cluster"` 에 값이 나온다 —
   forward 된 job 은 `forward_cluster` 가 그 클러스터, 아니면 `-`.
   `source_cluster` 는 로컬 클러스터명(로컬 job 도 채워짐 → **판별은
-  `forward_cluster` 로**).
-- **bkill (핵심)**: forward 된 job 은 **그냥 `bkill` 로는 안 죽는다**
+  `forward_cluster` 로**). lsfmgr는 `collect_clusters=True` 일 때 이 값을
+  `JobRecord.source_cluster`/`forward_cluster` 로 채운다.
+- **bkill**: forward 된 job 은 **그냥 `bkill` 로는 안 죽는다**
   (`... forwarded to cluster <X> — source its cluster env to kill`, exit 255).
   그 클러스터의 env(cshrc)를 source 해야 죽는다 — 실제 MC 의 문제 그대로다.
   각 클러스터 cshrc 는 `$MOCKLSF_HOME/clusterenv/<cluster>.cshrc` 에 자동
-  생성되며(`setenv MOCKLSF_CLUSTER <cluster>`), lsfmgr 의 `cluster_envpaths`
-  매핑으로 넘긴다 — 분류는 라이브러리가 한다:
-  ```python
-  from mocklsf import config as mockcfg
-  mgr = LsfJobManager(collect_clusters=True, cluster_envpaths={
-      c: mockcfg.cluster_env_path(c) for c in ("cluster_b", "cluster_c")})
-  mgr.kill(js)                      # 분류는 라이브러리가 한다
-  ```
-  lsfmgr 는 이때 `tcsh -c "source <cshrc> && set noglob && exec bkill <ids>"`
-  를 실행하고, 그 컨텍스트에서 mocklsf bkill 이 forward job 에 닿아 죽인다.
+  생성된다(`setenv MOCKLSF_CLUSTER <cluster>`).
 
-### 완료 job purge (MBD_CLEAN_PERIOD 흉내)
-
-실제 LSF 처럼 완료(DONE/EXIT) job 은 `MOCKLSF_CLEAN_PERIOD` 동안만 `bjobs -a` 에
-보이고, 그 후엔 **bjobs 에서 purge** 되어 `bjobs <id>` 가 `No matching job found`
-(exit 255)를 낸다. `bhist <id>` 는 계속 이력을 조회할 수 있다.
-
-lsfmgr 는 이 상황을 **LOST 확정**(FR-4.3)으로 처리한다 — bjobs 에서 사라진 job 의
-최종 상태는 복원하지 않는다(`bhist` CLI 는 mocklsf 쪽에만 있고 lsfmgr 는 호출하지
-않는다). 단 **연속 `lost_after_missing_polls`회**(기본 3) 미발견이어야 확정되므로,
-`MOCKLSF_CLEAN_PERIOD` 를 작게 주고 몇 사이클 기다리면 실제 LSF 없이 이 경로를
-재현·검증할 수 있다.
-
-## 테스트
-
-```bash
-python3 -m pytest tests/test_mocklsf.py -v      # mocklsf 단위 테스트
-python3 -m pytest tests/ -q                     # lsfmgr 포함 전체
-```
+  > **lsfmgr는 이 문제를 풀지 않는다** — v10.6에서 MC 분류 kill
+  > (`cluster_envpaths`, env를 source한 bkill, bkill 직전 cluster 조회)이
+  > 삭제됐다. kill은 항상 plain bkill 한 경로이고, 안 죽은 job은
+  > `KillReport.still_alive` 로 정직하게 보고된다(조용히 죽은 척하지 않는다).
+  > 그런 사이트라면 앱/실행 환경 쪽에서 올바른 클러스터 컨텍스트를 잡아야 한다.
 
 ## 상태 초기화
 

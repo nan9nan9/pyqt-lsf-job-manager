@@ -413,31 +413,6 @@ class InternalStatusSource:
                     out.append(entry.status)
         return out, set()
 
-    def clusters_by_ids(self, job_ids: Sequence[int]) -> Dict[str, str]:
-        """bjobs_clusters_by_ids와 동일 계약 — target 문자열 → cluster.
-
-        조회 실패는 빈 dict — 미상은 caller가 기본 env로 처리하므로 kill
-        자체는 반드시 나간다(bjobs 경로와 같은 관대 처리).
-        """
-        ids = [int(i) for i in job_ids]
-        if not ids:
-            return {}
-        self._register_interest(ids)
-        if not self._ensure_fetched(fresh=False):
-            return {}
-        out: Dict[str, str] = {}
-        with self._cv:
-            for job_id in ids:
-                for entry in self._ledger.get(job_id, {}).values():
-                    st = entry.status
-                    cluster = st.forward_cluster or st.source_cluster
-                    if not cluster:
-                        continue
-                    out[str(job_id)] = cluster            # parent id 표기
-                    if st.array_index is not None:
-                        out[f"{job_id}[{st.array_index}]"] = cluster
-        return out
-
     def invalidate(self) -> None:
         """다음 조회가 반드시 콜백을 돌게 한다 — 원장은 그대로 둔다
         (누적 데이터가 아니라 '언제 마지막으로 받았나'만 무효화)."""

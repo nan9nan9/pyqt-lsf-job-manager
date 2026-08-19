@@ -8,7 +8,7 @@
   - 다중 JobSet 트리 + 요약 실시간 갱신 + job 테이블 증분 upsert (README §5)
   - job 추가는 **add_jobs**: 기존 jobset 에 직접 추가
   - 실패 재실행: **replace_jobs** 로 교체 후 `submit(only=…)` 로 그것만 재제출
-  - kill: 전체(verify, **MC-aware** — 생성자 cluster_envpaths 로 분류 kill) /
+  - kill: 전체(verify) /
     PEND만 / 선택 행만 (job_id chunk 단일 경로)
   - JobSet handler: RUN 중 폴링마다 job 출력 파싱 + 종료 시 최종 1회
   - post_process: 전원 terminal 도달 시 worker 에서 1회 종합 집계
@@ -42,7 +42,7 @@ from qtpy.QtWidgets import (
 from lsfmgr import JobState, LsfmgrError
 from lsfmgr.command import default_runner
 from common import (
-    WRAPPERS, cluster_env_path, configure_mocklsf, install_logging,
+    WRAPPERS, configure_mocklsf, install_logging,
     make_manager, maybe_autoquit, wrapper,
 )
 
@@ -234,7 +234,7 @@ class Dashboard(QWidget):
         self.tree.currentItemChanged.connect(lambda *_: self._reload_jobs())
 
         ctrl = QHBoxLayout()
-        for text, fn in [("Kill+verify (MC-aware)", self.kill),
+        for text, fn in [("Kill+verify", self.kill),
                          ("PEND만 Kill", self.kill_pend),
                          ("선택 행 Kill", self.kill_selected),
                          ("Cancel", self.cancel),
@@ -399,11 +399,9 @@ class Dashboard(QWidget):
     # kill / 제어
     # ------------------------------------------------------------------
     def kill(self):
-        """전체 kill (verify) — MC 자동 분류 kill.
-        매핑(cluster_envpaths)은 매니저 생성 시 준다. 제출 직후처럼 cluster
-        미상이어도 라이브러리가 bkill 직전에 미상 대상만 조회해 채운 뒤,
-        forward job 은 그 클러스터 env 를 source 한 bkill 로, 나머지는 일반
-        bkill 로 나눠 죽인다."""
+        """전체 kill (verify) — plain bkill 한 경로.
+        forward된 job이 로컬 bkill로 안 죽는 사이트면 그 job은 잔존
+        (KillReport.still_alive)으로 정직하게 보고된다."""
         js = self._handle()
         if js is None:
             return
@@ -620,10 +618,8 @@ def main():
     install_logging()
     win = Dashboard()
     # collect_clusters=True — MC forward 흉내 시 forward_cluster 폴링 수집
-    # cluster_envpaths — MC 분류 kill 매핑(앱 환경 속성이라 생성자에서 한 번)
     win.bind_manager(make_manager(
         workers=8, max_retry=3, collect_clusters=True,
-        cluster_envpaths={c: cluster_env_path(c) for c in FORWARD_CLUSTERS},
         runner=make_logging_runner(win.bus)))
     win.resize(1180, 800)
     win.show()

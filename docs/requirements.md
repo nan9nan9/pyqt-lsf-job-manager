@@ -323,7 +323,7 @@ JobSetStore(ABC) ── InMemoryStore
   재시도는 QTimer 스케줄(sleep 없음). **비정상 종료만 재시도**한다(파싱 실패·timeout은
   중복 제출 위험이라 재시도 안 함). 재제출 리셋 시 이전 실행 흔적 소거.
 - **FR-3 Kill**: job_id chunked `bkill` **단일 경로**, 부분 kill(`only_state`)·
-  선택 kill(`kill_jobs`). MultiCluster forward는 **생성자 옵션** `cluster_envpaths`
+  선택 kill(`kill_jobs`). (v10.6: MC 분류 kill 삭제 — kill은 항상 plain bkill)
   (`{클러스터명: cshrc경로}`, `"*"`가 기본 env)로 클러스터별 env를 source한 bkill.
   제출 우선권(**FR-3.7**): kill이 **겨냥한 job에만, 항상** 걸린다 — 전체 kill은
   jobset 전체, 선택 kill(`kill_jobs`)은 선택한 key만(대상 아닌 job의 제출은 계속).

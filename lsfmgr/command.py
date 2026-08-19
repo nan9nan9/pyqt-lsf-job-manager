@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import (
-    Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple,
+    Callable, Iterator, List, Optional, Sequence, Set, Tuple,
 )
 
 from .config import DEFAULT_BJOBS_PATH, LsfConfig, cmd_tokens
@@ -296,10 +296,6 @@ class LsfCommand:
         # 동시에 시도할 수 있다 — 무락 증가면 같은 필드 오류에 이중 강등돼
         # FULL을 건너뛰고 CORE로 떨어진다. 사용한 인덱스 기준 CAS로 1단만.
         self._bjobs_fmt_lock = threading.Lock()
-        # MC 분류 조회(cluster 필드) 지원 여부 — 필드 오류를 한 번 보면
-        # 영구히 끈다. 안 끄면 미지원 사이트에서 매 kill마다 전 chunk가
-        # 조용히 실패하며 bjobs를 헛돌린다(결과는 어차피 기본 env 폴백).
-        self._cluster_fmt_ok = True
         # --- 조회원 선택: 앱 콜백 / bjobs subprocess ---
         # 갈림은 **job_status_fetcher 하나뿐**이다 — 주면 콜백, 안 주면 bjobs.
         # 위쪽(monitor/killer)은 bjobs_by_ids 계약만 보므로 어느 쪽이든 flow가
@@ -353,7 +349,7 @@ class LsfCommand:
         return sum(len(t) + 1 for t in cmd_tokens(path))
 
     def _run(self, argv: Sequence[str], timeout: float,
-             cwd: Optional[str] = None, envpath: str = "") -> CommandResult:
+             cwd: Optional[str] = None) -> CommandResult:
         """**모든** LSF subprocess(wrapper 제출/bjobs/bkill)가
         지나는 단일 실행 funnel. 여기서 DEBUG 로깅을 한다 — 실제로 어떤
         명령이 어느 스레드에서 어떤 cwd로 실행되고 얼마나 걸려 무슨 결과가
@@ -367,16 +363,11 @@ class LsfCommand:
 
         활성화: `logging.getLogger("lsfmgr.command").setLevel(logging.DEBUG)`
         (또는 상위 "lsfmgr")로 레벨을 낮추고 핸들러를 붙이면 이 로그가 나온다.
-        cwd는 제출 경로만 넘긴다(bjobs/bkill은 None → 부모 cwd).
-        envpath는 MC 분류 kill에서 source한 cluster env 파일 — 어느 클러스터
-        env로 나간 bkill인지가 로그만 봐도 드러나야 오진을 막는다. 빈 값이면
-        `env=None`(cwd=None과 같은 표기 — 지정한 env가 없다는 뜻)이고, 그때는
-        env source 없이 실행되어 앱 프로세스의 환경을 그대로 물려받는다."""
+        cwd는 제출 경로만 넘긴다(bjobs/bkill은 None → 부모 cwd)."""
         tname = threading.current_thread().name
         prog = argv[0].rsplit("/", 1)[-1] if argv else "?"   # 실행 프로그램 그대로
-        log.debug("[%s] exec %s: %s (env=%s, cwd=%s, timeout=%.1fs)",
-                  tname, prog, " ".join(map(str, argv)),
-                  envpath or None, cwd, timeout)
+        log.debug("[%s] exec %s: %s (cwd=%s, timeout=%.1fs)",
+                  tname, prog, " ".join(map(str, argv)), cwd, timeout)
         t0 = time.monotonic()
         try:
             res = self.runner(argv, timeout, cwd)
@@ -543,57 +534,6 @@ class LsfCommand:
         (-noheader -o <fmt>) 여유분."""
         return self._prog_len(self.config.bjobs_path) + 40
 
-    #: kill 직전 cluster 분류 전용 최소 포맷 — 상태/시간 필드는 묻지 않는다
-    #: (필요한 것만 물어야 필드 하나가 조회를 통째로 비게 만드는 사고를 안
-    #: 만든다. 분류에 필요한 건 id와 cluster뿐이다.)
-    _BJOBS_CLUSTER_FMT = f"jobid source_cluster forward_cluster {_DELIM}"
-
-    def bjobs_clusters_by_ids(self, job_ids: Sequence[int]) -> Dict[str, str]:
-        """대상 id의 cluster만 chunked 조회 — MC 분류 kill 직전용.
-
-        반환: target 문자열("id" 및 "id[idx]" 양쪽) → cluster
-        (forward 우선, 없으면 source). 조회 실패 chunk는 그냥 빠진다 —
-        미상은 caller가 기본 env로 처리하므로 kill 자체는 반드시 나간다.
-        cluster 필드 미지원 사이트(필드 오류)는 1회 감지 후 영구 스킵."""
-        if self._internal is not None:
-            # internal payload의 cluster를 그대로 쓴다 — 같은 '미상은 기본
-            # env 폴백' 계약이라 kill 경로는 무변경.
-            return self._internal.clusters_by_ids(job_ids)
-        out: Dict[str, str] = {}
-        if not self._cluster_fmt_ok:
-            return out
-        ids = [str(i) for i in job_ids]
-
-        def run_chunk(chunk: List[str]) -> None:
-            argv = cmd_tokens(self.config.bjobs_path) + [
-                "-noheader", "-o", self._BJOBS_CLUSTER_FMT] + chunk
-            try:
-                res = self._run_query(argv)
-            except LsfCommandError as e:
-                if _looks_like_field_error(e.stderr or ""):
-                    with self._bjobs_fmt_lock:       # 경고 1회 보장
-                        if self._cluster_fmt_ok:
-                            self._cluster_fmt_ok = False
-                            log.warning(
-                                "bjobs cluster 필드 미지원 — MC 분류 조회를 "
-                                "끕니다(이후 kill은 기본 env 폴백). 원인: %s",
-                                (e.stderr or str(e)).strip()[:200])
-                raise                                # chunk 실패 계상은 골격이
-            for line in res.stdout.splitlines():
-                parts = [p.strip() for p in line.strip().split(";")]
-                if len(parts) != 3:
-                    continue
-                m = _ARRAY_ID_RE.match(parts[0])
-                cluster = _clean_field(parts[2]) or _clean_field(parts[1])
-                if m is None or cluster is None:
-                    continue
-                out[parts[0]] = cluster          # "id" 또는 "id[idx]" 원문
-                out[m.group(1)] = cluster        # parent id 표기로도 매칭
-
-        self._query_chunks_isolated(ids, self._bjobs_base_len(),
-                                    run_chunk, "bjobs(cluster)")
-        return out
-
     def _query_chunks_isolated(self, ids: List[str], base: int,
                                run_chunk: Callable[[List[str]], None],
                                what: str) -> Set[int]:
@@ -715,27 +655,18 @@ class LsfCommand:
     # bkill — id chunk 단독 (v10: group/name/array tier 삭제 — 부착물이
     # 더 이상 생성되지 않으므로 전략 자체가 성립하지 않는다)
     # ------------------------------------------------------------------
-    def _bkill_argv(self, chunk: Sequence[str], envpath: str) -> List[str]:
-        """bkill 실행 argv. envpath가 있으면 그 LSF env를 source한 뒤 bkill —
-        MC forward job은 로컬 bkill로 안 죽고 그 클러스터 env를 source해야
-        죽는 환경을 지원한다. `set noglob`을 bkill 직전에 걸어 array target
-        ("1000[2]"/"1000[1-3]")의 대괄호가 tcsh 파일 globbing으로 뭉개지는 것을
-        막는다(profile source는 globbing 정상 — set noglob이 그 뒤라 안전)."""
-        if not envpath:
-            return cmd_tokens(self.config.bkill_path) + list(chunk)
-        inner = "source {} && set noglob && exec bkill {}".format(
-            envpath, " ".join(chunk))
-        return ["tcsh", "-c", inner]
+    def _bkill_argv(self, chunk: Sequence[str]) -> List[str]:
+        """bkill 실행 argv — shell 미경유라 array target("1000[2]")의 대괄호가
+        globbing으로 뭉개질 일이 없다.
+        (v10.6: MC 분류 kill 삭제 — cluster env를 source한 tcsh 경로가 사라져
+        shell 경유가 없어졌다. 되살릴 때는 set noglob을 다시 고려할 것.)"""
+        return cmd_tokens(self.config.bkill_path) + list(chunk)
 
-    def _bkill_base_len(self, envpath: str) -> int:
-        if not envpath:
-            return self._prog_len(self.config.bkill_path) + 10
-        return len("tcsh -c source  && set noglob && exec bkill ") \
-            + len(envpath) + 10
+    def _bkill_base_len(self) -> int:
+        return self._prog_len(self.config.bkill_path) + 10
 
     def bkill_targets_confirm(self, targets: Sequence[str],
-                              on_progress: Optional[Callable[[int], None]] = None,
-                              envpath: str = ""
+                              on_progress: Optional[Callable[[int], None]] = None
                               ) -> Tuple[Set[str], int]:
         """chunked bkill + 출력 확인 파싱.
 
@@ -743,18 +674,16 @@ class LsfCommand:
         '해소'는 더 이상 kill이 필요 없다고 확인된 것 — 'Job <id> is being
         terminated'(신호 수락) 또는 already-finished/no-matching(이미 없음).
         해소 안 된 target(일시 장애 등)은 호출자가 재시도한다.
-        envpath 지정 시 그 LSF env를 source한 bkill (MC forward job).
         on_progress(누적_처리_target수)는 chunk 완료마다 호출된다(진행 통지)."""
         resolved: Set[str] = set()
         calls = 0
         processed = 0
-        base = self._bkill_base_len(envpath)
+        base = self._bkill_base_len()
         for chunk in chunk_args(list(targets), self.config.chunk_size,
                                 self.config.arg_max, base):
-            argv = self._bkill_argv(chunk, envpath)
+            argv = self._bkill_argv(chunk)
             try:
-                res = self._run(argv, self.config.kill_timeout_s,
-                                envpath=envpath)
+                res = self._run(argv, self.config.kill_timeout_s)
             except subprocess.TimeoutExpired:
                 # 이 chunk 전부 미확인 — 재시도 대상으로 남긴다
                 log.warning("bkill timeout — 재시도 대상: %s", chunk)

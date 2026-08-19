@@ -1,6 +1,6 @@
 """백그라운드 kill 진행 조회 — is_killing / kill_state (pull 스냅샷).
 
-대량 chunked kill(특히 MC envpath는 chunk마다 env source, verify는 재조회
+대량 chunked kill(chunk마다 bkill 1회, verify는 재조회
 루프)도 시간이 걸리니, submit과 대칭으로 진행을 아무 때나 pull로 조회한다.
 """
 from __future__ import annotations
@@ -63,13 +63,12 @@ def test_kill_snapshot_none_when_idle(qtbot, manager, fake_lsf):
 
 
 def test_kill_snapshot_progresses(qtbot, tmp_path):
-    """chunk가 진행되며 done이 단조 증가하는지 (envpath+chunk 경로)."""
+    """chunk가 진행되며 done이 단조 증가하는지 (chunk 경로)."""
     fake = FakeLsf()
     gate = threading.Event(); gate.set()       # 붙잡지 않음 — 자연 완료
     cfg = LsfConfig(rate_limit_per_s=None, chunk_size=3)
     mgr = LsfJobManager(store=InMemoryStore(), config=cfg, runner=fake,
-                        collect_clusters=True,
-                        cluster_envpaths={"*": "/lsf/busan/cshrc.lsf"})
+                        collect_clusters=True)
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             js = submit_cmds(mgr, [f"echo {i}" for i in range(12)], auto_poll=False)
@@ -79,7 +78,7 @@ def test_kill_snapshot_progresses(qtbot, tmp_path):
         mgr.querier.query(js.id)
         seen = []
         with qtbot.waitSignal(mgr.kill_finished, timeout=10000):
-            mgr.kill(js)                     # id-chunk sourced
+            mgr.kill(js)                     # id-chunk
             for _ in range(50):
                 s = js.kill_state
                 if s is not None:

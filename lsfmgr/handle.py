@@ -125,7 +125,7 @@ class JobSet(QObject):
     @property
     def is_killing(self) -> bool:
         """[sync] 이 JobSet에 진행 중인 kill이 있는지. 대량 chunked kill(특히
-        MC envpath/verify)을 백그라운드로 돌려놓고 진행 dialog를 닫은 뒤에도
+        verify)을 백그라운드로 돌려놓고 진행 dialog를 닫은 뒤에도
         아직 kill 중인지 아무 때나 확인한다."""
         self._check_open()
         return self._manager.is_killing(self._jobset_id)

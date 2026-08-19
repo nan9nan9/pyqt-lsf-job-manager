@@ -117,7 +117,7 @@ def configure_mocklsf(*, pend=None, run=None, submit_delay=None,
 
 def cluster_env_path(cluster: str) -> str:
     """forward 클러스터 <cluster>의 cshrc(env) 경로 — lsfmgr kill의
-    cluster_envpaths 값으로 넘긴다. mocklsf가 첫 DB 접근 시 자동
+    mocklsf의 클러스터 컨텍스트 표식. mocklsf가 첫 DB 접근 시 자동
     생성한다(홈 보장 후 반환)."""
     from mocklsf import config as mockcfg
     mockcfg.ensure_home()                 # clusterenv/<cluster>.cshrc 생성 보장

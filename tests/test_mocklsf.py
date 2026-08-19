@@ -447,7 +447,8 @@ def test_mc_off_no_cluster_fields():
 
 def test_mc_bkill_needs_cluster_env():
     """forward 된 job 은 로컬 bkill 로 안 죽고(rc 255), 그 클러스터 컨텍스트
-    (env source 흉내)에서만 죽는다 — 실제 MC 문제 + lsfmgr envpath 해법 재현."""
+    (env source 흉내)에서만 죽는다 — 실제 MC 문제 재현. lsfmgr는 이 문제를
+    풀지 않는다(v10.6 MC 분류 kill 삭제) — 그런 job은 잔존으로 보고된다."""
     import importlib
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["MOCKLSF_FORWARD_CLUSTERS"] = "cluster_b"
@@ -471,7 +472,7 @@ def test_mc_bkill_needs_cluster_env():
             assert rc == 255
             assert dbmod.Database().all_jobs()[0].stat == "RUN"
 
-            # cshrc(env 파일)가 생성돼 있어야 (lsfmgr envpath 로 넘길 값)
+            # cshrc(env 파일) 생성 확인 — mocklsf의 클러스터 컨텍스트 표식
             assert os.path.exists(config.cluster_env_path("cluster_b"))
 
             # 2) forward 클러스터 컨텍스트(env source 흉내) → 죽는다

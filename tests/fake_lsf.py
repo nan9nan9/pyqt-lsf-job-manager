@@ -267,16 +267,7 @@ class FakeLsf:
     # ------------------------------------------------------------------
     # bkill
     # ------------------------------------------------------------------
-    def _do_tcsh(self, args: List[str]) -> CommandResult:
-        """`tcsh -c "source <envpath> && exec bkill <ids>"` 흉내 — env를 source한
-        상태의 bkill로 취급(forward job도 죽음), _do_bkill(sourced=True)로 위임."""
-        if len(args) >= 2 and args[0] == "-c":
-            m = re.search(r"\bbkill\s+(.+)$", args[1])
-            if m:
-                return self._do_bkill(m.group(1).split(), sourced=True)
-        return CommandResult(0, "", "")
-
-    def _do_bkill(self, args: List[str], sourced: bool = False) -> CommandResult:
+    def _do_bkill(self, args: List[str]) -> CommandResult:
         if self.fail_next_bkill > 0:
             self.fail_next_bkill -= 1
             return CommandResult(255, "", "LSF error: cannot reach mbatchd\n")
@@ -286,9 +277,10 @@ class FakeLsf:
         if "-stat" in opts:
             targets = [j for j in targets
                        if j.stat.lower() == opts["-stat"].lower()]
-        # MC forward job은 로컬 bkill(비-sourced)로는 안 죽는 환경 흉내 —
-        # env를 source한 bkill(sourced=True)만 죽인다.
-        if self.forward_needs_env and not sourced:
+        # MC forward job은 로컬 bkill로는 안 죽는 환경 흉내 — lsfmgr는 이제
+        # env source kill을 하지 않으므로(v10.6 MC 분류 kill 삭제) 이 job은
+        # 잔존으로 정직하게 보고돼야 한다.
+        if self.forward_needs_env:
             targets = [j for j in targets if not j.forward_cluster]
         # array "id[m-n]" 표현 처리
         for a in rest:

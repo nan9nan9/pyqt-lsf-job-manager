@@ -53,7 +53,7 @@ class SubmitProgress:
 class KillProgress:
     """진행 중 kill의 실시간 스냅샷 — 아무 때나 조회 가능(pull).
 
-    kill_progress Signal(push)의 조회 버전. 대량 chunked kill(특히 MC envpath는
+    kill_progress Signal(push)의 조회 버전. 대량 chunked kill(verify는 재조회
     chunk마다 env source, verify는 재조회 루프)을 백그라운드로 돌려놓고 진행
     dialog를 닫은 뒤 나중에 다시 그릴 때 쓴다. 끝나면 None(핸들 kill_state가
     None), 최종 결과는 kill_finished(KillReport)로 본다.

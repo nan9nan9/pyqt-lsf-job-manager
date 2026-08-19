@@ -34,8 +34,8 @@ def test_optimistic_verify_reports_survivor(qtbot, manager, fake_lsf, monkeypatc
     # (도달 불가 exec host 등) — bkill 직후 stat을 RUN으로 되돌려 흉내낸다.
     real_bkill = fake_lsf._do_bkill
 
-    def survive_bkill(args, sourced=False):
-        res = real_bkill(args, sourced=sourced)
+    def survive_bkill(args):
+        res = real_bkill(args)
         for j in fake_lsf.jobs.values():
             if j.job_id == jid:
                 j.stat = "RUN"

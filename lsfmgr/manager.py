@@ -437,7 +437,7 @@ class LsfJobManager(QObject):
         verify 미지정 시 verify_kill 옵션(②) 적용.
 
         MC 분류 kill(cluster별 env source)은 생성자 옵션
-        `LsfJobManager(cluster_envpaths={클러스터명: cshrc경로})`로 켠다 —
+        (v10.6: MC 분류 kill 삭제 — kill은 항상 plain bkill이다)
         앱 환경 속성이라 호출마다 주지 않는다.
 
         **kill은 겨냥한 job의 제출에 항상 우선권을 갖는다** — 그 job이 제출

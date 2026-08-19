@@ -42,7 +42,7 @@ def test_no_bjobs_format_mentions_exec_cwd():
     """강등 전 단계(FULL+MC/FULL/CORE) 포맷 정의 자체에 exec_cwd가 없다 —
     MC 사이트에서만 쓰이는 첫 단계까지 포함해 고정한다."""
     for fmt in (LsfCommand._BJOBS_CORE_FMT, LsfCommand._BJOBS_FULL_FMT,
-                LsfCommand._BJOBS_FULL_MC_FMT, LsfCommand._BJOBS_CLUSTER_FMT):
+                LsfCommand._BJOBS_FULL_MC_FMT):
         assert "exec_cwd" not in fmt, fmt
 
 
