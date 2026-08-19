@@ -75,7 +75,7 @@ class LsfJobManager(QObject):
     submit_started = Signal(str)               # jobset_id (착수 or born-cancelled)
     pre_submit_started = Signal(str)                # jobset_id — pre_submit 게이트 시작
     pre_submit_finished = Signal(str, bool)         # jobset_id, ok — 게이트 종료(True=통과)
-    # jobset의 전 job이 terminal(DONE/EXIT/SUBMIT_FAILED/LOST)에 도달한 순간
+    # jobset의 전 job이 terminal(is_terminal)에 도달한 순간
     # 1회. post_process 등록 여부와 **무관**하게 LSF 상태만 보고 발화한다
     # (post_process를 걸었다면 이 신호 → post_processing_started 순서).
     # 재제출로 다시 활성이 되면 재무장돼 다음 완료에 또 발화한다.
@@ -263,7 +263,7 @@ class LsfJobManager(QObject):
         """[async→Signal] jobset 제출 — **유일한 제출 경로**.
 
         기본은 jobset의 **전 job** (재)제출이다: 대상이 전원 비활성(CREATED/
-        DONE/EXIT/SUBMIT_FAILED/LOST)이어야 하며 활성이 있으면 LsfmgrError —
+        is_terminal)이어야 하며 활성이 있으면 LsfmgrError —
         can_submit(js)로 선확인. 리셋 후 재실행되므로 같은 jobset/job_key가
         전이된다(핸들·테이블 연속).
 
@@ -297,7 +297,7 @@ class LsfJobManager(QObject):
         도달하면(폴링/query_once로 완료 감지) worker에서 1회 실행. only로
         일부만 제출했어도 판정 대상은 jobset 전체다 — 안 돌린 job이 아직
         RUN이면 그것까지 끝나야 발화한다. 인자는 최종
-        JobRecord 목록(성공/실패 혼재 가능 — DONE/EXIT/SUBMIT_FAILED/LOST 무관
+        JobRecord 목록(성공/실패 혼재 가능 — 어느 terminal이든 무관
         전원 terminal이면 실행). 반환값은 post_processing_finished로 전달.
         신호: post_processing_started → post_processing_finished(result).
         ※ pre_submit·post_process 콜백 모두 worker 스레드 실행 — GUI 접근 금지.
@@ -436,9 +436,9 @@ class LsfJobManager(QObject):
         """[async→Signal] JobSet kill — 결과는 kill_finished.
         verify 미지정 시 verify_kill 옵션(②) 적용.
 
-        MC 분류 kill(cluster별 env source)은 생성자 옵션
-        (v10.6: MC 분류 kill 삭제 — kill은 항상 plain bkill이다)
-        앱 환경 속성이라 호출마다 주지 않는다.
+        (v10.6: MC 분류 kill 삭제 — kill은 항상 plain bkill 한 경로다.
+        forward된 job이 로컬 bkill로 안 죽는 사이트면 그 job은 잔존
+        (KillReport.still_alive)으로 보고된다.)
 
         **kill은 겨냥한 job의 제출에 항상 우선권을 갖는다** — 그 job이 제출
         중이면 멈추고(미착수분 CANCELLED 확정), 이미 wrapper가 돌면 job_id

@@ -99,7 +99,8 @@ class JobSet(QObject):
 
     @property
     def is_inactive(self) -> bool:
-        """[sync, snapshot] 모든 job이 terminal(DONE/EXIT/SUBMIT_FAILED/LOST)이면
+        """[sync, snapshot] 모든 job이 terminal(is_terminal — DONE/EXIT/
+        SUBMIT_FAILED/CANCELLED/LOST)이면
         True — 더 진행할 것이 없는 상태. is_active의 반대.
         (job이 하나도 없는 빈 JobSet도 '진행 중인 것 없음'이라 inactive=True)"""
         return not self.is_active
@@ -140,7 +141,8 @@ class JobSet(QObject):
 
     @property
     def failed_jobs(self) -> List[JobRecord]:
-        """[sync, snapshot] 실패 상태(EXIT/SUBMIT_FAILED/LOST) job 목록.
+        """[sync, snapshot] 실패 상태(is_failed — EXIT/SUBMIT_FAILED/LOST) job 목록.
+        CANCELLED(의도한 중단)는 실패가 아니라 여기 안 든다.
 
         집합을 손으로 나열하지 않고 `is_failed`에서 파생한다 — 상태가 늘 때
         여기만 빠뜨리면 조용히 어긋난다(CANCELLED 추가 때 실제로 걸렸다).

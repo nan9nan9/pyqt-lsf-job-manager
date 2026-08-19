@@ -66,8 +66,7 @@ class JobsetQuerier:
         # read-modify-write(_pop_streaks → 계산 → _set_streaks)가 겹쳐
         # 유실/이중 증가한다 — '연속 N회 미발견' 유예(LOST 안전장치 ②)가
         # 흔들린다. 서로 다른 jobset의 병행 조회는 그대로 둔다.
-        # lock은 jobset 소멸 후에도 남지만 세션당 jobset 수만큼(수 바이트)이라
-        # 정리하지 않는다.
+        # jobset이 사라지면 forget()이 여기서도 지운다(장수 세션 누적 방지).
         self._query_locks: Dict[str, threading.Lock] = {}
 
     def _pop_streaks(self, jobset_id: str) -> Dict[str, int]:
@@ -92,6 +91,13 @@ class JobsetQuerier:
         with self._streak_lock:
             if job_keys is None:
                 self._missing_streak.pop(jobset_id, None)
+                # 직렬화 lock도 함께 버린다 — jobset이 사라졌으니 다시
+                # query()가 올 일이 없다. 안 지우면 create/remove를 반복하는
+                # 장수 세션에서 jobset 수만큼 무한정 쌓인다(실측 30회 → 30개).
+                # 지우는 순간 그 lock을 쥔 조회가 돌고 있어도 안전하다 —
+                # 그 스레드는 객체 참조를 이미 들고 있고, 새 query()는 어차피
+                # 존재 검증에서 JobSetNotFoundError로 끝난다.
+                self._query_locks.pop(jobset_id, None)
                 return
             streaks = self._missing_streak.get(jobset_id)
             if streaks is None:

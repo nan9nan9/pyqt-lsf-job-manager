@@ -320,10 +320,17 @@ class BulkSubmitter(QObject):
                     submit_time=None, run_time_s=None, start_time=None,
                     finish_time=None,
                     source_cluster=None, forward_cluster=None)
+            except _RECORD_GONE:
+                # 소실(동시 삭제)은 정상 경로 — traceback을 찍지 않는다.
+                # 5000건 제출 중 remove_jobset이 들어오면 job 수만큼
+                # traceback이 쏟아져 로그가 잠긴다(다른 소실 경로와 같은 규칙).
+                log.info("삭제된 job의 리셋 건너뜀: %s/%s", jobset_id, key)
+                self._count(ctx, cancelled=True)
+                continue
             except Exception:                # noqa: BLE001
-                # 키 소실(remove_jobs 경합)·store 장애 어느 쪽이든 이
-                # 키만 건너뛰고 나머지는 진행 — 여기서 전파되면 ctx가
-                # 미완(finished 미발행)으로 고착되어 jobset이 잠긴다
+                # store 장애 — 이 키만 건너뛰고 나머지는 진행. 여기서
+                # 전파되면 ctx가 미완(finished 미발행)으로 고착되어
+                # jobset이 잠긴다.
                 log.exception("재제출 리셋 실패 — 건너뜀: %s/%s",
                               jobset_id, key)
                 self._count(ctx, cancelled=True)

@@ -270,7 +270,7 @@ mgr.submit(js, pre_submit=prepare)
 제출한 jobset의 **전 job이 끝나면(전원 terminal)** 결과 수집·정리 등을 자동
 실행합니다. 완료는 폴링(`auto_poll` 기본) 또는 `mgr.query_once(js)`로 감지되며,
 감지 시점에 **단일 worker 스레드**에서 1회 실행됩니다. 성공/실패가 섞여도
-(EXIT/SUBMIT_FAILED/LOST 포함) **전원 terminal이면** 실행되므로, 콜백에서 결과를
+(EXIT/SUBMIT_FAILED/CANCELLED/LOST 포함) **전원 terminal이면** 실행되므로, 콜백에서 결과를
 분류하면 됩니다.
 
 ```python
@@ -292,7 +292,7 @@ mgr.submit(js, post_process=collect)           # pre_submit과 함께 써도 됨
 
 후처리 콜백 없이 **"이 jobset 다 끝났다"만** 알고 싶을 때 쓰는 신호입니다. LSF job
 상태만 보고 판정하므로 `post_process` 등록 여부와 **무관**하며, 전 job이 terminal
-(`DONE`/`EXIT`/`SUBMIT_FAILED`/`LOST`)이 된 순간 최종 요약과 함께 1회 발화합니다.
+(`DONE`/`EXIT`/`SUBMIT_FAILED`/`CANCELLED`/`LOST`)이 된 순간 최종 요약과 함께 1회 발화합니다.
 
 ```python
 js.jobset_finished.connect(                    # (summary dict)
@@ -462,7 +462,7 @@ js.summary                 # 요약 dict
 js.is_done                 # 전원 terminal?
 js.is_active               # 하나라도 안 끝난(non-terminal) job이 있으면 True
 js.is_inactive             # 전원 terminal이면 True (빈 JobSet도 True)
-js.failed_jobs             # SUBMIT_FAILED/EXIT/LOST 목록
+js.failed_jobs             # SUBMIT_FAILED/EXIT/LOST 목록 (CANCELLED 제외 — 실패 아님)
 js.jobs()                  # 전체 JobRecord
 js.jobs(states={JobState.RUN})
 js.id                      # jobset_id 문자열 (로그/저장용)

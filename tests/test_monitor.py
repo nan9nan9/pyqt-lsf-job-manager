@@ -188,3 +188,29 @@ def test_polling_shutdown_cleans_timers_in_thread(qtbot, manager, fake_lsf,
     gc.collect()
     err = capfd.readouterr().err
     assert "Timers cannot be stopped from another thread" not in err, err
+
+
+def test_querier_forget_drops_the_serialization_lock(qtbot, manager):
+    """jobset을 만들고 지우기를 반복하는 장수 세션에서 jobset별 직렬화 lock이
+    쌓이면 안 된다 — forget()이 스트릭만 지우고 lock은 두고 갔다."""
+    q = manager.querier
+    before = len(q._query_locks)
+    ids = []
+    for i in range(5):
+        js = manager.create_jobset([f"echo {i}"], job_keys=[f"k{i}"])
+        ids.append(js.id)
+        q.query(js.id)                       # lock 생성 지점
+    assert len(q._query_locks) == before + 5
+    for jsid in ids:
+        manager.remove_jobset(jsid, force=True)
+    assert len(q._query_locks) == before, q._query_locks
+
+
+def test_querier_forget_keeps_the_lock_for_partial_job_removal(qtbot, manager):
+    """job 몇 개만 지운 것은 jobset이 살아있다는 뜻 — lock을 버리면 안 된다."""
+    q = manager.querier
+    js = manager.create_jobset(["a", "b"], job_keys=["ka", "kb"])
+    q.query(js.id)
+    assert js.id in q._query_locks
+    manager.remove_jobs(js.id, ["ka"])
+    assert js.id in q._query_locks

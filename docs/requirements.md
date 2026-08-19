@@ -205,7 +205,7 @@ class JobState(Enum):
   아니지만 inactive).
 - 전이: `CREATED → SUBMITTING → PEND → RUN → DONE|EXIT`, 실패 시 `RETRY_WAIT`(n<N)
   또는 `SUBMIT_FAILED`(n==N), 조회 실패 없이 연속 미발견 → `LOST`.
-  cancel/kill(미제출) 시 `SUBMITTING/RETRY_WAIT → CREATED`.
+  cancel/kill(미제출) 시 `SUBMITTING/RETRY_WAIT → CANCELLED`(terminal, 실패 아님).
 - 전이는 Store 경유만(원자적 `transition`).
 - `JobRecord`/`JobSetRecord`: frozen dataclass.
 - **불변식: 요약 상태별 합계 == intended_count** (remove/편집도 유지).
@@ -387,7 +387,7 @@ JobSetStore(ABC) ── InMemoryStore
   submit_finished`. 게이트 통과 후에 rearm/AUTO-1 polling. 콜백은 worker 스레드
   실행(GUI 접근 금지, 멱등 권장).
 - **FR-10 post_process 후처리**: `mgr.submit(js, post_process=fn)` — 이 제출의
-  **전 job이 terminal**(DONE/EXIT/SUBMIT_FAILED/LOST — §3의 `is_terminal`)에 도달하면
+  **전 job이 terminal**(DONE/EXIT/SUBMIT_FAILED/CANCELLED/LOST — §3의 `is_terminal`)에 도달하면
   worker에서 **1회** 실행. 완료 감지는 폴링/`query_once`의 공통 지점(FR-4)에서
   이뤄지며, 감지 즉시 무장 해제해 중복 발화하지 않는다. **성공/실패 무관** — 전원
   terminal이면 실행하고, 콜백이 최종 JobRecord 목록을 받아 결과를 분류한다("이 실행이

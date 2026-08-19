@@ -197,7 +197,7 @@ mgr.remove_handler(js, "collect")        # 해제
   실행하고 그 job 은 종료한다. 등록은 유지되며(재제출 재무장 대비), 완전 해제는
   `remove_handler` 로 한다.
 - `end_states` 에 없는 terminal 상태로 죽으면(예: `end_states={DONE}` 인데 EXIT/
-  LOST/SUBMIT_FAILED) 최종 실행 **없이** 그 job 은 조용히 종결된다.
+  LOST/SUBMIT_FAILED/CANCELLED) 최종 실행 **없이** 그 job 은 조용히 종결된다.
 - **폴링이 돌고 있어야 동작한다** — handler 는 폴링 사이클에 tie 돼 있고, 첫 실행은
   다음 폴링 사이클이다(`mgr.query_once(js)` 로 즉시 1회 유도 가능).
   `auto_poll`(기본)이면 자동으로 돈다.
@@ -266,7 +266,7 @@ if mgr.can_submit(js):
 ```
 
 - `mgr.submit(js)` 은 **전 job 재제출** 이다 — 전원 비활성(CREATED/DONE/EXIT/
-  SUBMIT_FAILED/LOST)이어야 하며 활성(RUN/PEND/SUBMITTING)이 있으면
+  SUBMIT_FAILED/CANCELLED/LOST)이어야 하며 활성(RUN/PEND/SUBMITTING)이 있으면
   `SubmitNotAllowedError`. `can_submit()` 으로 선확인.
 - 리셋이 이전 실행 흔적(job_id/exit_code/실행시간/fail_message/클러스터)을 지우고,
   `job_key`/`user_data`/`submit_cwd` 는 보존한다.
@@ -293,7 +293,7 @@ mgr.submit(js, post_process=collect)     # pre_submit 과 함께 지정 가능
 
 - **발화 시점**: 완료 감지(폴링 또는 `mgr.query_once(js)`) 시 전원 terminal 이면
   worker 에서 1회 실행. `auto_poll`(기본)이면 자동 감지된다.
-- **결과 무관**: DONE/EXIT/SUBMIT_FAILED/LOST 가 섞여도 **전원 terminal** 이면
+- **결과 무관**: DONE/EXIT/SUBMIT_FAILED/CANCELLED/LOST 가 섞여도 **전원 terminal** 이면
   실행된다 — 콜백에서 성공/실패를 분류한다.
 - **신호**: `jobset_finished(summary)` → `post_processing_started` →
   `post_processing_finished(result)` (`result` = 콜백 반환값, 예외 시 `None` +

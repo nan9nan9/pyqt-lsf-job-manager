@@ -11,8 +11,10 @@ class SubmitReport:
     jobset_id: str
     total: int
     succeeded: int
-    failed: int              # SUBMIT_FAILED로 최종 확정된 수
-    cancelled: int           # cancel로 submit 자체를 안 한 수
+    failed: int              # SUBMIT_FAILED로 최종 확정된 수(재시도까지 소진)
+    cancelled: int           # kill/cancel로 접힌 수 — 착수 전 거부분과
+                             # 제출 도중 CANCELLED로 확정된 분을 함께 센다
+                             # (실패가 아니라서 failed와 따로 센다)
     retried: int             # 재시도가 1회 이상 발생한 job 수
     duration_s: float
     fail_reasons: Dict[str, int] = field(default_factory=dict)
@@ -53,9 +55,9 @@ class SubmitProgress:
 class KillProgress:
     """진행 중 kill의 실시간 스냅샷 — 아무 때나 조회 가능(pull).
 
-    kill_progress Signal(push)의 조회 버전. 대량 chunked kill(verify는 재조회
-    chunk마다 env source, verify는 재조회 루프)을 백그라운드로 돌려놓고 진행
-    dialog를 닫은 뒤 나중에 다시 그릴 때 쓴다. 끝나면 None(핸들 kill_state가
+    kill_progress Signal(push)의 조회 버전. 대량 chunked kill(chunk마다
+    bkill 1회 + verify 재조회 루프)을 백그라운드로 돌려놓고 진행 dialog를
+    닫은 뒤 나중에 다시 그릴 때 쓴다. 끝나면 None(핸들 kill_state가
     None), 최종 결과는 kill_finished(KillReport)로 본다.
     kill 대상이 없어 chunk 진행이 없는 kill은
     done/total이 0으로 머물다 완료 시 채워질 수 있다(거의 즉시 끝나는 경로)."""

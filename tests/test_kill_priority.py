@@ -496,3 +496,21 @@ def test_cancelled_by_kill_does_not_notify_completion(qtbot, manager,
     assert all(r.killed for r in js.jobs()), \
         [(r.job_key, r.state.name, r.killed) for r in js.jobs()][:5]
     assert not fins, f"kill한 jobset에 완료 통지 {len(fins)}회"
+
+
+def test_removing_a_jobset_mid_submit_does_not_spam_tracebacks(qtbot, manager,
+                                                               fake_lsf,
+                                                               caplog):
+    """제출 중 remove_jobset은 정상 경로(동시 삭제)다 — job 수만큼 traceback을
+    찍으면 5000건 제출에서 로그가 잠긴다. 다른 소실 경로와 같은 규칙으로
+    INFO 한 줄씩만 남긴다."""
+    js = mk_jobset(manager, [f"echo {i}" for i in range(30)])
+    fins = []
+    manager.submit_finished.connect(lambda j, r: fins.append(r))
+    with caplog.at_level("INFO", logger="lsfmgr.submit"):
+        manager.submit(js, auto_poll=False)
+        manager.remove_jobset(js.id, force=True)
+        qtbot.waitUntil(lambda: bool(fins), timeout=15000)
+    tracebacks = [r for r in caplog.records if r.exc_info]
+    assert not tracebacks, f"traceback {len(tracebacks)}건: {tracebacks[0].message}"
+    assert fins, "삭제 후에도 submit_finished는 와야 한다(신호 짝)"
