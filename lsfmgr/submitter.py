@@ -853,6 +853,15 @@ class BulkSubmitter(QObject):
             ctx.finished = True
             batch, ctx.changed_buffer = ctx.changed_buffer, []
             report = self._make_report(ctx)     # _gate_reject/_fail과 동일 구성
+            # 마지막 progress는 반드시 (total, total) — 계약(README §6.1).
+            # _count는 _emit_progress → _finish_if_done 순서지만, 마지막 1건을
+            # 계상한 worker가 _emit_progress에 들어가기 **전에** 다른 worker의
+            # _finish_if_done이 done==total을 보고 finished를 세우면, 그
+            # _emit_progress가 `if ctx.finished: return`으로 빠져 최종 통지가
+            # 통째로 유실된다(진행바가 49/50에서 멈춘 채 완료). 여기서 낸다.
+            # force 경로(게이트 거부 등)는 done<total일 수 있어 제외한다.
+            if ctx.done >= ctx.total:
+                self.progress.emit(ctx.jobset_id, ctx.total, ctx.total)
             # 마지막 전이분 flush → finished 를 같은 lock 안에서 순서대로 발화.
             # 모든 per-job jobs_changed도 ctx.lock 안에서 발화되므로, 락이
             # 직렬화해 finished가 반드시 마지막 per-job jobs_changed 뒤에

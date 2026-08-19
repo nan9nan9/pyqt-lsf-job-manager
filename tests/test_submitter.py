@@ -282,3 +282,45 @@ def test_first_attempt_submitting_is_not_emitted_twice(qtbot, manager,
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         submit_cmds(manager, ["mytool a.sp"], auto_poll=False)
     assert seen.count("SUBMITTING") == 1, seen
+
+
+def test_final_progress_survives_the_finish_race(qtbot, manager):
+    """마지막 1건을 계상한 worker가 _emit_progress에 들어가기 전에 다른
+    worker가 finished를 세우면 최종 (total,total)이 유실됐다 — 진행바가
+    49/50에서 멈춘 채 완료된다. _finish_if_done이 직접 낸다."""
+    from lsfmgr.options import Options
+    from lsfmgr.qt import QThreadPool
+    from lsfmgr.submitter import _SubmitContext
+    from lsfmgr.util import TokenBucketLimiter
+
+    seen = []
+    manager.submitter.progress.connect(lambda j, d, t: seen.append((d, t)))
+    ctx = _SubmitContext(jobset_id="js1", total=50,
+                         pool=QThreadPool(), limiter=TokenBucketLimiter(None),
+                         options=Options())
+    ctx.done = 50
+    # throttle 창을 소진시켜 _emit_progress가 못 내는 상황을 만든다
+    ctx.throttler.should_emit(49, 50)
+    manager.submitter._emit_progress(ctx)
+    manager.submitter._finish_if_done(ctx)
+    qtbot.waitUntil(lambda: bool(seen), timeout=5000)
+    assert seen[-1] == (50, 50), seen
+
+
+def test_forced_finish_does_not_fake_a_complete_progress(qtbot, manager):
+    """게이트 거부처럼 done<total로 끝나는 경로에서 (total,total)을 지어내면
+    '전부 처리됨'으로 오보된다."""
+    from lsfmgr.options import Options
+    from lsfmgr.qt import QThreadPool
+    from lsfmgr.submitter import _SubmitContext
+    from lsfmgr.util import TokenBucketLimiter
+
+    seen = []
+    manager.submitter.progress.connect(lambda j, d, t: seen.append((d, t)))
+    ctx = _SubmitContext(jobset_id="js2", total=50,
+                         pool=QThreadPool(), limiter=TokenBucketLimiter(None),
+                         options=Options())
+    ctx.done = 3
+    manager.submitter._finish_if_done(ctx, force=True)
+    qtbot.wait(200)
+    assert (50, 50) not in seen, seen
