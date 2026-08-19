@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from .command import JobStatus, LsfCommand
@@ -55,11 +56,19 @@ class JobsetQuerier:
         self.command = command
         # jobset → {job_key: 연속 미발견 횟수}. 살아있는 jobset의 job_key는
         # 사이클마다 통째로 갈아끼워(발견되면 자연히 사라짐) 정리가 필요 없다.
-        # 다만 **jobset 자체가 사라지면**(merge source 소멸 등) 그 jobset으로는
+        # 다만 **jobset 자체가 사라지면**(remove_jobset) 그 jobset으로는
         # 다시 query()가 안 불려 항목이 영영 남는다 — manager가 소멸 지점에서
         # forget()으로 지운다 (pacer.forget과 같은 계약).
         self._missing_streak: Dict[str, Dict[str, int]] = {}
         self._streak_lock = threading.Lock()
+        # query() 직렬화 — jobset별. 호출자가 둘이다(폴링 스레드 + killer
+        # verify 워커). 같은 jobset을 동시에 조회하면 스트릭의
+        # read-modify-write(_pop_streaks → 계산 → _set_streaks)가 겹쳐
+        # 유실/이중 증가한다 — '연속 N회 미발견' 유예(LOST 안전장치 ②)가
+        # 흔들린다. 서로 다른 jobset의 병행 조회는 그대로 둔다.
+        # lock은 jobset 소멸 후에도 남지만 세션당 jobset 수만큼(수 바이트)이라
+        # 정리하지 않는다.
+        self._query_locks: Dict[str, threading.Lock] = {}
 
     def _pop_streaks(self, jobset_id: str) -> Dict[str, int]:
         with self._streak_lock:
@@ -74,7 +83,7 @@ class JobsetQuerier:
 
     def forget(self, jobset_id: str,
                job_keys: Optional[List[str]] = None) -> None:
-        """사라진 job(remove/clear)·jobset(merge source)의 미발견 스트릭을
+        """사라진 job(remove/clear)·jobset(remove_jobset)의 미발견 스트릭을
         버린다. job_keys=None이면 그 jobset 전체.
 
         **살아있는 job의 스트릭까지 지우면 안 된다** — 지우면 LOST 유예가
@@ -92,7 +101,31 @@ class JobsetQuerier:
             if not streaks:
                 self._missing_streak.pop(jobset_id, None)
 
-    def query(self, jobset_id: str) -> QueryResult:
+    def _submit_grace_s(self) -> float:
+        """제출 후 LOST 유예(초) — 콜백 조회원일 때만 켜진다.
+
+        bjobs 경로에 걸면 기존 판정을 바꾼다(연속 N회 유예로 충분했고, 그
+        균형은 이미 수렴한 결정이다). 지연의 성격이 다른 콜백 조회원에만
+        적용한다."""
+        if self.command.internal_status is None:
+            return 0.0
+        return max(0.0, float(self.command.config.internal_lost_grace_s))
+
+    def _qlock(self, jobset_id: str) -> threading.Lock:
+        with self._streak_lock:
+            return self._query_locks.setdefault(jobset_id, threading.Lock())
+
+    def query(self, jobset_id: str, *, fresh: bool = False) -> QueryResult:
+        """jobset 1건 조회 + Store 반영.
+
+        fresh=True는 콜백 조회원(job_status_fetcher)에서만 의미가 있다 —
+        스냅샷 캐시를 건너뛰고 새로 받는다. kill verify처럼 '방금'의 생사를
+        봐야 하는 호출자가 쓴다(bjobs 경로는 항상 새로 실행하므로 무영향)."""
+        with self._qlock(jobset_id):         # 직렬화 근거는 __init__ 주석
+            return self._query_serialized(jobset_id, fresh=fresh)
+
+    def _query_serialized(self, jobset_id: str, *,
+                          fresh: bool = False) -> QueryResult:
         self.store.get_jobset(jobset_id)     # 존재 검증 (없으면 예외)
         # 조회 대상(is_on_lsf)만 store 단에서 걸러 가져온다 — 대다수가
         # terminal인 대형 jobset에서 매 사이클 terminal 레코드까지 재구성해
@@ -118,7 +151,7 @@ class JobsetQuerier:
         ids = sorted({r.job_id for r in targets if r.job_id is not None})
         bjobs_failed: set = set()
         if ids:
-            sts, bjobs_failed = self.command.bjobs_by_ids(ids)
+            sts, bjobs_failed = self.command.bjobs_by_ids(ids, fresh=fresh)
             for st in sts:
                 statuses[(st.job_id, st.array_index)] = st
                 by_id.setdefault(st.job_id, {})[st.array_index] = st
@@ -154,7 +187,6 @@ class JobsetQuerier:
         # 한 번에 적용한다 — 수만 건이 한 사이클에 몰릴 때 건당 처리가
         # 폴링 스레드를 블로킹하지 않게 한다.
         update_specs = []       # bjobs 기반 일반 전이 [(key,state,guard,fields)]
-        lost_specs = []         # LOST 전이 (반환분을 lost로도 분류)
         missing: List[JobRecord] = []
         runtime_updates = self.command.config.poll_runtime_updates
         collect_clusters = self.command.config.collect_clusters
@@ -187,52 +219,8 @@ class JobsetQuerier:
                 update_specs.append(
                     (rec.job_key, st.state, unchanged(rec), fields))
 
-        # --- 미발견 처리: 보류(조회 불가) / 유예(연속 미발견) / LOST 확정 ---
-        # LOST는 "id로 조회했는데 LSF가 모른다"는 뜻이라 **되돌릴 수 없는**
-        # terminal이다. 그래서 확정 전에 두 겹의 안전장치를 둔다:
-        #   ① 조회 자체가 불가/실패한 job은 보류 (판단 근거가 없음)
-        #   ② 근거가 있어도 **연속 N회**(lost_after_missing_polls) 미발견일
-        #      때만 확정 — 제출 직후 등록 지연, 앱 환경이 가리키는 클러스터와
-        #      wrapper가 실제 제출한 클러스터가 다른 경우처럼 '한 사이클만
-        #      안 보이는' 상황에서 멀쩡한 job을 죽은 것으로 만들지 않는다.
-        deferred: List[str] = []             # ① 조회 불가 — 스트릭도 안 올림
-        waiting: List[str] = []              # ② 유예 중 (미발견이지만 미확정)
-        prev = self._pop_streaks(jobset_id)
-        cur: Dict[str, int] = {}
-        if missing:
-            grace = max(1, self.command.config.lost_after_missing_polls)
-            for rec in missing:
-                if rec.job_id is None or rec.job_id in bjobs_failed:
-                    # job_id 없는 레코드는 id 조회로 확인 자체가 불가하고,
-                    # bjobs chunk가 실패한 사이클도 근거가 없다.
-                    # LSF 순단이면 다음 사이클에 복구되고, 진짜 소실이면
-                    # 장애 해소 후 사이클에서 확정된다.
-                    deferred.append(rec.job_key)
-                    continue
-                n = prev.get(rec.job_key, 0) + 1
-                cur[rec.job_key] = n
-                if n < grace:
-                    waiting.append(rec.job_key)
-                    continue
-                lost_specs.append((rec.job_key, JobState.LOST,
-                                   unchanged(rec),
-                                   {"fail_reason": "NOT_FOUND_IN_LSF"}))
-        self._set_streaks(jobset_id, cur)
-        # 사이클당 1줄로 집계 — job당 경고면 대형 jobset의 장애 사이클마다
-        # 수백 줄이 반복돼 로그가 잠긴다
-        if deferred:
-            log.warning("조회 불가로 %d건 판단 보류 (LOST 확정 안 함): %s",
-                        len(deferred), _brief(deferred))
-        if waiting:
-            log.warning("bjobs 미발견 %d건 — LOST 유예 중(연속 %d회 필요): "
-                        "id=%s", len(waiting),
-                        max(1, self.command.config.lost_after_missing_polls),
-                        _brief([f"{k}({cur[k]}회)" for k in waiting]))
-        if lost_specs:
-            log.warning("LOST 확정 %d건 — 연속 %d회 bjobs 미발견: %s",
-                        len(lost_specs),
-                        max(1, self.command.config.lost_after_missing_polls),
-                        _brief([spec[0] for spec in lost_specs]))
+        lost_specs = self._judge_missing(jobset_id, missing, bjobs_failed,
+                                         unchanged)
 
         # 전이 대상 소실(사이클 도중 remove_jobs)·guard 거부는 transition_many가
         # 조용히 건너뛰고 반환 목록에서 제외한다 (safe_transition과 동일 계약).
@@ -246,12 +234,98 @@ class JobsetQuerier:
         # 사이클 요약은 DEBUG — 정규 폴링은 매 주기라 INFO면 스팸(신호로 통지).
         # 변화가 있을 때만 남겨 조용한 사이클은 로그를 안 늘린다.
         if changed:
-            log.debug("poll %s: 대상 %d, 전이 %d (LOST %d, 보류 %d)",
+            # 보류(deferred) 세부는 _judge_missing이 WARNING으로 남긴다
+            log.debug("poll %s: 대상 %d, 전이 %d (LOST %d, 미발견 %d)",
                       jobset_id, len(targets), len(changed), len(lost),
-                      len(deferred))
+                      len(missing))
 
         return QueryResult(jobset_id, self.store.summary(jobset_id),
                            tuple(changed), tuple(lost), len(targets))
+
+    def _judge_missing(self, jobset_id: str, missing: List[JobRecord],
+                       bjobs_failed: set, unchanged) -> list:
+        """미발견 레코드 판정 — 보류 / 유예 / LOST 확정 spec 산출.
+        스트릭의 read-modify-write는 이 메서드 안에 국한되며, query()
+        직렬화 lock 아래에서만 호출된다.
+
+        LOST는 "id로 조회했는데 LSF가 모른다"는 뜻이라 **되돌릴 수 없는**
+        terminal이다. 그래서 확정 전에 세 겹의 안전장치를 둔다:
+          ① 조회 자체가 불가/실패한 job은 보류 (판단 근거가 없음)
+          ② 콜백 조회원(job_status_fetcher)에서 **제출한 지 얼마 안 된** job은
+             보류 (internal_lost_grace_s) — 상태 원본이 외부 집계라 등록이 늦다
+          ③ 근거가 있어도 **연속 N회**(lost_after_missing_polls) 미발견일
+             때만 확정 — 제출 직후 등록 지연, 앱 환경이 가리키는 클러스터와
+             wrapper가 실제 제출한 클러스터가 다른 경우처럼 '한 사이클만
+             안 보이는' 상황에서 멀쩡한 job을 죽은 것으로 만들지 않는다.
+        ※ missing이 비어도 스트릭은 갱신(=비움)해야 한다 — 전원 발견된
+          사이클은 옛 미발견 횟수를 지우는 사이클이다."""
+        deferred: List[str] = []             # ① 조회 불가 — 스트릭도 안 올림
+        young: List[str] = []                # ② 제출 유예 중 — 스트릭도 안 올림
+        waiting: List[str] = []              # ③ 유예 중 (미발견이지만 미확정)
+        lost_specs: list = []
+        prev = self._pop_streaks(jobset_id)
+        cur: Dict[str, int] = {}
+        grace = max(1, self.command.config.lost_after_missing_polls)
+        submit_grace = self._submit_grace_s()
+        now = datetime.now()
+        for rec in missing:
+            if rec.job_id is None or rec.job_id in bjobs_failed:
+                # job_id 없는 레코드는 id 조회로 확인 자체가 불가하고,
+                # bjobs chunk가 실패한 사이클도 근거가 없다.
+                # LSF 순단이면 다음 사이클에 복구되고, 진짜 소실이면
+                # 장애 해소 후 사이클에서 확정된다.
+                deferred.append(rec.job_key)
+                continue
+            if _within_submit_grace(rec, now, submit_grace):
+                # 아직 상태 원본에 안 올라온 것뿐 — 스트릭을 올리지 않는다.
+                # (올리면 유예가 끝나는 순간 이미 쌓인 회수로 즉시 LOST가 된다)
+                young.append(rec.job_key)
+                continue
+            n = prev.get(rec.job_key, 0) + 1
+            cur[rec.job_key] = n
+            if n < grace:
+                waiting.append(rec.job_key)
+                continue
+            lost_specs.append((rec.job_key, JobState.LOST,
+                               unchanged(rec),
+                               {"fail_reason": "NOT_FOUND_IN_LSF"}))
+        self._set_streaks(jobset_id, cur)
+        # 사이클당 1줄로 집계 — job당 경고면 대형 jobset의 장애 사이클마다
+        # 수백 줄이 반복돼 로그가 잠긴다
+        if deferred:
+            log.warning("조회 불가로 %d건 판단 보류 (LOST 확정 안 함): %s",
+                        len(deferred), _brief(deferred))
+        if young:
+            # 제출 직후의 **정상** 상태다 — WARNING이면 유예 내내 매 사이클
+            # 경고가 찍힌다. 다만 "왜 상태가 안 오르나"의 답이라 남긴다.
+            log.info("제출 후 %.0fs 유예 중이라 %d건 판단 보류 "
+                     "(internal 집계 대기): %s",
+                     submit_grace, len(young), _brief(young))
+        if waiting:
+            log.warning("bjobs 미발견 %d건 — LOST 유예 중(연속 %d회 필요): "
+                        "id=%s", len(waiting), grace,
+                        _brief([f"{k}({cur[k]}회)" for k in waiting]))
+        if lost_specs:
+            log.warning("LOST 확정 %d건 — 연속 %d회 bjobs 미발견: %s",
+                        len(lost_specs), grace,
+                        _brief([spec[0] for spec in lost_specs]))
+        return lost_specs
+
+
+def _within_submit_grace(rec: JobRecord, now: datetime,
+                         grace_s: float) -> bool:
+    """제출한 지 grace_s 안인가 — 아직 상태 원본에 없어도 이상하지 않은 구간.
+
+    기준 시각은 submit_time(bsub 성공 시점에 찍힌다). 없으면 updated_at으로
+    폴백한다 — 둘 다 없으면 나이를 알 수 없으므로 유예하지 않는다(유예하면
+    그 레코드는 영영 LOST가 안 돼 미발견인 채로 고착된다).
+    """
+    if grace_s <= 0:
+        return False
+    marker = rec.submit_time or rec.updated_at
+    if marker is None:
+        return False
+    return (now - marker).total_seconds() < grace_s
 
 
 def _aggregate_elements(rec: JobRecord,
@@ -290,7 +364,7 @@ def _aggregate_elements(rec: JobRecord,
 
 
 class _PollWorker(QObject):
-    """polling 스레드 안에서만 사는 worker. QTimer도 이 스레드 소속 (§3.2)."""
+    """polling 스레드 안에서만 사는 worker. QTimer도 이 스레드 소속 (§4)."""
 
     updated = Signal(str, dict, list)        # jobset_id, summary, changed
     lost = Signal(str, object)               # jobset_id, JobRecord
@@ -301,7 +375,6 @@ class _PollWorker(QObject):
         self.querier = querier
         self._timers: Dict[str, QTimer] = {}
         self._in_progress: set = set()       # 중복 polling 방지
-        self._auto_stop = True
         self._idle_counts: Dict[str, int] = {}   # 활동 없음 연속 사이클 수
         #: stop_all 완료(타이머 정리)를 shutdown이 quit 전에 확인하는 신호
         self.stopped_event = threading.Event()
@@ -354,7 +427,7 @@ class _PollWorker(QObject):
         try:
             result = self.querier.query(jobset_id)
         except JobSetNotFoundError:
-            # merge/삭제된 jobset — 계속 polling하면 매 주기 error 폭주
+            # 삭제된 jobset(remove_jobset) — 계속 polling하면 매 주기 error 폭주
             log.info("jobset %s 삭제됨 — polling 자동 중지", jobset_id)
             self.stop_polling(jobset_id)
             return
@@ -381,7 +454,7 @@ class _PollWorker(QObject):
            연속이면 중지 — 1사이클 유예는 submit 직후 전원 CREATED인
            정상 순간을 조기 중지하지 않기 위함.
         """
-        if not self._auto_stop or jobset_id not in self._timers:
+        if jobset_id not in self._timers:
             return
         try:
             remaining = self.querier.store.get_jobs(jobset_id)
@@ -447,7 +520,7 @@ class PollingService(QObject):
         self._req_poll.emit(jobset_id)
 
     def shutdown(self) -> None:
-        """timer 정지 + 스레드 graceful 종료 (좀비 스레드 금지, §3.2)."""
+        """timer 정지 + 스레드 graceful 종료 (좀비 스레드 금지, §4)."""
         if not self._thread.isRunning():
             return
         # stop_all이 폴링 스레드에서 타이머를 정지·삭제한 뒤에 quit해야

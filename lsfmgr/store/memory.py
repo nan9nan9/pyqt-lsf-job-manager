@@ -1,4 +1,4 @@
-"""InMemoryStore — 기본 저장소. dict + RLock, 파일 미생성 (§4.4)."""
+"""InMemoryStore — 기본 저장소. dict + RLock, 파일 미생성 (§5)."""
 from __future__ import annotations
 
 import threading

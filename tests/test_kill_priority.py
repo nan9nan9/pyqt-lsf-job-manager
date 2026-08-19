@@ -217,7 +217,7 @@ def test_revert_to_created_clears_failure_residue(qtbot, manager, fake_lsf):
         state=JobState.RETRY_WAIT, fail_reason="BSUB_TIMEOUT",
         fail_message="bsub: timeout after 30s", retry_count=2,
         command="echo x")])
-    ctx = _SubmitContext(jobset_id=jsid, total=1, max_retry=0,
+    ctx = _SubmitContext(jobset_id=jsid, total=1,
                          pool=QThreadPool(), limiter=TokenBucketLimiter(None),
                          options=Options())
 

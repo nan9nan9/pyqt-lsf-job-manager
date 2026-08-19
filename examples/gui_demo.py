@@ -206,7 +206,10 @@ class Dashboard(QWidget):
         self.mgr = None
         self._items = {}                 # jobset_id → QTreeWidgetItem
         self._active_submit = None       # 진행률 바가 추적 중인 jobset_id
-        self._laststate = {}             # job_key → 마지막 관측 상태
+        # (jsid, job_key) → 마지막 관측 상태. jsid를 키에 넣는다 — 모든
+        # jobset이 run_0.. 키를 재사용하므로 job_key 단독이면 이전 jobset의
+        # 상태가 새 jobset의 첫 전이에 허위 prev로 찍힌다.
+        self._laststate = {}
         self._row_of = {}                # job_key → 테이블 행
 
         self.bus = _LogBus()
@@ -326,7 +329,13 @@ class Dashboard(QWidget):
         js = self.mgr.create_jobset(
             cmds, job_keys=[f"run_{i}" for i in range(len(cmds))],
             label=label)
-        self.mgr.submit(js, post_process=self._summarize_results, **kw)
+        # 데모는 1초 촘촘한 폴링을 **직접** 관리한다 — auto_poll을 그대로
+        # 넘기면 착수 확정 시 라이브러리가 기본 주기(10s)로 폴링을 다시 걸어
+        # 아래 start_polling(js, 1)을 덮는다(rerun_failed와 같은 패턴).
+        # 체크박스는 "1초 폴링 켬/끔"의 의미로 유지한다.
+        fast_poll = kw.pop("auto_poll", True)
+        self.mgr.submit(js, post_process=self._summarize_results,
+                        auto_poll=False, **kw)
         if self.form.use_handler.isChecked():
             # RUN 중 폴링 사이클마다 parse_job_output, 종료 시 최종 1회
             self.mgr.add_handler(js, HANDLER, parse_job_output,
@@ -337,7 +346,8 @@ class Dashboard(QWidget):
         self._active_submit = js.id
         self.bar.setMaximum(self.form.count.value())
         self.bar.setValue(0)
-        self.mgr.start_polling(js, 1)        # 데모: 촘촘한 폴링(기본 10s)
+        if fast_poll:
+            self.mgr.start_polling(js, 1)    # 데모: 촘촘한 폴링
 
     def add_to_selected(self):
         """선택 jobset 에 job 을 직접 추가한다 (add_jobs)."""
@@ -444,6 +454,8 @@ class Dashboard(QWidget):
             self._log(jsid, f"remove_jobset 거부: {e}")
             return
         self._drop_row(jsid)                 # 레코드가 사라졌으니 행도 제거
+        for k in [k for k in self._laststate if k[0] == jsid]:
+            del self._laststate[k]           # 전이 로그 장부도 함께 청소
         self._log(jsid, "removed — 이 jobset은 더 이상 조회할 수 없습니다")
 
     # ------------------------------------------------------------------
@@ -512,7 +524,12 @@ class Dashboard(QWidget):
             self.bar.setValue(done)
 
     def _on_finished(self, jsid, rpt):
-        recs = self.mgr.jobset(jsid).jobs()
+        # queued 신호라 도착 시점엔 jobset이 이미 삭제됐을 수 있다(사용자의
+        # Remove 클릭이 큐에 먼저 들어온 경합) — slot 밖 예외는 PyQt abort.
+        try:
+            recs = self.mgr.get_jobs(jsid)
+        except LsfmgrError:
+            recs = []
         n_ids = len({r.job_id for r in recs if r.job_id is not None})
         self._log(jsid, f"submit_finished ok={rpt.ok} failed={rpt.failed} "
                         f"retried={rpt.retried} job_id확보={n_ids} "
@@ -533,9 +550,9 @@ class Dashboard(QWidget):
         trans = []
         for r in records:
             cur = r.state.value
-            prev = self._laststate.get(r.job_key)
+            prev = self._laststate.get((jsid, r.job_key))
             if prev != cur:
-                self._laststate[r.job_key] = cur
+                self._laststate[(jsid, r.job_key)] = cur
                 trans.append((r.job_key, prev, cur, r))
         if len(trans) <= 12:
             for key, prev, cur, r in trans:

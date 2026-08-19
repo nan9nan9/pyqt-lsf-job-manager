@@ -129,16 +129,21 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)     # 이번 submit만
 | `poll_interval_s` | 10 | polling 주기 (5~60) |
 | `auto_poll` | True | submit 후 polling 자동 시작 |
 | `verify_kill` | False | kill 후 실제 종료 확인 (`kill()` 인자로도 지정 가능) |
-| `label` / `tags` / `description` | 빈 값 | JobSet 메타데이터 (`submit()` 전용) |
+
+> JobSet 메타(`label`/`tags`)는 옵션이 아니라 **`create_jobset` 인자**다 —
+> `submit()`에 넘기면 경고 후 무시된다(v9 잔재 하위 호환).
 
 **앱 전역 동작 (생성자 전용)**
 
 | 옵션 | 기본값 | 설명 |
 |---|---|---|
-| `bjobs_path` / `bkill_path` | PATH 탐색 | 조회/kill 명령 경로. 토큰 목록이면 고정 인자가 앞에 붙음 |
+| `bjobs_path` / `bkill_path` | PATH 탐색 | 조회/kill 명령 경로. 토큰 목록이면 고정 인자가 앞에 붙음. `job_status_fetcher`를 주면 `bjobs_path`는 안 쓰임(§5.8) |
 | `chunk_size` | 500 | bjobs/bkill 한 번에 넘길 job 수 |
 | `arg_max` | 131072 | 명령줄 인자 총 길이 상한 (초과 시 `ArgMaxExceededError`) |
 | `lost_after_missing_polls` | 3 | bjobs에서 안 보이는 job을 **LOST로 확정하기까지** 필요한 연속 미발견 횟수. 1이면 즉시. 제출 직후 등록 지연으로 한두 사이클 안 보이는 job을 죽은 것으로 만들지 않기 위한 유예 |
+| `internal_refresh_min_s` | `poll_interval_s`/2 | internal 조회원의 최소 갱신 간격(초). 이 안에 겹쳐 들어온 조회는 콜백을 다시 돌리지 않음. 0이면 캐시 없음 (§5.8) |
+| `internal_retention_days` | 14 | internal 원장에서 **종료 job**을 보존할 기간(일). 넘으면 버려 메모리 누적을 막음. 0이면 만료 없음 (§5.8) |
+| `internal_lost_grace_s` | 60 | 콜백 조회원에서 **제출 후 이 시간 안**의 미발견은 LOST로 세지 않음 — 상태 원본(REST) 집계 지연 유예. 0이면 유예 없음 (§5.8) |
 | `poll_runtime_updates` | True | RUN 중 `run_time_s`(경과시간) 변화도 `jobs_updated`로 live 발행. 수만 개 규모면 False 권장 |
 | `collect_clusters` | False | MultiCluster forwarding 정보 수집 — `JobRecord.source_cluster`/`forward_cluster`를 폴링으로 채움 |
 | `cluster_envpaths` | 없음 | MC 분류 kill — `{클러스터명: cshrc경로}`. 지정하면 kill이 대상 cluster별로 env를 `source`한 bkill을 실행(§5.4). 와일드카드 `"*"`는 미상/미매핑의 기본 env |
@@ -587,6 +592,206 @@ mgr.remove_handler(js, "collect")          # 해제
   `examples/gui_demo.py`(handler 체크박스).
 
 ---
+
+### 5.8 bjobs 없이 상태 얻기 — 콜백 조회원 (`job_status_fetcher`)
+
+LSF 상태를 REST job 서버처럼 **LSF 바깥의 원본**에서 얻는 환경을 위한 경로입니다.
+`job_status_fetcher`에 조회 콜백 하나를 주면 상태 조회만 그 콜백으로 바뀝니다.
+따로 켜는 스위치는 없습니다 — **콜백을 줬는가**가 유일한 판정입니다.
+
+| | `job_status_fetcher`를 줬을 때 |
+|---|---|
+| 제출 (wrapper) | **그대로** — subprocess 실행 |
+| kill (`bkill`) | **그대로** — subprocess 실행 |
+| 상태 조회 (`bjobs`) | **콜백으로 대체** — subprocess 안 나감 |
+| 폴링 / LOST 판정 / kill verify / handler / `post_process` | **그대로** — 조회원만 갈렸을 뿐 flow 동일 |
+
+#### 최소 설정
+
+```python
+import requests
+from lsfmgr import LsfJobManager
+
+def fetch_status():
+    r = requests.get(f"http://insight:9980/jobserver/jobs/{USER}",
+                     params={"updatefrom": "2000-01-01"}, timeout=30)
+    r.raise_for_status()
+    return r.json()          # {"jobs": [...], "count": N, "updateFrom": ...}
+
+mgr = LsfJobManager(job_status_fetcher=fetch_status)
+```
+
+이게 전부입니다. 나머지 사용법(`create_jobset` → `submit` → Signal 구독)은
+§5와 §6 그대로입니다.
+
+> 콜백과 **`bjobs_path`를 함께** 지정하면 생성 시 경고 1회를 남기고 그 경로를
+> 무시합니다 — 조회가 콜백으로 가므로 `bjobs_path`는 아무 데도 안 쓰입니다.
+> mock bjobs를 가리켜 놓고 "왜 안 불리지" 하는 상황을 막기 위한 알림입니다.
+>
+> ```
+> WARNING lsfmgr.command: bjobs_path='/opt/mock/bjobs'는 무시됩니다 —
+>         job_status_fetcher가 지정되어 상태 조회는 콜백으로 합니다
+> ```
+
+#### 콜백 계약
+
+- **인자 없이** 호출됩니다. 호출 주체는 라이브러리(폴링 스레드 등)입니다.
+- **REST 응답 JSON을 그대로** 반환하면 됩니다 (`{"jobs": [...]}` dict, 또는 job dict 목록).
+  파싱·매핑은 라이브러리가 합니다.
+- URL·인증·타임아웃·재시도는 **콜백의 몫**입니다. 라이브러리는 네트워크를 모릅니다.
+- **예외를 던지면 "조회 장애"** 로 처리됩니다 (아래 참조). 실패를 빈 결과로
+  감추지 마세요.
+- GUI 스레드가 아닌 **백그라운드 스레드에서** 실행됩니다. 콜백 안에서 Qt 위젯을
+  건드리면 안 됩니다.
+
+인식하는 payload 표기:
+
+| payload 필드 | 매핑 | 비고 |
+|---|---|---|
+| `dataId` | `job_id` (+`array_index`) | `"1432342.cluster1"` / `"500[3].cl2"` / `"777"` |
+| `stat` | `JobState` | 모르는 값은 `UNKWN` — 행을 버리지 않음(버리면 LOST가 됨) |
+| `startTime` / `finishTime` | `start_time` / `finish_time` | ISO-8601. 실행 중 `finishTime`은 예상치로 보고 버림 |
+| `cluster` (없으면 `dataId` 접미사) | `source_cluster` | MC 분류 kill(§5.4)이 이 값을 씀 |
+| `exitStatus` / `exitCode` | `exit_code` | 없으면 `None` |
+| — | `run_time_s` | payload에 없어 두 시각으로 **유도**(받은 시각 기준으로 고정) |
+
+`queue`/`app`/`subcwd`/`userName` 등 나머지 필드는 무시됩니다 — 있어도 무해합니다.
+
+#### 증분 조회 (`updatefrom`)
+
+전량 조회(`updatefrom=2000-01-01`)로 시작해도 되지만, job이 많아지면 마지막 조회
+이후 갱신분만 받는 편이 낫습니다. **커서는 콜백이 소유합니다** — 라이브러리는
+`updatefrom`을 모릅니다.
+
+```python
+from datetime import datetime, timedelta
+
+
+class InsightStatusFetcher:
+    """updatefrom 커서를 들고 증분으로 받아오는 콜백."""
+
+    OVERLAP = timedelta(minutes=5)      # 겹쳐 받기 — 아래 주의 참조
+
+    def __init__(self, user):
+        self.user = user
+        self.cursor = "2000-01-01"      # 첫 호출은 전량
+
+    def __call__(self):
+        r = requests.get(f"http://insight:9980/jobserver/jobs/{self.user}",
+                         params={"updatefrom": self.cursor}, timeout=30)
+        r.raise_for_status()
+        payload = r.json()
+        stamps = [j["updateTime"] for j in payload["jobs"] if j.get("updateTime")]
+        if stamps:
+            newest = datetime.fromisoformat(max(stamps))
+            self.cursor = (newest - self.OVERLAP).isoformat()
+        return payload                  # 응답 원문 그대로
+
+mgr = LsfJobManager(job_status_fetcher=InsightStatusFetcher(USER))
+```
+
+라이브러리 쪽 원장은 job 단위로 **병합**되므로, 이번 payload에 없는 job은 지워지지
+않고 직전 상태를 유지합니다("안 왔다" = "안 바뀌었다"). 전량 조회도 같은 병합
+경로로 자연히 덮입니다.
+
+> **커서는 겹쳐서 잡으세요.** 콜백이 커서를 올린 뒤 응답 봉투가 깨져 있으면
+> (`jobs` 키 없음 등) 그 배치는 통째로 버려지고, 라이브러리는 콜백에게 실패를
+> 되돌려주지 않습니다. 위 예제처럼 몇 분 겹쳐 받으면 그 구멍이 다음 조회에서
+> 메워집니다.
+
+#### 옵션
+
+튜닝 노브는 `internal_` 접두사입니다 — 이 조회원(내부 원장)에만 적용됩니다.
+
+| 옵션 | 기본값 | 설명 |
+|---|---|---|
+| `job_status_fetcher` | 없음 | 조회 콜백(생성자 인자). **주면 콜백 조회, 안 주면 bjobs** — 모드 스위치는 이것뿐 |
+| `internal_refresh_min_s` | `poll_interval_s`/2 | 최소 갱신 간격(초). 이 안에 겹쳐 들어온 조회는 콜백을 다시 안 돌림. 0이면 캐시 없음 |
+| `internal_retention_days` | 14 | 원장에서 **종료 job**을 보존할 기간(일). 0이면 만료 없음 |
+| `internal_lost_grace_s` | 60 | 제출 후 이 시간 안의 미발견은 LOST로 세지 않음. 0이면 유예 없음 |
+
+```python
+mgr = LsfJobManager(
+    job_status_fetcher=fetch_status,
+    internal_refresh_min_s=5.0,      # 5초 안의 중복 조회는 콜백 재실행 없음
+    internal_retention_days=14,      # 2주 지난 종료 job은 원장에서 제거
+    internal_lost_grace_s=60)        # 제출 후 60초는 미발견을 LOST로 안 셈
+```
+
+#### 콜백은 언제, 몇 번 실행되나
+
+조회원을 두드리는 주체는 셋입니다 — 폴링 스레드, killer verify 워커,
+`detect_lost`. 셋이 동시에 들어와도 **콜백은 한 번만** 돕니다(single-flight):
+먼저 온 스레드가 실행하고 나머지는 그 결과를 공유합니다. 여기에 최소 갱신
+간격이 겹쳐 **실행 빈도의 상한이 `1 / internal_refresh_min_s`** 로 묶입니다.
+jobset이 몇 개든, 폴링 주기가 얼마든 그 위로는 안 올라갑니다.
+
+콜백은 lock **밖에서** 실행되므로 REST가 느려도 다른 조회를 막지 않습니다.
+응답이 `query_timeout_s`를 넘도록 안 오면 기다리던 쪽은 "조회 장애"로 빠져나갑니다
+(폴링 스레드가 붙잡히지 않습니다).
+
+예외가 하나 있습니다 — **kill verify는 항상 새로 받습니다.** 방금 죽인 job의
+생사를 캐시로 답할 수 없기 때문입니다.
+
+원장은 **manager당 하나**입니다(`LsfCommand` 1개 = `InternalStatusSource` 1개).
+jobset을 여러 개 돌려도 같은 원장을 공유하므로 응답을 여러 벌 들고 있지 않습니다.
+반대로 `LsfJobManager`를 여러 개 만들면 원장도 콜백도 그만큼 늘어납니다 — 앱에서
+manager는 하나만 두세요.
+
+#### 실패와 LOST — 두 가지 유예
+
+**① 조회 실패는 LOST가 아닙니다.** 콜백이 예외를 던지거나 응답에 `jobs` 키가
+없으면 그 사이클의 대상 전원이 "판단 보류"로 처리됩니다 — `bjobs` chunk 실패와
+똑같은 계약이라 REST 순단 한 번에 전 job이 LOST로 확정되지 않습니다. (반대로
+`{"jobs": []}`는 정상 응답 = "없음"이라 LOST 유예 카운트가 올라갑니다.)
+
+**② 아직 집계 안 된 job도 LOST가 아닙니다.** 제출은 성공했는데(로컬 PEND) REST
+집계가 아직 모르는 구간이 있습니다. 이걸 그대로 세면 `lost_after_missing_polls`
+(기본 3회 × 폴링 10초 ≈ 30초) 만에 멀쩡한 job이 죽습니다 — LOST는 terminal이라
+나중에 집계가 따라잡아도 **다시 조회하지 않습니다.** 그래서 제출 시각 기준 유예를
+둡니다:
+
+```
+제출 → [ internal_lost_grace_s = 60초 ]───→ 그 뒤 lost_after_missing_polls 연속 미발견 → LOST
+        └ 미발견을 세지 않음(보류)               └ 진짜 소실은 여전히 확정된다
+```
+
+기준을 회수가 아니라 **초**로 잡은 이유는 폴링 주기와 분리하기 위해서입니다 —
+회수 기준이면 `poll_interval_s`를 줄이는 순간 유예도 조용히 같이 줄어듭니다. 기준
+시각은 `JobRecord.submit_time`(bsub 성공 시점), 없으면 `updated_at`입니다. 유예 중에는
+스트릭을 올리지 않으므로 유예가 끝난 뒤에도 `lost_after_missing_polls` 만큼은 더
+봅니다. 이 유예는 **콜백 조회원에서만** 켜집니다 — bjobs 경로의 미발견은 대부분
+진짜 부재(purge)라 판정을 바꾸지 않습니다.
+
+#### 메모리 — 원장은 어디까지 커지나
+
+증분 병합이라 원장은 계속 쌓입니다. 그래서 끝난 지(`finishTime`)
+`internal_retention_days`(기본 14일)를 넘긴 **DONE/EXIT만** 버립니다.
+
+- 진행 중(PEND/RUN/…) job은 아무리 오래 돌아도 **안 버립니다** — 아직 조회 대상입니다.
+- `finishTime`을 안 주는 payload면 그 항목을 마지막으로 받은 시각을 대신 씁니다
+  (안 그러면 그 사이트에선 종료 job이 영원히 쌓입니다).
+- 청소는 최소 60초 간격으로만 돕니다 — 원장이 클 때 매 폴링 전수 스캔을 피합니다.
+
+정상 상태의 원장 크기는 대략 **"살아있는 job + 최근 2주 종료분"** 한 벌입니다.
+
+#### 진단
+
+```python
+src = mgr.command.internal_status      # 콜백을 안 줬으면 None
+src.stats()                            # {"job_ids": 1832, "entries": 1904}
+src.invalidate()                       # 다음 조회에서 반드시 콜백 실행(원장은 유지)
+```
+
+로거는 `lsfmgr.internal_status`입니다(§8).
+
+| 증상 | 로그 | 원인 / 조치 |
+|---|---|---|
+| 상태가 안 오름 | `internal status 조회 실패 — 이번 사이클은 판단 보류` | 콜백이 예외를 던짐. REST/인증/타임아웃 확인 |
+| 제출 후 한동안 PEND | `제출 후 60s 유예 중이라 N건 판단 보류` | 정상. 집계 지연 유예 중 — 상시 이러면 `internal_lost_grace_s`를 늘릴 것 |
+| LOST가 뜸 | `LOST 확정 N건 — 연속 3회 bjobs 미발견` | 유예가 끝나도록 원장에 없음. `updatefrom` 커서가 너무 앞서 있는지 확인 |
+| 메모리 증가 | `internal status 원장 청소: … N건 제거` | 청소는 도는 중. 안 찍히면 `finishTime`이 비어 오는지 확인 |
+| 상태가 갱신 안 되고 시간만 지남 | `internal status 조회 대기 시간 초과` | 콜백이 `query_timeout_s`보다 오래 걸림. 콜백 쪽 timeout을 더 짧게 |
 
 ## 6. Signal
 

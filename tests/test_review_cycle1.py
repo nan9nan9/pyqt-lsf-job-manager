@@ -97,8 +97,8 @@ def test_post_process_discarded_on_gate_reject(qtbot, manager, fake_lsf):
     manager.query_once(js)                   # 거부됨 — 무장도 폐기됐어야 함
     qtbot.wait(150)
     assert calls == []
-    assert js.id not in manager._post_process
-    assert js.id not in manager._pending_arm
+    assert js.id not in manager._completion._post_process
+    assert js.id not in manager._completion._pending_arm
 
 
 # ----------------------------------------------------------------------
@@ -124,7 +124,7 @@ def test_gate_pass_then_cancel_reports_false(qtbot, manager, fake_lsf):
     assert results == [False]                # True로 알리면 rearm이 잘못 됨
     assert js.jobs()[0].state is JobState.DONE   # 레코드 원상 (재제출 없음)
     # 보류분(rearm/autopoll/post_process)이 잔류하지 않아야 한다
-    assert js.id not in manager._pending_arm
+    assert js.id not in manager._completion._pending_arm
 
 
 # ----------------------------------------------------------------------

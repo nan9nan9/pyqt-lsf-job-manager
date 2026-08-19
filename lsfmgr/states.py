@@ -5,7 +5,7 @@ frozen dataclass는 불변이므로 Qt Signal 인자로 스레드 간 안전하�
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace  # noqa: F401  (replace는 외부 사용 편의 re-export)
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import List, Optional
@@ -47,7 +47,7 @@ class JobState(Enum):
 
     @property
     def is_inactive(self) -> bool:
-        """비활성(제출 전 CREATED 또는 최종) 여부 — submit/merge/remove
+        """비활성(제출 전 CREATED 또는 최종) 여부 — submit/편집/remove
         가드의 공통 술어. 활성(SUBMITTING/RETRY_WAIT/on-LSF)이면 False."""
         return self is JobState.CREATED or self in _TERMINAL
 
@@ -75,14 +75,12 @@ class JobRecord:
     job_id: Optional[int]            # SUBMIT_FAILED 등 미확보 시 None
     array_index: Optional[int]       # array element면 인덱스, 아니면 None
     jobset_id: str
-    #: job의 키 — jobset 안에서 유일한 **논리 정체성**이다. 앱이 직접 정하고
-    #: (create_jobset/add_jobs의 job_keys), 생략하면 "<jobset_id>_<연번>"으로
-    #: 자동 생성된다. 재제출·교체에도 유지되므로 GUI 표의 행 정체성이 되고,
-    #: replace_jobs가 교체 대상을 찾는 기준이며 remove_jobs·set_user_data·
-    #: submit(only=)의 ref다.
-    #: (구 merge_id는 이 키와 역할이 겹쳐 삭제됐다 — merge API가 사라지면서
-    #:  "물리 키 vs 논리 키"를 나눌 이유가 없어졌다. LSF에 -J로 부착되지도
-    #:  않으므로 형식 제약도 없다.)
+    #: job의 키 — jobset 안에서 유일한 **논리 정체성**이다. 앱이 직접
+    #: 정하며(create_jobset/add_jobs의 job_keys) **필수**다 — 라이브러리가
+    #: 대신 지어주지 않는다. 재제출·교체에도 유지되므로 GUI 표의 행
+    #: 정체성이 되고, replace_jobs가 교체 대상을 찾는 기준이며
+    #: remove_jobs·set_user_data·submit(only=)의 ref다.
+    #: LSF에 -J로 부착되지 않으므로 형식 제약은 없다.
     job_key: str
     state: JobState
     fail_reason: Optional[str] = None    # "NO_JOBID_PARSED"|"BSUB_TIMEOUT"|...
@@ -128,18 +126,13 @@ class JobRecord:
 @dataclass(frozen=True)
 class JobSetRecord:
     """논리적 job 묶음 — 추적은 JobRecord의 job_id 목록으로만 한다.
-    (v10.1: 사장 필드 일괄 삭제 — 부착물(lsf_group_paths/name_patterns/
-    array_job_ids)은 v10부터 생성 자체가 없고, session_id(세션복원)/
-    parent_jobset_id/created_by는 쓰기만 되고 어디서도 읽지 않았다.
-    영속 저장소가 v9에서 제거돼 과거 데이터 호환 부담도 없다.
 
-    closed 플래그도 삭제됐다 — 종결은 mgr.remove_jobset()이 레코드를 실제로
-    지우므로 '닫혔지만 목록에 남아있는' 중간 상태가 아예 없다.
-    merged_from도 삭제됐다 — merge API가 사라지면서(job 추가는 add_jobs/
-    replace_jobs/upsert_jobs로 직접) 기록할 대상 자체가 없어졌다.)"""
+    쓰기만 되고 읽히지 않던 사장 필드(부착물/session_id/closed/merged_from/
+    description 등)는 v10.1~v10.5에 걸쳐 일괄 삭제됐다 — 근거와 경위는
+    git 이력. 되살리지 말 것(종결은 remove_jobset의 실제 삭제, job 추가는
+    add_jobs/replace_jobs/upsert_jobs가 대신한다)."""
     jobset_id: str
     intended_count: int                          # 손실 감지 기준
     label: str = ""
     tags: List[str] = field(default_factory=list)   # search_jobsets(tag=) 필터
-    description: str = ""
     created_at: Optional[datetime] = None        # search_jobsets(since=) 필터

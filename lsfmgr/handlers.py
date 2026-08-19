@@ -171,7 +171,7 @@ class JobSetHandlerService(QObject):
                     h.status.pop(key, None)     # → _PENDING (기본값)
 
     def remove_all(self, jobset_id: str) -> None:
-        """[main] jobset의 모든 handler 해제 (remove_jobset/merge 시)."""
+        """[main] jobset의 모든 handler 해제 (remove_jobset 시)."""
         for name in [n for (j, n) in self._handlers if j == jobset_id]:
             self.remove_handler(jobset_id, name)
 
@@ -194,7 +194,7 @@ class JobSetHandlerService(QObject):
         try:
             recs = self.store.get_jobs(jobset_id)
         except LsfmgrError:
-            self.remove_all(jobset_id)          # jobset 사라짐(삭제/merge)
+            self.remove_all(jobset_id)          # jobset 사라짐(remove_jobset)
             return
         except Exception:                        # noqa: BLE001
             # store 일시 장애 — 이번 사이클만 건너뛴다 (다음 폴링에 재시도).

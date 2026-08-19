@@ -34,7 +34,7 @@ def test_sibling_refresh_not_stale_from_cache(qtbot, manager):
     cmd = manager.querier.command
     # (v10: probe/leftover 2단이 사라져 원래의 'stale probe' 시나리오는 구조적으로
     # 불가능해졌다 — by-id 단일 조회 결과가 전 element 레코드에 반영되는지만 검증)
-    def fake_by_ids(ids):
+    def fake_by_ids(ids, *, fresh=False):
         if 900 in set(ids):
             return ([JobStatus(900, 0, JobState.DONE, 0),
                      JobStatus(900, 1, JobState.DONE, 0)], set())

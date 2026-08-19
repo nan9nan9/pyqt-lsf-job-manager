@@ -132,8 +132,8 @@ def test_gate_exception_unlocks_and_clears_pending(qtbot, manager, fake_lsf):
     qtbot.wait(50)
     # 예외 후: ctx 미완 고착 없음(재제출 가능), 보류 무장분 정리됨
     assert not manager.submitter.is_active(js.id)
-    assert js.id not in manager._pending_arm
-    assert js.id not in manager._post_process
+    assert js.id not in manager._completion._pending_arm
+    assert js.id not in manager._completion._post_process
     # 실제로 다시 제출 가능해야 한다 (잠기지 않음)
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         manager.submit(js, auto_poll=False)

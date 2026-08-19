@@ -55,12 +55,12 @@ class JobSetManager:
     # 생성
     # ------------------------------------------------------------------
     def local_create_jobset(self, intended_count: int, *, label: str = "",
-                            tags: Sequence[str] = (), description: str = "",
+                            tags: Sequence[str] = (),
                             jobset_id: Optional[str] = None) -> JobSetRecord:
         jsid = jobset_id or generate_jobset_id()
         record = JobSetRecord(
             jobset_id=jsid, intended_count=intended_count,
-            label=label, tags=list(tags), description=description,
+            label=label, tags=list(tags),
             created_at=datetime.now())
         return self.store.store_insert_jobset(record)
 
@@ -162,11 +162,19 @@ class JobSetManager:
                 else:
                     self.store.store_add_job(rec)
                 changed.append(rec)
-            js = self.store.get_jobset(jobset_id)
-            n = len(self.store.get_jobs(jobset_id))
-            if js.intended_count != n:
-                self.store.update_jobset(replace(js, intended_count=n))
+            self._sync_intended_count(jobset_id)
         return changed
+
+    def _sync_intended_count(self, jobset_id: str) -> None:
+        """[_meta_lock 보유 상태에서 호출] intended_count를 **실제 레코드
+        수**로 재동기화 — summary 불변식(상태 합계 == intended_count)의
+        단일 유지 지점 (편집/삭제 공용). 생성 경로(local_create_jobs)만
+        예외적으로 '늘리기만' 한다 — 빈 jobset의 intended_count 선지정을
+        보존하기 위해서다."""
+        js = self.store.get_jobset(jobset_id)
+        n = len(self.store.get_jobs(jobset_id))
+        if js.intended_count != n:
+            self.store.update_jobset(replace(js, intended_count=n))
 
     def local_remove_jobs(self, jobset_id: str, job_keys: Sequence[str], *,
                           force: bool = False) -> List[JobRecord]:
@@ -224,10 +232,7 @@ class JobSetManager:
         _warn_orphans(jobset_id, targets, what)
         for r in targets:
             self.store.store_delete_job(jobset_id, r.job_key)
-        js = self.store.get_jobset(jobset_id)
-        n = len(self.store.get_jobs(jobset_id))
-        if js.intended_count != n:
-            self.store.update_jobset(replace(js, intended_count=n))
+        self._sync_intended_count(jobset_id)
         return targets
 
     # ------------------------------------------------------------------
@@ -263,8 +268,7 @@ class JobSetManager:
     # ------------------------------------------------------------------
     def local_remove_jobset(self, jobset_id: str, *,
                             force: bool = False) -> JobSetRecord:
-        """전원 terminal이면 jobset을 **레코드째 삭제**한다 (merge source와
-        같은 경로). 반환은 삭제 직전 스냅샷 — 삭제 후에는 store에서 조회할
+        """전원 terminal이면 jobset을 **레코드째 삭제**한다. 반환은 삭제 직전 스냅샷 — 삭제 후에는 store에서 조회할
         수 없으므로 caller가 결과를 기록해야 하면 이 값을 쓴다.
         (v10: bgdel group 정리 제거 — 부착물이 생성되지 않으므로 정리할
         group도 없다.)"""

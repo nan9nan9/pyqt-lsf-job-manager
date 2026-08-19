@@ -140,6 +140,12 @@ def test_all_shared_keys_have_builtin_defaults():
     assert SHARED_KEYS <= set(BUILTIN_DEFAULTS)
 
 
-def test_tags_normalized_to_tuple():
-    opts = resolve_options({}, {"tags": ["a", "b"]})
-    assert opts.tags == ("a", "b")
+def test_jobset_meta_kwargs_deprecated():
+    """label/tags/description은 submit이 jobset을 만들던 시절(v9 이전)의
+    잔재 — 검증만 되고 아무도 읽지 않던 함정이라 경고 후 무시된다.
+    jobset 메타는 create_jobset 인자로만 준다."""
+    opts = resolve_options({}, {"tags": ["a", "b"], "label": "x",
+                                "description": "y"})
+    assert not hasattr(opts, "tags")
+    assert not hasattr(opts, "label")
+    assert opts.workers == 32                  # 나머지 해석은 정상
