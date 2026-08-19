@@ -647,28 +647,34 @@ class BulkSubmitter(QObject):
         self._count(ctx, failed=True, reason=err.fail_reason, changed=rec)
 
     def _task_cancelled(self, ctx: _SubmitContext, job_key: str) -> None:
-        self._revert_to_created(ctx, [job_key])
+        self._mark_cancelled(ctx, [job_key])
 
-    def _revert_to_created(self, ctx: _SubmitContext,
-                           keys: List[str]) -> None:
-        """kill/cancel 안전 지점 중단 — 아직 submit 전인 job을 CREATED로
-        복귀시키고 작업 1단위 완료로 계상한다.
+    def _mark_cancelled(self, ctx: _SubmitContext,
+                        keys: List[str]) -> None:
+        """kill/cancel 안전 지점 중단 — 제출을 포기한 job을 CANCELLED로
+        확정하고 작업 1단위 완료로 계상한다.
+
+        CREATED 복귀가 아니라 CANCELLED인 이유: 이 job은 '아직 제출 안 한
+        것'이 아니라 '제출하려다 취소된 것'이다. CREATED로 되돌리면 표에서
+        한 번도 손대지 않은 job과 구별되지 않아, kill을 눌렀는데 아무 흔적도
+        안 남는다. CANCELLED는 terminal이지만 is_inactive라 재제출은 그대로
+        된다(재제출 시 do_launch의 리셋이 이 이력을 지운다).
 
         - guard(CAS)로 SUBMITTING/RETRY_WAIT일 때만 전이 — 그새 다른 상태로
           바뀐(또는 remove_jobs으로 소실된) 키는 조용히 건너뛴다.
-        - 이전 시도의 실패 잔재(fail_reason/fail_message/retry_count)를 함께
-          리셋한다 — 안 지우면 '제출된 적 없는' CREATED job이 실패 이력을
-          달고 UI/store에 남는다 (_task_succeeded가 성공 시
-          fail_reason=None을 명시 전달하는 것과 대칭).
-        - CREATED 복귀도 changed로 발행한다 — CREATED는 폴링 대상(is_on_lsf)
-          이 아니라 여기서 안 알리면 UI 표가 SUBMITTING에 영구 고착된다.
+        - fail_reason은 "CANCELLED"로 남기고 이전 시도의 잔재
+          (fail_message/retry_count)는 지운다 — 취소는 실패가 아니므로
+          bsub 실패 메시지를 달고 남으면 원인 표시가 오해된다.
+        - 반드시 changed로 발행한다 — CANCELLED는 폴링 대상(is_on_lsf)이
+          아니라 여기서 안 알리면 UI 표가 SUBMITTING에 영구 고착된다.
         """
         def guard(cur):
             return cur.state in (JobState.SUBMITTING, JobState.RETRY_WAIT)
         changed = list(self.store.transition_many(
             ctx.jobset_id,
-            [(k, JobState.CREATED, guard,
-              {"fail_reason": None, "fail_message": None, "retry_count": 0})
+            [(k, JobState.CANCELLED, guard,
+              {"fail_reason": "CANCELLED", "fail_message": None,
+               "retry_count": 0})
              for k in keys]))
         self._count(ctx, cancelled=True, changed=changed)
 
@@ -735,7 +741,13 @@ class BulkSubmitter(QObject):
 
     def _finalize_retry(self, ctx: _SubmitContext, entry: _PendingRetry,
                         default_reason: str) -> None:
-        """재시도 포기 — RETRY_WAIT 잔류분을 SUBMIT_FAILED로 최종 확정.
+        """재시도 포기 — RETRY_WAIT 잔류분을 CANCELLED로 최종 확정.
+
+        호출 사유는 셋(SHUTDOWN/KILLED/CANCELLED) 다 **제출을 그만둔** 것이지
+        제출이 실패한 게 아니다. SUBMIT_FAILED로 확정하면 "재시도까지 다 하고
+        실패했다"로 읽혀 실패 집계가 부풀고, kill을 눌렀다는 사실이 사라진다.
+        fail_reason에는 직전 시도의 원인이 있으면 그걸(왜 재시도 중이었는지),
+        없으면 사유(default_reason)를 남긴다.
         jobset이 이미 삭제됐어도(remove_jobset 등) 카운터 확정은 계속한다."""
         changed = []
         key = entry.key
@@ -743,7 +755,7 @@ class BulkSubmitter(QObject):
             rec = self.store.get_job(ctx.jobset_id, key)
             if rec.state is JobState.RETRY_WAIT:
                 new = self.store.transition(ctx.jobset_id, key,
-                                            JobState.SUBMIT_FAILED,
+                                            JobState.CANCELLED,
                                             fail_reason=rec.fail_reason
                                             or default_reason)
                 if new is not None:
@@ -756,7 +768,9 @@ class BulkSubmitter(QObject):
             # 전파되면 done<total 고착 → finished 미발행
             log.exception("retry 포기 확정 실패(무시): %s/%s",
                           ctx.jobset_id, key)
-        self._count(ctx, failed=True, changed=changed)
+        # 실패가 아니라 취소로 계상 — SubmitReport.failed에 섞이면 "몇 건이
+        # 진짜 실패했나"를 못 읽는다 (상태가 CANCELLED인 것과 정합).
+        self._count(ctx, cancelled=True, changed=changed)
 
     # ------------------------------------------------------------------
     # 진행/완료 통지 — 모든 종료 경로의 단일 출구

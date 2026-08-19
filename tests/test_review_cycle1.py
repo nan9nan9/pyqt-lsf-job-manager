@@ -207,7 +207,7 @@ def test_bjobs_format_concurrent_downgrade_single_step():
     from lsfmgr.command import LsfCommand
     from lsfmgr.config import LsfConfig
 
-    cmd = LsfCommand(LsfConfig(collect_clusters=True), lambda a, t: None)
+    cmd = LsfCommand(LsfConfig(rate_limit_per_s=None, collect_clusters=True), lambda a, t: None)
     assert cmd._bjobs_fmt_idx == 0
     used = cmd._bjobs_fmt_idx
     # 두 스레드가 같은 used 인덱스로 동시에 강등을 시도한 상황

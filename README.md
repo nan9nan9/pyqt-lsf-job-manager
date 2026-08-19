@@ -70,33 +70,40 @@ js.jobset_updated.connect(lambda s: print(f"RUN={s['RUN']} DONE={s['DONE']}/{s['
 
 ```python
 class JobState(Enum):
-    CREATED; SUBMITTING; RETRY_WAIT; SUBMIT_FAILED; LOST      # 라이브러리 내부 상태
+    CREATED; SUBMITTING; RETRY_WAIT                           # 라이브러리 내부 상태
+    SUBMIT_FAILED; CANCELLED; LOST                            #  (아래 셋은 terminal)
     PEND; RUN; DONE; EXIT; PSUSP; USUSP; SSUSP; UNKWN; ZOMBI  # LSF native 상태
 ```
 
 ```
-                    ┌──────────── cancel/kill(미제출) ────────────┐
-                    ▼                                             │
- CREATED ──▶ SUBMITTING ──▶ PEND ──▶ RUN ──▶ DONE                 │
-                │   ▲         │        │       (terminal)         │
-                │   │재시도   │        ├──▶ EXIT (terminal)       │
-                ▼   │         │        │     ▲ kill(optimistic)   │
-             RETRY_WAIT ──────┼────────┼─────┘                    │
-                │             │        └──▶ PSUSP/USUSP/SSUSP ⇄ RUN
-                ▼             ▼
-         SUBMIT_FAILED     LOST (조회는 전부 성공했는데 job이 안 보임)
-          (terminal)        (terminal)
+ CREATED ──▶ SUBMITTING ──▶ PEND ──▶ RUN ──▶ DONE
+                │   ▲         │        │       (terminal)
+                │   │재시도   │        ├──▶ EXIT (terminal)
+                ▼   │         │        │     ▲ kill(optimistic)
+             RETRY_WAIT ──────┼────────┼─────┘
+                │   │         │        └──▶ PSUSP/USUSP/SSUSP ⇄ RUN
+                │   │         ▼
+                │   │       LOST (조회는 전부 성공했는데 job이 안 보임, terminal)
+                │   └──▶ SUBMIT_FAILED (재시도 N회 모두 실패, terminal)
+                └──────▶ CANCELLED     (제출 도중 kill/취소로 중단, terminal)
 ```
+
+**`CANCELLED`** — 제출이 진행 중이던 job에 kill/cancel이 들어와 **LSF에 닿기
+전에 접은** 상태입니다. terminal이지만 `is_failed`는 아닙니다(의도한 중단이라
+실패 집계에 섞이면 "몇 건이 진짜 실패했나"를 못 읽습니다). `is_inactive`라서
+**재제출은 그대로 됩니다** — 재제출 시 리셋이 이 이력을 지웁니다.
+이미 LSF에 도달한 뒤 죽은 job은 `CANCELLED`가 아니라 `EXIT`(`killed=True`)입니다.
 
 세 가지 술어가 API 전반의 판정 기준입니다:
 
-- **`is_terminal`** = `DONE` / `EXIT` / `SUBMIT_FAILED` / `LOST` — 더 이상
-  전이하지 않음. "전원 terminal"은 **모두 성공이 아니라 모두 끝남**을 뜻합니다
-  (`post_process` 발화 조건).
-- **`is_failed`** = `EXIT` / `SUBMIT_FAILED` / `LOST`
+- **`is_terminal`** = `DONE` / `EXIT` / `SUBMIT_FAILED` / `CANCELLED` / `LOST` —
+  더 이상 전이하지 않음. "전원 terminal"은 **모두 성공이 아니라 모두 끝남**을
+  뜻합니다 (`post_process` 발화 조건).
+- **`is_failed`** = `EXIT` / `SUBMIT_FAILED` / `LOST` (`CANCELLED` 제외)
 - **`is_inactive`** = `CREATED` **또는** terminal — submit/편집/remove 가드의
   공통 술어(terminal보다 넓습니다: CREATED는 "아직 제출 안 함"이라 terminal이
-  아니지만 inactive).
+  아니지만 inactive). `CANCELLED`도 여기 들어가므로 취소된 job은 바로 재제출할
+  수 있습니다.
 - `is_on_lsf` = PEND/RUN/SUSP\*/UNKWN/ZOMBI — 폴링·kill 스냅샷의 대상.
 
 ---
@@ -124,7 +131,7 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)     # 이번 submit만
 | `workers` | 32 | 병렬 submit worker 수 (1~64) |
 | `max_retry` | 3 | submit 실패 재시도 (0=끔) |
 | `retry_backoff` | `"fixed:2"` | `"fixed:N"`(N초 고정) / `"expo:N"`(지수) |
-| `rate_limit_per_s` | 없음 | 초당 제출 상한 (LSF 부하 보호) |
+| `rate_limit_per_s` | 5 | 초당 제출 상한 (LSF 부하 보호). 동시 제출이 인증(eauth)/mbatchd를 두들기면 bsub가 간헐적으로 `User permission denied`(exit 255)로 떨어져 재시도가 늘어남. `None`이면 무제한 — **처리량 상한이 곧 이 값**이라 5면 5000 job에 약 17분 |
 | `submit_timeout_s` | 30 | 제출 1건 timeout(초) |
 | `poll_interval_s` | 10 | polling 주기 (5~60) |
 | `auto_poll` | True | submit 후 polling 자동 시작 |
@@ -138,6 +145,7 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)     # 이번 submit만
 | 옵션 | 기본값 | 설명 |
 |---|---|---|
 | `bjobs_path` / `bkill_path` | PATH 탐색 | 조회/kill 명령 경로. 토큰 목록이면 고정 인자가 앞에 붙음. `job_status_fetcher`를 주면 `bjobs_path`는 안 쓰임(§5.8) |
+| `job_status_fetcher` | 없음 | 상태 조회 콜백. **주면 bjobs 대신 이 콜백으로 조회** — `LsfConfig` 필드다(§5.8) |
 | `chunk_size` | 500 | bjobs/bkill 한 번에 넘길 job 수 |
 | `arg_max` | 131072 | 명령줄 인자 총 길이 상한 (초과 시 `ArgMaxExceededError`) |
 | `lost_after_missing_polls` | 3 | bjobs에서 안 보이는 job을 **LOST로 확정하기까지** 필요한 연속 미발견 횟수. 1이면 즉시. 제출 직후 등록 지연으로 한두 사이클 안 보이는 job을 죽은 것으로 만들지 않기 위한 유예 |
@@ -484,7 +492,7 @@ mgr.jobset(jobset_id)      # ID로 핸들 재획득
 요약 dict 예:
 ```python
 {"total": 5000, "RUN": 2100, "PEND": 2800, "DONE": 80, "EXIT": 12,
- "SUBMIT_FAILED": 5, "RETRY_WAIT": 2, "LOST": 1}
+ "SUBMIT_FAILED": 5, "RETRY_WAIT": 2, "CANCELLED": 0, "LOST": 1}
 # 불변식: 상태 합계 == total (손실 job도 반드시 어딘가에 집계됨)
 ```
 
@@ -614,7 +622,7 @@ LSF 상태를 REST job 서버처럼 **LSF 바깥의 원본**에서 얻는 환경
 
 ```python
 import requests
-from lsfmgr import LsfJobManager
+from lsfmgr import LsfConfig, LsfJobManager
 
 def fetch_status():
     r = requests.get(f"http://insight:9980/jobserver/jobs/{USER}",
@@ -622,7 +630,7 @@ def fetch_status():
     r.raise_for_status()
     return r.json()          # {"jobs": [...], "count": N, "updateFrom": ...}
 
-mgr = LsfJobManager(job_status_fetcher=fetch_status)
+mgr = LsfJobManager(config=LsfConfig(job_status_fetcher=fetch_status))
 ```
 
 이게 전부입니다. 나머지 사용법(`create_jobset` → `submit` → Signal 구독)은
@@ -776,7 +784,8 @@ class InsightStatusFetcher:
             self.cursor = (newest - self.OVERLAP).isoformat()
         return payload                  # 응답 원문 그대로
 
-mgr = LsfJobManager(job_status_fetcher=InsightStatusFetcher(USER))
+mgr = LsfJobManager(config=LsfConfig(
+    job_status_fetcher=InsightStatusFetcher(USER)))
 ```
 
 라이브러리 쪽 원장은 job 단위로 **병합**되므로, 이번 payload에 없는 job은 지워지지
@@ -794,18 +803,23 @@ mgr = LsfJobManager(job_status_fetcher=InsightStatusFetcher(USER))
 
 | 옵션 | 기본값 | 설명 |
 |---|---|---|
-| `job_status_fetcher` | 없음 | 조회 콜백(생성자 인자). **주면 콜백 조회, 안 주면 bjobs** — 모드 스위치는 이것뿐 |
+| `job_status_fetcher` | 없음 | 조회 콜백. **주면 콜백 조회, 안 주면 bjobs** — 모드 스위치는 이것뿐 |
 | `internal_refresh_min_s` | 실제 폴링 주기/2 | 최소 갱신 간격(초). 이 안에 겹쳐 들어온 조회는 콜백을 다시 안 돌림. 0이면 캐시 없음. **미지정이면 가장 짧은 폴링 주기의 절반으로 자동 추종** — `start_polling(js, 2.0)`이면 1초로 내려감 |
 | `internal_retention_days` | 14 | 원장에서 **종료 job**을 보존할 기간(일). 0이면 만료 없음 |
 | `internal_lost_grace_s` | 60 | 제출 후 이 시간 안의 미발견은 LOST로 세지 않음. 0이면 유예 없음 |
 
+네 옵션 모두 `LsfConfig` 필드입니다.
+
 ```python
-mgr = LsfJobManager(
+mgr = LsfJobManager(config=LsfConfig(
     job_status_fetcher=fetch_status,
     internal_refresh_min_s=5.0,      # 5초 안의 중복 조회는 콜백 재실행 없음
     internal_retention_days=14,      # 2주 지난 종료 job은 원장에서 제거
-    internal_lost_grace_s=60)        # 제출 후 60초는 미발견을 LOST로 안 셈
+    internal_lost_grace_s=60))       # 제출 후 60초는 미발견을 LOST로 안 셈
 ```
+
+> `internal_*` 셋은 `LsfJobManager(...)` kwarg로도 줄 수 있지만
+> `job_status_fetcher`는 **`LsfConfig` 전용**입니다.
 
 #### 콜백은 언제, 몇 번 실행되나
 
@@ -836,6 +850,42 @@ timeout 없는 콜백(`requests.get(...)`에 `timeout=` 누락) 하나가 폴링
 jobset을 여러 개 돌려도 같은 원장을 공유하므로 응답을 여러 벌 들고 있지 않습니다.
 반대로 `LsfJobManager`를 여러 개 만들면 원장도 콜백도 그만큼 늘어납니다 — 앱에서
 manager는 하나만 두세요.
+
+#### MC 분류 kill은 어떻게 되나
+
+`cluster_envpaths`(§5.4)를 쓰면 kill 직전에 대상의 클러스터를 알아내 그 env를
+`source`한 `bkill`로 나눠 죽입니다. 콜백 조회원에서도 **동작이 같고, bjobs는
+안 나갑니다** — 같은 원장에서 답합니다.
+
+```
+kill(targets)
+  │
+  ├─① store 레코드에 cluster가 이미 있으면 그걸 쓴다 (폴링이 채워 둔 값)
+  │
+  ├─② 모르는 target만 조회 — bjobs 경로면 최소 포맷 bjobs,
+  │   콜백 경로면 **원장 조회**(subprocess 0회)
+  │
+  └─③ 그래도 미상이면 기본 env(`"*"` 매핑, 없으면 plain bkill)로 진행
+      — 조회 실패로 kill이 안 나가는 일은 없다
+```
+
+원장에서는 `dataId`의 클러스터 접미사(또는 `cluster` 필드)가 그대로 답이 됩니다.
+`id`와 `id[idx]` 양쪽 표기로 돌려주므로 array element kill도 분류됩니다.
+
+```python
+cmd.bjobs_clusters_by_ids([1001, 1002, 1003, 9999])
+# → {"1001": "cluster1", "1002": "cluster2",
+#    "1003": "cluster2", "1003[2]": "cluster2"}     # 9999는 원장에 없어 빠짐
+```
+
+두 가지가 bjobs 경로와 다릅니다.
+
+- **`source_cluster` 하나만 채워집니다.** bjobs는 `source_cluster`/
+  `forward_cluster`를 따로 주고 forward를 우선하는데, payload에는 클러스터가
+  하나뿐입니다. 분류 로직은 `forward or source`라 그 하나가 그대로 쓰입니다.
+- **캐시를 씁니다**(kill verify와 달리 `fresh`가 아닙니다). 클러스터 배정은
+  job 수명 동안 안 바뀌므로 최신값일 필요가 없습니다. 대신 **아직 원장에 안
+  올라온 job**(제출 직후)은 미상 → 기본 env 폴백입니다.
 
 #### 실패와 LOST — 두 가지 유예
 
@@ -964,7 +1014,7 @@ submit (mgr.submit(js) — 재제출 포함):
 
 kill:
   → kill_started                     # 접수 즉시(동기) — 스피너 켜는 지점
-  → jobs_updated([CREATED 복귀 배치]) # 진행 중 submit이 있었으면 (취소분)
+  → jobs_updated([CANCELLED 배치])    # 진행 중 submit이 있었으면 (취소분)
   → kill_progress                    # chunk 진행 (스로틀)
   → kill_finished(KillReport)        # 완료
   → jobs_updated([EXIT 전원 배치])    # 기본(optimistic) — 폴링 안 기다림

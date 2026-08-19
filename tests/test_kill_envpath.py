@@ -24,7 +24,7 @@ CSHRC = "/user/mcr1spool/lsfmcr1/conf/cshrc.lsf"
 
 @pytest.fixture
 def config(tmp_path):
-    return LsfConfig(retry_delay_s=0.05, kill_retry_delay_s=0.02)
+    return LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05, kill_retry_delay_s=0.02)
 
 
 # ----------------------------------------------------------------------
@@ -35,7 +35,7 @@ def test_bkill_argv_with_envpath():
     def runner(argv, timeout, cwd=None):
         calls.append(argv)
         return CommandResult(0, "Job <100> is being terminated\n", "")
-    cmd = LsfCommand(LsfConfig(), runner)
+    cmd = LsfCommand(LsfConfig(rate_limit_per_s=None, ), runner)
     cmd.bkill_targets_confirm(["100", "101"], envpath=CSHRC)
     assert calls[-1] == ["tcsh", "-c",
                          f"source {CSHRC} && set noglob && exec bkill 100 101"]
@@ -47,7 +47,7 @@ def test_bkill_argv_array_element_noglob():
     def runner(argv, timeout, cwd=None):
         calls.append(argv)
         return CommandResult(0, "Job <1000[2]> is being terminated\n", "")
-    cmd = LsfCommand(LsfConfig(), runner)
+    cmd = LsfCommand(LsfConfig(rate_limit_per_s=None, ), runner)
     cmd.bkill_targets_confirm(["1000[2]", "1000[3]"], envpath=CSHRC)
     inner = calls[-1][2]
     assert "set noglob" in inner
@@ -58,7 +58,7 @@ def test_bkill_argv_no_envpath_plain():
     calls = []
     def runner(argv, timeout, cwd=None):
         calls.append(argv); return CommandResult(0, "", "")
-    cmd = LsfCommand(LsfConfig(), runner)
+    cmd = LsfCommand(LsfConfig(rate_limit_per_s=None, ), runner)
     cmd.bkill_targets_confirm(["100"])               # envpath 없음
     assert calls[-1] == ["bkill", "100"]
 

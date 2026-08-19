@@ -16,7 +16,7 @@ MOCK = "/mock/bin/customwrapper_sub"
 
 
 def _make(fake_lsf, **kwargs):
-    cfg = LsfConfig(retry_delay_s=0.05, retry_backoff=1.0, max_retry=0,
+    cfg = LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05, retry_backoff=1.0, max_retry=0,
                     **kwargs)
     return LsfJobManager(store=InMemoryStore(), config=cfg, runner=fake_lsf)
 
@@ -122,7 +122,7 @@ def test_no_option_is_noop(qtbot, fake_lsf):
 ])
 def test_invalid_option_rejected(bad):
     with pytest.raises(ValueError):
-        LsfConfig(test_submit_wrapper_pattern_cmd=bad)
+        LsfConfig(rate_limit_per_s=None, test_submit_wrapper_pattern_cmd=bad)
 
 
 def test_manager_kwarg_and_typo(fake_lsf):

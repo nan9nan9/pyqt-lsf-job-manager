@@ -57,7 +57,7 @@ def test_no_coredump_on_exit_without_shutdown(tmp_path):
         from fake_lsf import FakeLsf
         app = QApplication(sys.argv)
         mgr = LsfJobManager(store=InMemoryStore(),
-                            config=LsfConfig(poll_interval_s=5), runner=FakeLsf())
+                            config=LsfConfig(rate_limit_per_s=None, poll_interval_s=5), runner=FakeLsf())
         js = mgr.create_jobset([f"r {i}" for i in range(20)],
                                job_keys=[f"k{i}" for i in range(20)])
         mgr.submit(js, auto_poll=False)
@@ -91,7 +91,7 @@ def test_shutdown_during_submit_preserves_job_ids(qtbot, fake_lsf, config):
 # GUI 응답성 — polling+submit 중 이벤트 루프 정지 없음 (수용 기준 7 축소판)
 # ----------------------------------------------------------------------
 def test_event_loop_not_blocked_during_bulk_submit(qtbot, fake_lsf):
-    cfg = LsfConfig(retry_delay_s=0.05)
+    cfg = LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05)
 
     # bsub마다 5ms 걸리는 느린 LSF 시뮬레이션
     original = fake_lsf.__call__

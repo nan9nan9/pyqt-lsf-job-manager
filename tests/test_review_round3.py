@@ -91,9 +91,9 @@ def test_shutdown_finalizes_pending_retries(qtbot, fake_lsf, config):
 
     mgr.shutdown()
     recs = mgr.get_jobs(jsid)
-    assert recs[0].state is JobState.SUBMIT_FAILED, \
+    assert recs[0].state is JobState.CANCELLED, \
         "shutdown 후 RETRY_WAIT가 비terminal로 영구 잔류"
-    assert reports and reports[-1].failed == 1   # finished도 발행됨
+    assert reports and reports[-1].cancelled == 1   # finished도 발행됨
 
 
 # ----------------------------------------------------------------------

@@ -17,6 +17,7 @@ class JobState(Enum):
     SUBMITTING = "SUBMITTING"
     RETRY_WAIT = "RETRY_WAIT"        # submit 실패 후 재시도 대기 (n/N회)
     SUBMIT_FAILED = "SUBMIT_FAILED"  # N회 재시도 모두 실패 (최종)
+    CANCELLED = "CANCELLED"          # 제출 도중 kill/취소로 중단 (최종)
     LOST = "LOST"                    # ID 미확보/조회 불가 (최종)
 
     # --- LSF native 상태 ---
@@ -54,7 +55,15 @@ class JobState(Enum):
 
 _TERMINAL = frozenset({
     JobState.DONE, JobState.EXIT, JobState.SUBMIT_FAILED, JobState.LOST,
+    # CANCELLED가 terminal인 이유: 이 job의 제출은 끝났다(LSF에 도달하지
+    # 못한 채로). non-terminal로 두면 폴링이 영영 안 멈추고 jobset_finished/
+    # post_process가 발화하지 않아, kill 뒤 jobset이 '끝나지 않은' 채로
+    # 남는다. terminal이지만 is_inactive이므로 재제출은 그대로 가능하다.
+    JobState.CANCELLED,
 })
+#: 실패로 분류되는 상태. CANCELLED는 **의도한 중단**이라 여기 없다 —
+#: js.jobs_failed/요약의 실패 집계에 취소분이 섞이면 "몇 건이 진짜 실패했나"를
+#: 못 읽는다.
 _FAILED = frozenset({
     JobState.EXIT, JobState.SUBMIT_FAILED, JobState.LOST,
 })

@@ -178,7 +178,7 @@ def test_double_field_error_degrades_to_core():
             return CommandResult(255, "", "Unknown field: run_time\n")
         return CommandResult(0, "111;RUN;-;j0\n", "")
 
-    cmd = LsfCommand(LsfConfig(collect_clusters=True), runner)
+    cmd = LsfCommand(LsfConfig(rate_limit_per_s=None, collect_clusters=True), runner)
     out, failed = cmd.bjobs_by_ids([111])    # 한 호출에서 CORE까지 강등
     assert cmd._bjobs_fmt is cmd._BJOBS_CORE_FMT
     assert failed == set()
@@ -213,7 +213,7 @@ def test_wrapper_array_aggregate_carries_cluster(qtbot, mc_manager, fake_lsf):
 def test_off_polling_preserves_stored_cluster(qtbot, fake_lsf, tmp_path):
     store = InMemoryStore()
     # collect off 매니저지만 store엔 이미 forward_cluster가 채워진 job이 있다
-    mgr = LsfJobManager(store=store, config=LsfConfig(), runner=fake_lsf)  # off
+    mgr = LsfJobManager(store=store, config=LsfConfig(rate_limit_per_s=None, ), runner=fake_lsf)  # off
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             js = submit_cmds(mgr, ["echo a"], auto_poll=False)

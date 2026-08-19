@@ -55,7 +55,8 @@ def test_kill_during_submit_cancels_unsubmitted_and_kills_submitted(
             runner.gate.set()                # 진행 중이던 bsub 완료 허용
 
         states = sorted(r.state.name for r in js.jobs())
-        assert states == ["CREATED", "CREATED", "EXIT"], states
+        # 제출 도중 취소된 2건은 CANCELLED, 이미 제출된 1건은 kill로 EXIT
+        assert states == ["CANCELLED", "CANCELLED", "EXIT"], states
         killed = [r for r in js.jobs() if r.state is JobState.EXIT]
         assert killed[0].fail_reason == "KILLED"
         assert killed[0].job_id is not None  # 제출돼 버린 그 job이 kill됨
@@ -75,7 +76,8 @@ def test_kill_during_submit_invariant_no_survivors(qtbot, manager, fake_lsf):
         manager.kill(js.id)
 
     assert fake_lsf.alive_jobs() == []
-    allowed = {JobState.EXIT, JobState.CREATED, JobState.SUBMIT_FAILED}
+    allowed = {JobState.EXIT, JobState.CREATED, JobState.CANCELLED,
+               JobState.SUBMIT_FAILED}
     got = {r.state for r in js.jobs()}
     assert got <= allowed, got               # SUBMITTING/PEND 잔존 금지
 
@@ -200,10 +202,12 @@ def test_quiesce_timeout_recorded_in_kill_report(qtbot, manager, fake_lsf):
     assert stub.released.is_set()            # finally에서 barrier 해제 보장
 
 
-def test_revert_to_created_clears_failure_residue(qtbot, manager, fake_lsf):
-    """CREATED 복귀는 이전 시도의 실패 잔재(fail_reason/fail_message/
-    retry_count)를 함께 리셋한다 — 안 지우면 '제출된 적 없는' job이
-    실패 이력을 달고 UI/persistent store에 남는다."""
+def test_cancel_marks_cancelled_and_clears_failure_residue(qtbot, manager,
+                                                           fake_lsf):
+    """취소 확정은 CANCELLED로 남기고 이전 시도의 잔재(fail_message/
+    retry_count)를 리셋한다 — 취소는 실패가 아니라서 bsub 실패 메시지를
+    달고 남으면 원인 표시가 오해된다. (CREATED로 되돌리면 한 번도 손대지
+    않은 job과 구별되지 않아 kill 흔적이 사라진다)"""
     from lsfmgr.options import Options
     from lsfmgr.qt import QThreadPool
     from lsfmgr.states import JobRecord
@@ -221,11 +225,13 @@ def test_revert_to_created_clears_failure_residue(qtbot, manager, fake_lsf):
                          pool=QThreadPool(), limiter=TokenBucketLimiter(None),
                          options=Options())
 
-    manager.submitter._revert_to_created(ctx, [key])
+    manager.submitter._mark_cancelled(ctx, [key])
 
     rec = manager.store.get_job(jsid, key)
-    assert rec.state is JobState.CREATED
-    assert rec.fail_reason is None
+    assert rec.state is JobState.CANCELLED
+    assert rec.state.is_terminal and not rec.state.is_failed
+    assert rec.state.is_inactive           # 재제출은 그대로 가능
+    assert rec.fail_reason == "CANCELLED"
     assert rec.fail_message is None
     assert rec.retry_count == 0
 
@@ -330,7 +336,7 @@ def test_cancel_submit_then_full_kill_cleans_everything(qtbot, config,
             mgr.kill(js.id)                       # 남은 제출분까지 정리
             runner.gate.set()
         states = sorted(r.state.name for r in js.jobs())
-        assert states == ["CREATED", "CREATED", "EXIT"], states
+        assert states == ["CANCELLED", "CANCELLED", "EXIT"], states
         assert fake_lsf.alive_jobs() == []          # 유출 0
     finally:
         mgr.shutdown()
@@ -423,3 +429,47 @@ def test_raw_id_kill_does_not_touch_submission(qtbot, config, fake_lsf):
         assert fake_lsf.alive_jobs() == []
     finally:
         mgr.shutdown()
+
+
+# ----------------------------------------------------------------------
+# CANCELLED — 제출 도중 kill로 접힌 job의 최종 상태
+# ----------------------------------------------------------------------
+def test_cancelled_is_terminal_but_not_failed():
+    """의도한 중단이라 실패 집계에 섞이면 안 된다 — 대신 terminal이어야
+    폴링이 멈추고 jobset_finished/post_process가 발화한다."""
+    c = JobState.CANCELLED
+    assert c.is_terminal and c.is_inactive
+    assert not c.is_failed and not c.is_on_lsf
+
+
+def test_cancelled_jobs_are_not_counted_as_failures(qtbot, manager, fake_lsf):
+    """SubmitReport와 요약 양쪽에서 취소는 failed가 아니라 cancelled다."""
+    js = mk_jobset(manager, ["echo a", "echo b"])
+    reports = []
+    manager.submit_finished.connect(lambda _js, r: reports.append(r))
+    manager.submit(js, auto_poll=False)
+    manager.kill(js.id)
+    qtbot.waitUntil(lambda: bool(reports), timeout=15000)
+    qtbot.waitUntil(lambda: all(r.state.is_terminal for r in js.jobs()),
+                    timeout=15000)
+    summary = manager.summary(js.id)
+    assert summary.get("CANCELLED", 0) + summary.get("EXIT", 0) == 2, summary
+    assert not [r for r in js.jobs() if r.state is JobState.SUBMIT_FAILED]
+
+
+def test_cancelled_job_can_be_resubmitted(qtbot, manager, fake_lsf):
+    """CANCELLED는 terminal이지만 is_inactive라 재제출 가드를 통과해야 한다 —
+    kill 한 번에 그 job이 영구히 못 쓰게 되면 안 된다."""
+    js = mk_jobset(manager, ["echo a"])
+    with qtbot.waitSignals([manager.submit_finished, manager.kill_finished],
+                           timeout=15000):
+        manager.submit(js, auto_poll=False)
+        manager.kill(js.id)
+    qtbot.waitUntil(lambda: all(r.state.is_terminal for r in js.jobs()),
+                    timeout=15000)
+    assert manager.can_submit(js.id), js.jobs()[0].state
+    with qtbot.waitSignal(manager.submit_finished, timeout=15000):
+        manager.submit(js, auto_poll=False)
+    rec = js.jobs()[0]
+    assert rec.state is JobState.PEND          # 재제출 성공
+    assert rec.fail_reason is None             # 취소 이력은 리셋됐다

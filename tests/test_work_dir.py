@@ -144,7 +144,7 @@ def test_invalid_work_dir_classified_submit_error():
 
     def raising_runner(argv, timeout, cwd=None):
         raise FileNotFoundError(2, "No such file or directory", cwd)
-    cmd = LsfCommand(config=LsfConfig(), runner=raising_runner)
+    cmd = LsfCommand(config=LsfConfig(rate_limit_per_s=None, ), runner=raising_runner)
     with pytest.raises(SubmitError) as ei:
         cmd.run_submit(["customwrapper_sub", "a.sp"], cwd="/nope")
     assert ei.value.fail_reason == "BSUB_OSERROR"

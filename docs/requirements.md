@@ -485,7 +485,7 @@ Qt 비의존 유지: options/config/states/command/store/jobset_core (Qt 없이 
 6. GUI 응답성 — main 스레드 100ms 이상 정지 없음
 7. PyQt5·PySide6 각각 전체 테스트 통과 (`QT_API` 전환만으로)
 8. 동시성 — submit+polling+kill 동시 수행 시 무결성, **kill 우선권**(진행 중 submit
-   중 kill 시 미제출분 CREATED 복귀·제출분 kill, SUBMITTING 유출 없음)
+   중 kill 시 미제출분 CANCELLED 확정·제출분 kill, SUBMITTING 유출 없음)
 9. Store 계약 테스트 통과, InMemory 파일 미생성
 10. **명령 일원화**: 모든 명령은 `mgr.*`, JobSet 핸들에 명령 메서드 없음
 11. shutdown 후 잔여 스레드 없음 (AUTO-3 자동 연결 포함)

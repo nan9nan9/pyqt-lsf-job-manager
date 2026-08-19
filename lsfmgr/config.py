@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
+from .internal_status import JobStatusFetcher
+
 #: LSF 명령 경로. 단일 프로그램은 str, bsub를 호출하는 wrapper처럼 고정 인자가
 #: 붙는 명령은 토큰 목록으로 지정한다 (예: ["customwrapper_sub", "--proj", "X"]).
 #: wrapper는 표준 bsub 옵션(-q/-J/-g/...)을 받아 bsub로 넘기고, bsub의 출력
@@ -20,10 +22,19 @@ class LsfConfig:
     """LSF 명령 경로/타임아웃/chunk 등 환경 설정."""
     # (v10: bsub_path/bgdel_path 삭제 — bsub 조립 제출·bgdel group 정리가
     #  제거됨. 제출은 wrapper 커맨드를 그대로 실행한다.)
-    #: 조회 명령. `LsfJobManager(job_status_fetcher=...)`로 콜백을 주면 조회가
-    #: 그 콜백으로 넘어가고 이 값은 쓰이지 않는다 (lsfmgr/internal_status.py).
+    #: 조회 명령. job_status_fetcher를 주면 조회가 그 콜백으로 넘어가고
+    #: 이 값은 쓰이지 않는다 (lsfmgr/internal_status.py).
     bjobs_path: CmdPath = DEFAULT_BJOBS_PATH
     bkill_path: CmdPath = "bkill"
+
+    #: 상태 조회 콜백. **주면** 상태 조회가 bjobs subprocess 대신 이 콜백으로
+    #: 간다(안 주면 종전대로 bjobs). 인자 없이 호출되고 REST 응답 JSON
+    #: ({"jobs": [...]})을 그대로 반환하면 된다 — 파싱·캐시·동시 호출 합치기·
+    #: 원장 만료는 라이브러리가 한다 (README §5.8).
+    #: URL·인증·**타임아웃**·재시도는 콜백의 몫이다. 안 돌아오는 콜백은
+    #: 라이브러리가 견디기만 할 뿐 되살리지 못한다.
+    #: 아래 internal_* 노브들이 이 조회원의 동작을 정한다.
+    job_status_fetcher: Optional[JobStatusFetcher] = None
 
     #: MultiCluster kill — {클러스터명: cshrc 경로}. 지정하면 kill이 대상의
     #: cluster를 확인해(미상이면 bkill 직전에 최소 포맷으로 1회 조회) 그
@@ -73,7 +84,14 @@ class LsfConfig:
     max_retry: int = 3                   # submit 재시도 횟수
     retry_delay_s: float = 2.0           # 첫 재시도 대기 (v7 기본 "fixed:2")
     retry_backoff: float = 1.0           # >1.0이면 지수 backoff("expo")
-    rate_limit_per_s: Optional[float] = None   # bsub 초당 호출 제한
+    #: bsub 초당 호출 제한. 기본 5 — 동시 제출이 LSF 인증(eauth)/mbatchd를
+    #: 두들기면 bsub가 간헐적으로 "User permission denied"(exit 255)로 떨어진다.
+    #: 재시도로 결국 성공하긴 하지만 제출이 느려지고 로그가 시끄러워진다.
+    #: workers(동시 실행 수)와 함께 건다 — 부하를 정하는 건 '몇 개가 동시에
+    #: 붙느냐'보다 '초당 몇 번 붙느냐'인 경우가 많다.
+    #: None이면 제한 없음(빠르지만 대량 제출에서 위 증상 위험).
+    #: ⚠ 처리량 상한이 그대로 이 값이다 — 5면 5000 job 제출에 약 17분.
+    rate_limit_per_s: Optional[float] = 5.0
 
     kill_max_retry: int = 2              # kill 확인 실패 시 재시도
     kill_retry_delay_s: float = 3.0      # kill 재시도 간격 — bkill은 비동기라
@@ -225,6 +243,10 @@ class LsfConfig:
             if value is None or float(value) <= 0:
                 raise ValueError(f"{name}는 양수 (got {value!r})")
             setattr(self, name, float(value))
+        if (self.job_status_fetcher is not None
+                and not callable(self.job_status_fetcher)):
+            raise ValueError("job_status_fetcher는 호출 가능해야 합니다 "
+                             f"(got {self.job_status_fetcher!r})")
         # internal 갱신 간격은 0(캐시 끔) 허용 — 음수만 막는다.
         if self.internal_refresh_min_s is not None:
             if float(self.internal_refresh_min_s) < 0:

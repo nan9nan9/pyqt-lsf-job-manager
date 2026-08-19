@@ -305,8 +305,9 @@ def test_retention_zero_disables_expiry():
 # ----------------------------------------------------------------------
 def test_fetcher_presence_alone_selects_the_callback_source():
     """모드 전환의 스위치는 job_status_fetcher 하나뿐이다."""
-    assert LsfCommand(LsfConfig()).internal_status is None
-    cmd = LsfCommand(LsfConfig(), job_status_fetcher=lambda: _payload())
+    assert LsfCommand(LsfConfig(rate_limit_per_s=None, )).internal_status is None
+    cmd = LsfCommand(LsfConfig(rate_limit_per_s=None,
+                               job_status_fetcher=lambda: _payload()))
     assert cmd.internal_status is not None
 
 
@@ -314,8 +315,9 @@ def test_explicit_bjobs_path_is_warned_as_ignored(caplog):
     """콜백을 주면 bjobs_path는 아무 데도 안 쓰인다 — mock bjobs를 가리켜
     놓고 '왜 안 불리지' 하는 것을 막는다."""
     with caplog.at_level("WARNING", logger="lsfmgr.command"):
-        cmd = LsfCommand(LsfConfig(bjobs_path="/opt/mock/bjobs"),
-                         job_status_fetcher=lambda: _payload())
+        cmd = LsfCommand(LsfConfig(rate_limit_per_s=None,
+                                   bjobs_path="/opt/mock/bjobs",
+                                   job_status_fetcher=lambda: _payload()))
     assert cmd.internal_status is not None
     warns = [r for r in caplog.records if "무시됩니다" in r.message]
     assert len(warns) == 1, f"경고 {len(warns)}회 (생성 시 1회여야 함)"
@@ -324,7 +326,8 @@ def test_explicit_bjobs_path_is_warned_as_ignored(caplog):
 def test_default_bjobs_path_is_not_warned(caplog):
     """안 건드린 기본값까지 경고하면 정상 사용에 잡음만 남는다."""
     with caplog.at_level("WARNING", logger="lsfmgr.command"):
-        LsfCommand(LsfConfig(), job_status_fetcher=lambda: _payload())
+        LsfCommand(LsfConfig(rate_limit_per_s=None,
+                             job_status_fetcher=lambda: _payload()))
     assert not [r for r in caplog.records if "무시됩니다" in r.message]
 
 
@@ -345,8 +348,8 @@ def test_ignore_warning_fires_once_per_manager(qtbot, fake_lsf, caplog):
 
 
 def test_default_refresh_interval_is_half_the_poll_interval():
-    assert LsfConfig(poll_interval_s=10.0).effective_internal_refresh_min_s == 5.0
-    assert LsfConfig(internal_refresh_min_s=0.0
+    assert LsfConfig(rate_limit_per_s=None, poll_interval_s=10.0).effective_internal_refresh_min_s == 5.0
+    assert LsfConfig(rate_limit_per_s=None, internal_refresh_min_s=0.0
                      ).effective_internal_refresh_min_s == 0.0
 
 
@@ -359,9 +362,10 @@ def test_polling_updates_state_without_running_bjobs(qtbot, fake_lsf):
 
     mgr = LsfJobManager(
         store=InMemoryStore(),
-        config=LsfConfig(retry_delay_s=0.05,
-                         internal_refresh_min_s=0.0),
-        runner=fake_lsf, job_status_fetcher=fetch)
+        config=LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05,
+                         internal_refresh_min_s=0.0,
+                         job_status_fetcher=fetch),
+        runner=fake_lsf)
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             js = submit_cmds(mgr, [f"mytool r{i}.sp" for i in range(5)],
@@ -389,10 +393,11 @@ def test_lost_is_deferred_when_callback_is_down(qtbot, fake_lsf):
 
     mgr = LsfJobManager(
         store=InMemoryStore(),
-        config=LsfConfig(retry_delay_s=0.05,
+        config=LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05,
                          internal_refresh_min_s=0.0,
-                         lost_after_missing_polls=1),
-        runner=fake_lsf, job_status_fetcher=fetch)
+                         lost_after_missing_polls=1,
+                         job_status_fetcher=fetch),
+        runner=fake_lsf)
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             js = submit_cmds(mgr, ["mytool a.sp"], auto_poll=False)
@@ -415,8 +420,9 @@ def _internal_mgr(fake_lsf, fetch, **cfg):
     cfg.setdefault("lost_after_missing_polls", 1)   # 유예가 없으면 즉시 LOST
     return LsfJobManager(
         store=InMemoryStore(),
-        config=LsfConfig(retry_delay_s=0.05, **cfg),
-        runner=fake_lsf, job_status_fetcher=fetch)
+        config=LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05,
+                         job_status_fetcher=fetch, **cfg),
+        runner=fake_lsf)
 
 
 def test_unseen_job_is_deferred_within_submit_grace(qtbot, fake_lsf):
@@ -694,9 +700,10 @@ def test_manager_kwarg_poll_interval_reaches_the_source(qtbot, fake_lsf):
     """poll_interval_s는 MANAGER_ONLY가 아니라 _defaults로 가서 config에
     안 실린다 — 그대로 두면 앱 설정이 갱신 간격에 반영되지 않는다."""
     mgr = LsfJobManager(store=InMemoryStore(),
-                        config=LsfConfig(retry_delay_s=0.05),
-                        runner=fake_lsf, poll_interval_s=30.0,
-                        job_status_fetcher=lambda: _payload())
+                        config=LsfConfig(rate_limit_per_s=None,
+                                          retry_delay_s=0.05,
+                                          job_status_fetcher=lambda: _payload()),
+                        runner=fake_lsf, poll_interval_s=30.0)
     try:
         assert mgr.command.internal_status._refresh_min_s == 15.0
     finally:
@@ -790,3 +797,40 @@ def test_unparsable_time_keeps_the_row():
     (st,) = parse_internal_jobs({"jobs": [
         {"dataId": "1", "stat": "RUN", "startTime": "깨진값"}]})
     assert st.job_id == 1 and st.start_time is None
+
+
+# ----------------------------------------------------------------------
+# 9) MC 분류 kill — 콜백 조회원에서도 bjobs 없이 cluster를 얻는다
+# ----------------------------------------------------------------------
+def _no_subprocess(argv, timeout, cwd=None):
+    raise AssertionError(f"subprocess가 실행됨: {argv}")
+
+
+def test_cluster_lookup_for_kill_uses_the_ledger():
+    """kill 직전 cluster 조회도 콜백 원장에서 답한다 — bjobs가 나가면 안 된다."""
+    cmd = LsfCommand(LsfConfig(rate_limit_per_s=None, job_status_fetcher=lambda: _payload(
+        _job(1, dataId="1001.cluster1", cluster=None),
+        _job(2, dataId="1002.cluster2", cluster=None),
+        _job(3, dataId="1003[2].cluster2", cluster=None))),
+        _no_subprocess)
+    got = cmd.bjobs_clusters_by_ids([1001, 1002, 1003, 9999])
+    assert got == {"1001": "cluster1", "1002": "cluster2",
+                   "1003": "cluster2", "1003[2]": "cluster2"}, got
+
+
+def test_cluster_lookup_is_lenient_when_unknown():
+    """조회가 비어도 kill 자체는 나가야 한다 — 미상은 기본 env 폴백이다."""
+    cmd = LsfCommand(LsfConfig(rate_limit_per_s=None,
+                               job_status_fetcher=lambda: _payload()),
+                     _no_subprocess)
+    assert cmd.bjobs_clusters_by_ids([1001]) == {}
+
+
+def test_cluster_lookup_survives_a_broken_callback():
+    cmd = LsfCommand(LsfConfig(rate_limit_per_s=None,
+                               job_status_fetcher=_boom), _no_subprocess)
+    assert cmd.bjobs_clusters_by_ids([1001]) == {}
+
+
+def _boom():
+    raise RuntimeError("REST down")

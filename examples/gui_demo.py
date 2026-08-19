@@ -121,7 +121,9 @@ class SubmitForm(QGroupBox):
         self.count = QSpinBox(minimum=1, maximum=10000, value=30)
         self.workers = QSpinBox(minimum=1, maximum=32, value=8)
         self.max_retry = QSpinBox(minimum=0, maximum=10, value=3)
-        self.rate = QSpinBox(minimum=0, maximum=1000, value=0)   # 0=무제한
+        # 0=무제한. 기본 5 — 동시 제출이 LSF 인증(eauth)을 두들겨 bsub가
+        # 간헐적으로 "User permission denied"로 떨어지는 것을 완화한다.
+        self.rate = QSpinBox(minimum=0, maximum=1000, value=5)
         self.wrapper = QComboBox()
         self.wrapper.addItems(WRAPPERS + ["혼합(mix)"])
         self.queue = QLineEdit("normal")          # wrapper 에 -q 로 전달

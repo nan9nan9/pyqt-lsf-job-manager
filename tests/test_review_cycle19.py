@@ -39,7 +39,7 @@ def _vanish_all(fake):
 def _mgr(fake, grace=3):
     return LsfJobManager(
         store=InMemoryStore(),
-        config=LsfConfig(retry_delay_s=0.05, lost_after_missing_polls=grace),
+        config=LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05, lost_after_missing_polls=grace),
         runner=fake)
 
 
