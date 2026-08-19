@@ -63,7 +63,7 @@ MAX_RETRY_DELAY_S = 86400.0
 @dataclass(frozen=True)
 class Options:
     """1회 호출에 적용될 최종 옵션 (frozen — Signal/스레드 공유 안전)."""
-    workers: int = 32
+    workers: int = 8
     max_retry: int = 3
     retry_backoff: str = "fixed:2"
     rate_limit_per_s: Optional[float] = 20.0

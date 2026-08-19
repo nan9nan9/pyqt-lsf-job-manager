@@ -70,9 +70,12 @@ class LsfConfig:
     chunk_size: int = 500
     arg_max: int = 131072                # 명령줄 인자 총 길이 상한 (보수적)
 
-    workers: int = 32                    # 병렬 submit worker 수 (1~64)
-                                         # 상한↑ 시 submit 호스트 CPU/RAM·master
-                                         # 부하 주의 — rate_limit_per_s와 병행
+    #: 병렬 submit worker 수 (1~64). 기본 8 — 동시에 뜨는 bsub 프로세스 수다.
+    #: 크게 잡으면 submit 호스트 CPU/RAM과 LSF master(mbatchd/eauth)를 함께
+    #: 두들겨 bsub가 간헐적으로 "User permission denied"로 떨어진다.
+    #: rate_limit_per_s(초당 호출)와 축이 다르다 — 이건 '동시에 몇 개',
+    #: 저건 '초당 몇 번'이라 둘 다 걸어야 부하가 잡힌다.
+    workers: int = 8
     max_retry: int = 3                   # submit 재시도 횟수
     retry_delay_s: float = 2.0           # 첫 재시도 대기 (v7 기본 "fixed:2")
     retry_backoff: float = 1.0           # >1.0이면 지수 backoff("expo")

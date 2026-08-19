@@ -136,7 +136,7 @@ exec bsub "$@"      # bsub 의 stdout("Job <id> ...")·exit code 를 그대로 �
 
 - lsfmgr 는 **job(커맨드) 하나마다 wrapper 프로세스를 subprocess 로 하나** 띄운다
   (shell 미경유).
-- 동시에 뜨는 프로세스 수 = `workers` 옵션(기본 32, 1~64).
+- 동시에 뜨는 프로세스 수 = `workers` 옵션(기본 8, 1~64).
   `rate_limit_per_s` 로 초당 실행 횟수도 제한한다.
 
 ```python

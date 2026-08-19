@@ -18,7 +18,7 @@ from lsfmgr.options import (
 # ----------------------------------------------------------------------
 def test_builtin_defaults_only():
     opts = resolve_options({}, {})
-    assert opts.workers == 32
+    assert opts.workers == 8
     assert opts.max_retry == 3
     assert opts.retry_backoff == "fixed:2"
     assert opts.rate_limit_per_s == 20.0    # bsub 초당 호출 제한(기본 켜짐)
@@ -148,7 +148,7 @@ def test_jobset_meta_kwargs_deprecated():
                                 "description": "y"})
     assert not hasattr(opts, "tags")
     assert not hasattr(opts, "label")
-    assert opts.workers == 32                  # 나머지 해석은 정상
+    assert opts.workers == 8                   # 나머지 해석은 정상
 
 
 def test_options_defaults_match_lsfconfig():
