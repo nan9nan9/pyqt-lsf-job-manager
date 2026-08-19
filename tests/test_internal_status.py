@@ -701,3 +701,92 @@ def test_manager_kwarg_poll_interval_reaches_the_source(qtbot, fake_lsf):
         assert mgr.command.internal_status._refresh_min_s == 15.0
     finally:
         mgr.shutdown()
+
+
+# ----------------------------------------------------------------------
+# 8) README §5.8 "받아들이는 JSON" 표의 계약 — 문서와 구현의 대조
+# ----------------------------------------------------------------------
+@pytest.mark.parametrize("payload", [
+    {"jobs": [{"dataId": "1.c", "stat": "RUN"}], "count": 1,
+     "updateFrom": None},                       # ① 응답 원문
+    {"jobs": [{"dataId": "1.c", "stat": "RUN"}], "count": 99},   # count 불일치
+    [{"dataId": "1.c", "stat": "RUN"}],         # ② job 목록만
+])
+def test_accepted_envelopes(payload):
+    (st,) = parse_internal_jobs(payload)
+    assert st.job_id == 1 and st.state is JobState.RUN
+
+
+def test_null_jobs_is_an_empty_list():
+    assert parse_internal_jobs({"jobs": None}) == []
+
+
+@pytest.mark.parametrize("key", ["dataId", "dataid", "jobId", "jobid", "id"])
+def test_id_key_aliases(key):
+    (st,) = parse_internal_jobs({"jobs": [{key: "1432342.c1", "stat": "RUN"}]})
+    assert st.job_id == 1432342 and st.source_cluster == "c1"
+
+
+@pytest.mark.parametrize("key", ["stat", "status", "state"])
+def test_stat_key_aliases(key):
+    (st,) = parse_internal_jobs({"jobs": [{"dataId": "1", key: "DONE"}]})
+    assert st.state is JobState.DONE
+
+
+@pytest.mark.parametrize("key", ["finishTime", "finish_time",
+                                 "endTime", "end_time"])
+def test_finish_key_aliases(key):
+    (st,) = parse_internal_jobs({"jobs": [
+        {"dataId": "1", "stat": "DONE", key: "2026-08-08T12:01:40"}]})
+    assert st.finish_time == datetime(2026, 8, 8, 12, 1, 40)
+
+
+@pytest.mark.parametrize("key", ["exitStatus", "exitCode",
+                                 "exit_code", "exit_status"])
+def test_exit_key_aliases(key):
+    (st,) = parse_internal_jobs({"jobs": [
+        {"dataId": "1", "stat": "EXIT", key: "137"}]})
+    assert st.exit_code == 137
+
+
+@pytest.mark.parametrize("key", ["cluster", "clusterName", "cluster_name"])
+def test_cluster_key_aliases(key):
+    (st,) = parse_internal_jobs({"jobs": [
+        {"dataId": "1", "stat": "RUN", key: "cl9"}]})
+    assert st.source_cluster == "cl9"
+
+
+@pytest.mark.parametrize("blank", [None, "", "-", "null", "NULL",
+                                   "none", "nil", "n/a"])
+def test_blank_markers_are_all_none(blank):
+    (st,) = parse_internal_jobs({"jobs": [
+        {"dataId": "1", "stat": "RUN", "startTime": blank,
+         "cluster": blank}]})
+    assert st.start_time is None and st.source_cluster is None
+
+
+@pytest.mark.parametrize("text", [
+    "2026-08-19T00:12:12", "2026-08-19 00:12:12",
+    "2026-08-19T00:12:12.345", "2026:08:08T12:00:01",
+])
+def test_documented_time_shapes(text):
+    assert parse_time(text) is not None
+
+
+def test_timezone_offsets_are_converted_to_local():
+    """aware/naive를 섞으면 뺄셈이 TypeError다 — 로컬 naive로 맞춘다."""
+    from datetime import timezone as tz
+    utc = parse_time("2026-08-19T00:00:00Z")
+    plus9 = parse_time("2026-08-19T09:00:00+09:00")
+    plus9b = parse_time("2026-08-19T09:00:00+0900")
+    assert utc.tzinfo is None
+    assert utc == plus9 == plus9b            # 같은 순간 → 같은 로컬 시각
+    assert utc == datetime(2026, 8, 19, 0, 0, 0, tzinfo=tz.utc
+                           ).astimezone().replace(tzinfo=None)
+
+
+def test_unparsable_time_keeps_the_row():
+    """시각 하나 때문에 행을 버리면 그 job이 미발견 → LOST가 된다."""
+    (st,) = parse_internal_jobs({"jobs": [
+        {"dataId": "1", "stat": "RUN", "startTime": "깨진값"}]})
+    assert st.job_id == 1 and st.start_time is None

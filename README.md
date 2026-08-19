@@ -636,26 +636,111 @@ mgr = LsfJobManager(job_status_fetcher=fetch_status)
 #### 콜백 계약
 
 - **인자 없이** 호출됩니다. 호출 주체는 라이브러리(폴링 스레드 등)입니다.
-- **REST 응답 JSON을 그대로** 반환하면 됩니다 (`{"jobs": [...]}` dict, 또는 job dict 목록).
-  파싱·매핑은 라이브러리가 합니다.
-- URL·인증·타임아웃·재시도는 **콜백의 몫**입니다. 라이브러리는 네트워크를 모릅니다.
-- **예외를 던지면 "조회 장애"** 로 처리됩니다 (아래 참조). 실패를 빈 결과로
-  감추지 마세요.
+- **REST 응답 JSON을 그대로** 반환하면 됩니다. 파싱·매핑은 라이브러리가 합니다.
+- URL·인증·**타임아웃**·재시도는 **콜백의 몫**입니다. 라이브러리는 네트워크를
+  모릅니다.
+- **예외를 던지면 "조회 장애"** 로 처리됩니다. 실패를 빈 결과로 감추지 마세요.
 - GUI 스레드가 아닌 **백그라운드 스레드에서** 실행됩니다. 콜백 안에서 Qt 위젯을
   건드리면 안 됩니다.
 
-인식하는 payload 표기:
+#### 받아들이는 JSON
 
-| payload 필드 | 매핑 | 비고 |
-|---|---|---|
-| `dataId` | `job_id` (+`array_index`) | `"1432342.cluster1"` / `"500[3].cl2"` / `"777"` |
-| `stat` | `JobState` | 대소문자 무시 + 별칭(`RUNNING`→`RUN`, `PENDING`→`PEND`, `EXITED`→`EXIT`). 모르는 값은 `UNKWN` + 경고 1회 |
-| `startTime` / `finishTime` | `start_time` / `finish_time` | ISO-8601 / unix epoch(초·ms). 실행 중 `finishTime`은 예상치로 보고 버림 |
-| `cluster` (없으면 `dataId` 접미사) | `source_cluster` | MC 분류 kill(§5.4)이 이 값을 씀 |
-| `exitStatus` / `exitCode` | `exit_code` | 없으면 `None` — payload에 없는 값은 만들어내지 않음. EXIT job의 종료코드 표시가 비어 보일 수 있음 |
-| — | `run_time_s` | payload에 없어 두 시각으로 **유도**(받은 시각 기준으로 고정) |
+**봉투(envelope)** — 두 가지를 받습니다.
 
-`queue`/`app`/`subcwd`/`userName` 등 나머지 필드는 무시됩니다 — 있어도 무해합니다.
+```jsonc
+{"jobs": [ … ], "count": 1, "updateFrom": null}   // ① REST 응답 원문 (권장)
+[ … ]                                             // ② job 목록만
+```
+
+`count`/`updateFrom` 등 봉투의 나머지 키는 **읽지 않습니다** — 있어도 무해하고,
+`count`와 실제 개수가 달라도 신경 쓰지 않습니다. `jobs`가 `null`이면 빈 목록으로
+봅니다.
+
+**job 1건** — 예시 응답 그대로 넣으면 됩니다.
+
+```jsonc
+{
+  "dataId":     "1432342.cluster1",     // 필수 — 이것으로 매칭한다
+  "stat":       "RUN",                  // 필수
+  "startTime":  "2026-08-08T12:00:01",
+  "finishTime": null,
+  "cluster":    "cluster1",
+  "queue": "normal", "app": "default",  // ↓ 아래는 전부 무시된다
+  "subcwd": "/user/jekai", "userName": "jekai",
+  "updateTime": "2026-08-19T00:12:12", "submitTime": "2026-08-08T10:10:00"
+}
+```
+
+| 항목 | 받는 키 (앞에서부터 먼저 있는 것) | 값 형식 | 결과 |
+|---|---|---|---|
+| **id** | `dataId` · `dataid` · `jobId` · `jobid` · `id` | `1432342.cluster1` / `500[3].cl2` / `777` | `job_id`, `array_index`, (접미사는 cluster로) |
+| **상태** | `stat` · `status` · `state` | `RUN` `PEND` `DONE` `EXIT` `PSUSP` `USUSP` `SSUSP` `UNKWN` `ZOMBI` — **대소문자 무시**, 별칭 `RUNNING`→`RUN` / `PENDING`→`PEND` / `EXITED`→`EXIT` | `JobState` |
+| **시작** | `startTime` · `start_time` | ISO-8601 또는 unix epoch(10자리 초 / 13자리 ms) | `start_time` |
+| **종료** | `finishTime` · `finish_time` · `endTime` · `end_time` | 위와 같음 | `finish_time` — **종료 상태에서만** 채움 |
+| **종료코드** | `exitStatus` · `exitCode` · `exit_code` · `exit_status` | 정수 또는 정수 문자열 | `exit_code` (없으면 `None`) |
+| **클러스터** | `cluster` · `clusterName` · `cluster_name`, 없으면 `dataId` 접미사 | 문자열 | `source_cluster` — MC 분류 kill(§5.4)이 씀 |
+| **경과시간** | — (payload에 없음) | — | `run_time_s`를 시각 두 개로 **유도** |
+
+**"값 없음" 표기**는 전부 같게 취급합니다 (대소문자 무시):
+`null` · `""` · `"-"` · `"none"` · `"nil"` · `"n/a"`.
+
+**시각 표기**는 흔들려도 흡수합니다 — `2026-08-19T00:12:12` /
+`2026-08-19 00:12:12` / 소수점 이하 초 / 타임존(`Z`, `+09:00`, `+0900` → 로컬로
+환산) / 날짜 구분자가 `:`나 `/`인 사례(`2026:08:08T12:00:01`). 해석 못 하면
+**그 필드만** `None`이 되고 행은 살아남습니다.
+
+**형식이 안 맞을 때** — 위 셋은 "조회 장애"(전원 판단 보류)로 올립니다. 빈
+결과로 접으면 정상 "없음"과 구별되지 않아 LOST 오확정으로 이어지기 때문입니다.
+
+| 입력 | 판정 |
+|---|---|
+| dict인데 `jobs` 키가 없음 | 조회 장애 |
+| `jobs`가 목록이 아님 | 조회 장애 |
+| `jobs`가 비어있지 않은데 **한 건도 해석 못 함** | 조회 장애 (형식 불일치) |
+| `{"jobs": []}` | **정상** — "job 없음" |
+| 일부 행만 해석 실패 | 그 행만 버리고 WARNING으로 건수 기록 |
+
+#### 원장 업데이트 방식
+
+콜백이 한 번 돌 때마다 내부 원장이 이 순서로 갱신됩니다.
+
+```
+콜백 반환 JSON
+  │
+  ├─① 파싱 ─── dataId/stat/시각 → JobStatus. 이때 추적 대상이 아닌 job은
+  │            객체조차 안 만든다(유저 전 job이 와도 메모리를 안 먹는다)
+  │
+  ├─② 병합 ─── 키 (job_id, array_index)로 **덮어쓰기**.
+  │            이번에 안 온 job은 지우지 않고 직전 상태 유지
+  │
+  ├─③ 경과시간 ─ ②에서 안 온 진행 중 job의 run_time_s를 수신 시각 기준 재계산
+  │              (끝난 job의 실행시간은 실측이라 안 건드림)
+  │
+  └─④ 만료 ─── 종료 후 internal_retention_days 지난 DONE/EXIT 제거
+               (최소 60초 간격으로만 — 매번 전수 스캔하지 않는다)
+```
+
+②가 **교체가 아니라 덮어쓰기**인 것이 핵심입니다. `updatefrom` 증분 조회에서
+"이번 payload에 없다"는 *사라졌다*가 아니라 *안 바뀌었다*는 뜻이기 때문입니다.
+
+```
+원장 (t=0)                payload (t=10, 증분)        원장 (t=10)
+  1001 RUN                  1002 DONE                   1001 RUN    ← 유지
+  1002 RUN         +                             =      1002 DONE   ← 갱신
+  1003 PEND                                             1003 PEND   ← 유지
+                            1009 PEND                   1009 PEND   ← 추가
+```
+
+전량 조회(`updatefrom=2000-01-01`)도 같은 경로입니다 — 매번 전 job이 오니 전부
+덮어써질 뿐입니다.
+
+**추적 대상만 보관합니다.** 콜백은 유저의 전 job을 주지만 lsfmgr가 아는 건 이
+앱이 제출한 job뿐입니다. 그래서 **조회 요청을 받은 적 있는 `job_id`만** 남깁니다
+— 다른 툴·다른 세션의 job은 ①에서 걸러집니다. 등록은 병합보다 **먼저** 일어나므로
+갓 제출한 job이 첫 조회에서 누락되지 않습니다.
+
+**읽기는 원장에서만** 합니다. `bjobs_by_ids(ids)`는 원장에서 그 id의 항목을
+꺼내 줄 뿐이고, 없으면 "미발견"이 되어 LOST 유예 판정으로 넘어갑니다(아래 참조).
 
 #### 증분 조회 (`updatefrom`)
 
