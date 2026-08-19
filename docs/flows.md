@@ -33,7 +33,7 @@ mgr.submit(js)
  ├ SubmitGate.register(ctx)        # kill barrier 중이면 born-cancelled
  └ pool.start(task × N) → 반환
                               task._run:
-                                cancel_event?  ──set──▶ CREATED 복귀(잔재 리셋)
+                                cancel_event?  ──set──▶ CANCELLED 확정(잔재 리셋)
                                 │                        → jobs_updated (배치)
                                 not set
                                 ├ rate limit 대기 (token bucket)
@@ -62,7 +62,7 @@ worker에서 1회 — `post_processing_started → post_processing_finished(resu
 + `post_processing_finished(None)`.
 
 상태: `CREATED → SUBMITTING → PEND | RETRY_WAIT(→SUBMITTING 재시도) |
-SUBMIT_FAILED(최종)`. cancel/kill 시 `SUBMITTING/RETRY_WAIT → CREATED`
+SUBMIT_FAILED(최종)`. cancel/kill 시 `SUBMITTING/RETRY_WAIT → CANCELLED`
 (실패 잔재 fail_reason/retry_count 함께 리셋).
 
 ## 2. kill — 제출에 대한 우선권
@@ -85,7 +85,7 @@ mgr.kill(js)
                                     scope.acquire()          # 정지 대기만 (blocking)
                                     │  ├ pool 슬롯 반납(releaseThread)
                                     │  └ 정지 대기 (제출 완료까지, 상한 있음)
-                                    │     · 미제출 → CREATED 복귀(kill 대상 아님)
+                                    │     · 미제출 → CANCELLED 확정(kill 대상 아님)
                                     │     · 그새 제출됨 → PEND+job_id (스냅샷에 포함)
                                     │     · barrier 중 새 submit → 등록 거부(born-cancelled)
                                     ├ 대상 스냅샷 (is_on_lsf)
@@ -143,7 +143,7 @@ main (전부 앱이 직접 제어)
 
 ```
 cancel_submit(): ctx.cancel_event set → 반환(즉시)
-  · 미착수 worker  → 안전 지점에서 SUBMITTING/RETRY_WAIT → CREATED 복귀
+  · 미착수 worker  → 안전 지점에서 SUBMITTING/RETRY_WAIT → CANCELLED 확정
   · 제출 진행 중   → 완료까지 진행(PEND 확정) — 강제 중단하지 않는다
   · 대기 중 재시도 → 발화 시 포기 확정
   → 각 취소분은 jobs_updated 배치로, 마지막에 submit_finished(cancelled=k)
@@ -177,19 +177,19 @@ polling QThread (jobset당 QTimer, interval마다)
 ## 6. 상태 전이도
 
 ```
-                    ┌──────────── cancel/kill(미제출) ────────────┐
-                    ▼                                             │
- CREATED ──▶ SUBMITTING ──▶ PEND ──▶ RUN ──▶ DONE                 │
-                │   ▲         │        │       (terminal)         │
-                │   │재시도   │        ├──▶ EXIT (terminal)       │
-                ▼   │         │        │     ▲ kill(optimistic)   │
-             RETRY_WAIT ──────┼────────┼─────┘                    │
-                │             │        └──▶ PSUSP/USUSP/SSUSP ⇄ RUN
-                ▼             ▼
-         SUBMIT_FAILED     LOST (조회는 전부 성공했는데 미발견)
-          (terminal)        (terminal)
+ CREATED ──▶ SUBMITTING ──▶ PEND ──▶ RUN ──▶ DONE
+                │   ▲         │        │       (terminal)
+                │   │재시도   │        ├──▶ EXIT (terminal)
+                ▼   │         │        │     ▲ kill(optimistic)
+             RETRY_WAIT ──────┼────────┼─────┘
+                │   │         │        └──▶ PSUSP/USUSP/SSUSP ⇄ RUN
+                │   │         ▼
+                │   │       LOST (조회는 전부 성공했는데 미발견, terminal)
+                │   └──▶ SUBMIT_FAILED (재시도 N회 모두 실패, terminal)
+                └──────▶ CANCELLED     (제출 도중 kill/취소로 중단, terminal)
 ```
 
 `is_on_lsf` = PEND/RUN/SUSP\*/UNKWN/ZOMBI — 폴링·kill 스냅샷 대상.
-`is_terminal` = DONE/EXIT/SUBMIT_FAILED/LOST — 더 이상 전이하지 않음.
+`is_terminal` = DONE/EXIT/SUBMIT_FAILED/CANCELLED/LOST — 더 이상 전이하지 않음.
+`is_failed` = EXIT/SUBMIT_FAILED/LOST — CANCELLED는 **실패가 아니다**(의도한 중단).
 `is_inactive` = CREATED 또는 terminal — submit/편집/remove 가드의 공통 술어.

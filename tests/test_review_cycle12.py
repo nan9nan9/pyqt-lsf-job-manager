@@ -26,13 +26,13 @@ from lsfmgr.command import LsfCommand
 def test_nonpositive_timeout_rejected(name, bad):
     """주기/타임아웃 4형제는 전부 양수만 받는다 (검증 계층 = 여기 한 곳)."""
     with pytest.raises(ValueError) as ei:
-        LsfConfig(**{name: bad})
+        LsfConfig(rate_limit_per_s=None, **{name: bad})
     assert name in str(ei.value)
 
 
 def test_positive_timeouts_still_accepted():
     """정당한 저수준 값은 그대로 통과한다 — 범위 정책은 options 계층의 몫."""
-    cfg = LsfConfig(poll_interval_s=2, submit_timeout_s=1,
+    cfg = LsfConfig(rate_limit_per_s=None, poll_interval_s=2, submit_timeout_s=1,
                     query_timeout_s=5, kill_timeout_s=0.5)
     assert (cfg.poll_interval_s, cfg.query_timeout_s) == (2.0, 5.0)
     assert isinstance(cfg.submit_timeout_s, float)      # 정규화도 함께
@@ -46,14 +46,14 @@ def test_zero_query_timeout_would_stall_polling_silently():
         raise subprocess.TimeoutExpired(argv, timeout)
 
     # 검증을 우회해 그 상황을 재현하면 실제로 전원 실패로 귀속된다
-    cfg = LsfConfig()
+    cfg = LsfConfig(rate_limit_per_s=None, )
     object.__setattr__(cfg, "query_timeout_s", 0)
     out, failed = LsfCommand(cfg, runner).bjobs_by_ids([101, 102])
     assert out == [] and failed == {101, 102}     # 조회 결과 0, 전원 보류
 
     # 그리고 정상 경로에서는 그 값이 애초에 만들어지지 않는다
     with pytest.raises(ValueError):
-        LsfConfig(query_timeout_s=0)
+        LsfConfig(rate_limit_per_s=None, query_timeout_s=0)
 
 
 # ----------------------------------------------------------------------

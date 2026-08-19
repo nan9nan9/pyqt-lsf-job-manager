@@ -56,7 +56,7 @@ def test_optimistic_verify_reports_survivor(qtbot, manager, fake_lsf, monkeypatc
 # ----------------------------------------------------------------------
 def test_cluster_preserved_on_format_downgrade(qtbot, fake_lsf, tmp_path):
     from tests.fake_lsf import FakeJob
-    cfg = LsfConfig(retry_delay_s=0.05, retry_backoff=1.0,
+    cfg = LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05, retry_backoff=1.0,
                     kill_retry_delay_s=0.05, collect_clusters=True)
     mgr = LsfJobManager(store=InMemoryStore(), config=cfg, runner=fake_lsf)
     try:
@@ -90,15 +90,15 @@ def test_config_validates_poll_interval():
     # 5~60 정책 범위는 상위 options 계층의 몫(여기서 강제하면 poll=2 같은
     # 정당한 저수준 값을 죽여 하위호환이 깨진다 — 사이클 9에서 좁힘).
     with pytest.raises(ValueError):
-        LsfConfig(poll_interval_s=0)             # 0/음수 = runtime 가드 위반
+        LsfConfig(rate_limit_per_s=None, poll_interval_s=0)             # 0/음수 = runtime 가드 위반
     with pytest.raises(ValueError):
-        LsfConfig(poll_interval_s=-1)
+        LsfConfig(rate_limit_per_s=None, poll_interval_s=-1)
     with pytest.raises(ValueError):
-        LsfConfig(submit_timeout_s=0)
+        LsfConfig(rate_limit_per_s=None, submit_timeout_s=0)
     # 양수면 통과 — 5~60 밖(2, 100)도 저수준에선 허용
-    LsfConfig(poll_interval_s=2)
-    LsfConfig(poll_interval_s=100)
-    LsfConfig(poll_interval_s=10, submit_timeout_s=30)
+    LsfConfig(rate_limit_per_s=None, poll_interval_s=2)
+    LsfConfig(rate_limit_per_s=None, poll_interval_s=100)
+    LsfConfig(rate_limit_per_s=None, poll_interval_s=10, submit_timeout_s=30)
 
 
 # ----------------------------------------------------------------------

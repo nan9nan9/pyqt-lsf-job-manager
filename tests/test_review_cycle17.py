@@ -82,7 +82,7 @@ def test_start_polling_is_noop_when_already_running(qtbot):
         return fake(argv, timeout, cwd)
 
     mgr = LsfJobManager(store=InMemoryStore(),
-                        config=LsfConfig(retry_delay_s=0.05), runner=counting)
+                        config=LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05), runner=counting)
     try:
         js = mk_jobset(mgr, ["customwrapper_sub a.sp"], job_keys=["a"])
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
@@ -112,7 +112,7 @@ def test_start_polling_restarts_when_interval_changes(qtbot):
         return fake(argv, timeout, cwd)
 
     mgr = LsfJobManager(store=InMemoryStore(),
-                        config=LsfConfig(retry_delay_s=0.05), runner=counting)
+                        config=LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05), runner=counting)
     try:
         js = mk_jobset(mgr, ["customwrapper_sub a.sp"], job_keys=["a"])
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):

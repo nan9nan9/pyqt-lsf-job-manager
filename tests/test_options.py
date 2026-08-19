@@ -21,7 +21,7 @@ def test_builtin_defaults_only():
     assert opts.workers == 32
     assert opts.max_retry == 3
     assert opts.retry_backoff == "fixed:2"
-    assert opts.rate_limit_per_s is None
+    assert opts.rate_limit_per_s == 5.0     # bsub 초당 호출 제한(기본 켜짐)
     assert opts.poll_interval_s == 10.0
     assert opts.auto_poll is True
     assert opts.verify_kill is False
@@ -92,9 +92,9 @@ def test_progress_throttle_option_validation():
     """progress throttle 옵션 검증 + config 반영."""
     from lsfmgr import LsfConfig
     with pytest.raises(ValueError):
-        LsfConfig(progress_min_step_ratio=2.0)      # 0~1 초과
+        LsfConfig(rate_limit_per_s=None, progress_min_step_ratio=2.0)      # 0~1 초과
     with pytest.raises(ValueError):
-        LsfConfig(progress_min_interval_s=-0.1)      # 음수
+        LsfConfig(rate_limit_per_s=None, progress_min_interval_s=-0.1)      # 음수
 
 
 def test_config_retry_backoff_string_rejected():
@@ -103,11 +103,11 @@ def test_config_retry_backoff_string_rejected():
     생성 시점에 명확한 ValueError."""
     from lsfmgr import LsfConfig
     with pytest.raises(ValueError):
-        LsfConfig(retry_backoff="fixed:2")
+        LsfConfig(rate_limit_per_s=None, retry_backoff="fixed:2")
     # 숫자는 float로 정규화
-    assert LsfConfig(retry_backoff=2).retry_backoff == 2.0
-    assert isinstance(LsfConfig(retry_backoff=1).retry_backoff, float)
-    cfg = LsfConfig(progress_min_interval_s=0.5, progress_min_step_ratio=0.1)
+    assert LsfConfig(rate_limit_per_s=None, retry_backoff=2).retry_backoff == 2.0
+    assert isinstance(LsfConfig(rate_limit_per_s=None, retry_backoff=1).retry_backoff, float)
+    cfg = LsfConfig(rate_limit_per_s=None, progress_min_interval_s=0.5, progress_min_step_ratio=0.1)
     assert cfg.progress_min_interval_s == 0.5
     assert cfg.progress_min_step_ratio == 0.1
 

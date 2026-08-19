@@ -45,7 +45,7 @@ def test_whole_kill_survives_chunk_failure_with_retry(qtbot, fake_lsf):
     나머지 chunk를 계속 시도하고, 미확인분은 재시도로 살려낸다 (이전에는
     첫 장애에 kill 전체가 무위였다 — 리뷰 H2 회귀)."""
     from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
-    cfg = LsfConfig(chunk_size=10, kill_retry_delay_s=0.05)
+    cfg = LsfConfig(rate_limit_per_s=None, chunk_size=10, kill_retry_delay_s=0.05)
     mgr = LsfJobManager(store=InMemoryStore(), config=cfg, runner=fake_lsf)
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
@@ -246,7 +246,7 @@ def test_kill_actual_waits_for_lsf(qtbot, fake_lsf, config):
 def test_kill_status_policy_validation(fake_lsf):
     from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
     with pytest.raises(ValueError):
-        LsfConfig(kill_status_policy="bogus")
+        LsfConfig(rate_limit_per_s=None, kill_status_policy="bogus")
     with pytest.raises(ValueError):                  # manager kwarg 경로
         LsfJobManager(store=InMemoryStore(), runner=fake_lsf,
                       kill_status_policy="nope")
@@ -346,9 +346,9 @@ def test_whole_kill_aborts_pending_retries(qtbot, manager, fake_lsf):
         manager.kill(js)      # 전체 kill — 재시도 포기 확정 (submit_finished도 이때 발행)
     qtbot.wait(400)                          # 재시도 타이머 발화 시간 경과
     rec = js.jobs()[0]
-    assert rec.state is JobState.SUBMIT_FAILED   # 부활 없음
+    assert rec.state is JobState.CANCELLED       # 부활 없음(실패가 아닌 취소)
     assert fake_lsf.alive_jobs() == []
-    assert reports and reports[0].failed == 1
+    assert reports and reports[0].cancelled == 1 and reports[0].failed == 0
 
 
 def test_partial_kill_keeps_pending_retries(qtbot, manager, fake_lsf):

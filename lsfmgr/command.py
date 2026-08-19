@@ -21,7 +21,7 @@ from typing import (
 
 from .config import DEFAULT_BJOBS_PATH, LsfConfig, cmd_tokens
 from .errors import ArgMaxExceededError, LsfCommandError, SubmitError
-from .internal_status import InternalStatusSource, JobStatusFetcher
+from .internal_status import InternalStatusSource
 from .states import LSF_STAT_MAP, JobState
 
 log = logging.getLogger("lsfmgr.command")
@@ -273,8 +273,7 @@ class LsfCommand:
     """LSF 명령 래퍼. runner를 주입하면 subprocess 없이 단위 테스트 가능."""
 
     def __init__(self, config: Optional[LsfConfig] = None,
-                 runner: Optional[Runner] = None,
-                 job_status_fetcher: Optional[JobStatusFetcher] = None):
+                 runner: Optional[Runner] = None):
         self.config = config or LsfConfig()
         # 구 2-arg runner도 받아들인다(계약 확장 하위호환) — 아래 _run은 항상
         # cwd를 3번째 인자로 넘기므로, cwd 미지원 runner는 어댑터로 감싼다.
@@ -306,9 +305,9 @@ class LsfCommand:
         # 위쪽(monitor/killer)은 bjobs_by_ids 계약만 보므로 어느 쪽이든 flow가
         # 같다. 이 판정은 생성 시점 1회로 끝난다(조회마다 다시 보지 않는다).
         self._internal: Optional[InternalStatusSource] = None
-        if job_status_fetcher is not None:
+        if self.config.job_status_fetcher is not None:
             self._internal = InternalStatusSource(
-                job_status_fetcher,
+                self.config.job_status_fetcher,
                 refresh_min_s=self.config.effective_internal_refresh_min_s,
                 wait_timeout_s=self.config.query_timeout_s,
                 retention_days=self.config.internal_retention_days,

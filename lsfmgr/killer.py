@@ -260,7 +260,7 @@ class _KillTask(QRunnable):
         if scope is not None:
             # kill 우선권 — barrier를 올리는 순간(SubmitGate lock 아래
             # 원자적) 그 시점의 submit 활동을 넘겨받아 취소·대기한다. 미제출
-            # job은 CREATED로 복귀해 대상에서 빠지고, 그새 제출이 완료된
+            # job은 CANCELLED로 확정돼 대상에서 빠지고, 그새 제출이 완료된
             # job은 PEND(job_id 확보)로 확정되어 아래 스냅샷에 포함된다.
             # barrier 이후의 새 시작은 등록 거부되므로 놓치는 유출이 없다.
             # 대기 동안 pool 슬롯을 반납한다(releaseThread — Qt의 blocking

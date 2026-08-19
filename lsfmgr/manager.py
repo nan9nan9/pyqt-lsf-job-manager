@@ -19,7 +19,6 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 from .command import LsfCommand, Runner
-from .internal_status import JobStatusFetcher
 from .completion import CompletionTracker
 from .config import LsfConfig
 from .errors import (
@@ -98,17 +97,12 @@ class LsfJobManager(QObject):
                  config: Optional[LsfConfig] = None,
                  runner: Optional[Runner] = None,
                  parent: Optional[QObject] = None,
-                 *,
-                 job_status_fetcher: Optional[JobStatusFetcher] = None,
                  **kwargs: Any):
         """kwargs = §1.2 옵션 카탈로그의 ②(manager) 계층.
         config와 동시 지정 시 kwargs 우선.
 
-        job_status_fetcher: 상태를 가져오는 앱 콜백. **주면** 상태 조회가
-        bjobs subprocess 대신 이 콜백으로 간다(안 주면 종전대로 bjobs).
-        인자 없이 호출되고 REST 응답 JSON({"jobs": [...]})을 그대로 반환하면
-        된다 — 파싱·캐시·동시 호출 합치기는 라이브러리가 한다. runner와
-        마찬가지로 '바깥과 닿는 지점'의 주입이라 config가 아닌 생성자 인자다."""
+        상태 조회를 bjobs 대신 앱 콜백으로 받으려면
+        `LsfConfig(job_status_fetcher=fn)`으로 준다 (README §5.8)."""
         super().__init__(parent)
 
         # --- 옵션 분리: manager 전용 / 공통(②) — 오타는 TypeError ---
@@ -151,7 +145,7 @@ class LsfJobManager(QObject):
                         "않습니다", cfg.retry_backoff)
 
         # --- 컴포넌트 조립 ---
-        self.command = LsfCommand(self.config, runner, job_status_fetcher)
+        self.command = LsfCommand(self.config, runner)
         # 콜백 조회원의 갱신 간격 기본값은 LsfConfig.poll_interval_s에서
         # 유도되는데, 앱이 manager kwarg로 준 poll_interval_s는 config가
         # 아니라 _defaults로 들어간다 — 여기서 실효값을 알려 맞춘다.
@@ -447,7 +441,7 @@ class LsfJobManager(QObject):
         앱 환경 속성이라 호출마다 주지 않는다.
 
         **kill은 겨냥한 job의 제출에 항상 우선권을 갖는다** — 그 job이 제출
-        중이면 멈추고(미착수분 CREATED 복귀), 이미 wrapper가 돌면 job_id
+        중이면 멈추고(미착수분 CANCELLED 확정), 이미 wrapper가 돌면 job_id
         확보를 기다렸다가 죽인다. 대상 아닌 job의 제출은 계속된다.
         jobset의 제출 자체를 통째로 멈추려면 `mgr.cancel_submit(js)`를
         먼저 부른다(취소는 되돌려지지 않으므로 순서만 지키면 된다)."""
@@ -962,8 +956,8 @@ class LsfJobManager(QObject):
     def can_submit(self, jobset_id: str, *,
                    only: Optional[Sequence] = None) -> bool:
         """[sync, snapshot] submit 가능 여부 — 대상 job이 1건 이상 있고 전원
-        비활성(CREATED/DONE/EXIT/SUBMIT_FAILED/LOST)이며 진행 중 submit/kill이
-        없으면 True. GUI 버튼 활성화 판단용.
+        비활성(CREATED/DONE/EXIT/SUBMIT_FAILED/CANCELLED/LOST)이며 진행 중
+        submit/kill이 없으면 True. GUI 버튼 활성화 판단용.
 
         only를 주면 **그 job들만** 본다 — 나머지가 RUN이어도 True일 수 있다
         (submit(only=...)의 가드와 같은 술어)."""

@@ -30,7 +30,7 @@ from tests.fake_lsf import FakeLsf
 
 def _mgr(runner):
     return LsfJobManager(store=InMemoryStore(),
-                         config=LsfConfig(retry_delay_s=0.05), runner=runner)
+                         config=LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05), runner=runner)
 
 
 def _poll(qtbot, mgr, js):

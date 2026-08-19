@@ -79,6 +79,7 @@ def test_kill_submit_race_repeated(qtbot, fake_lsf, config):
             assert alive == [], f"round {round_no}: 생존 유출 {alive}"
             states = {r.state for r in js.jobs()}
             assert states <= {JobState.EXIT, JobState.CREATED,
+                              JobState.CANCELLED,
                               JobState.SUBMIT_FAILED}, \
                 f"round {round_no}: 고착 상태 {states}"
     finally:
@@ -135,7 +136,7 @@ def test_partial_kill_verify_optimistic(qtbot, manager, fake_lsf):
 # 5. bjobs chunk 부분 장애 — 보류 후 다음 사이클 복구 (LOST 오확정 금지)
 # ----------------------------------------------------------------------
 def test_bjobs_partial_failure_defers_then_recovers(qtbot, fake_lsf):
-    cfg = LsfConfig(retry_delay_s=0.05, retry_backoff=1.0, chunk_size=1)
+    cfg = LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05, retry_backoff=1.0, chunk_size=1)
     mgr = LsfJobManager(store=InMemoryStore(), config=cfg, runner=fake_lsf)
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):

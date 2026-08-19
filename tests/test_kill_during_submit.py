@@ -42,7 +42,7 @@ class SlowSubmitLsf(FakeLsf):
 
 def _mgr(fake):
     return LsfJobManager(store=InMemoryStore(),
-                         config=LsfConfig(retry_delay_s=0.05), runner=fake)
+                         config=LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05), runner=fake)
 
 
 def _jobset(mgr, keys):
@@ -112,7 +112,7 @@ def test_selection_kill_aborts_only_target_retries(qtbot):
     """선택 kill은 대상의 재시도 대기만 포기시킨다 — 남은 job은 재시도로 제출."""
     fake = FakeLsf()
     mgr = LsfJobManager(store=InMemoryStore(),
-                        config=LsfConfig(retry_delay_s=0.3), runner=fake)
+                        config=LsfConfig(rate_limit_per_s=None, retry_delay_s=0.3), runner=fake)
     try:
         keys = ["a", "b"]
         js = _jobset(mgr, keys)
@@ -129,7 +129,7 @@ def test_selection_kill_aborts_only_target_retries(qtbot):
         qtbot.waitUntil(lambda: bool(done), timeout=30000)
 
         by_key = {r.job_key: r for r in mgr.get_jobs(js.id)}
-        assert by_key["a"].state is JobState.SUBMIT_FAILED  # 재시도 포기
+        assert by_key["a"].state is JobState.CANCELLED      # 재시도 포기
         assert by_key["b"].state is JobState.PEND           # 재시도 성공
     finally:
         mgr.shutdown()
@@ -184,7 +184,9 @@ def test_explicit_cancel_submit_composes_with_selection_kill(qtbot):
         assert not [k for k in victims
                     if by_key[k].state.is_on_lsf
                     or by_key[k].state is JobState.SUBMITTING]
-        # 배치 중단 효과: 미착수분은 제출되지 않고 CREATED로 남는다
-        assert any(by_key[k].state is JobState.CREATED for k in keys[20:])
+        # 배치 중단 효과: 미착수분은 제출되지 않는다 — barrier에 막혀 손도
+        # 안 댄 것은 CREATED, task가 안전 지점에서 포기한 것은 CANCELLED.
+        assert any(by_key[k].state in (JobState.CREATED, JobState.CANCELLED)
+                   for k in keys[20:])
     finally:
         mgr.shutdown()
