@@ -517,3 +517,187 @@ def test_record_without_timestamps_is_not_deferred_forever():
                     job_key="k", state=JobState.PEND, command="r")
     assert rec.submit_time is None and rec.updated_at is None
     assert _within_submit_grace(rec, datetime.now(), 300.0) is False
+
+
+# ----------------------------------------------------------------------
+# 7) 진단에서 나온 결함 9건 회귀 가드
+#    (자세한 배경은 각 테스트 docstring — 전부 "조용히 망가지던" 경로다)
+# ----------------------------------------------------------------------
+def test_hung_callback_does_not_hold_the_caller_thread():
+    """timeout 없는 콜백 하나가 폴링 스레드를 영구히 잡으면 상태 갱신이
+    통째로 멈추고 shutdown까지 막힌다 — 콜백은 전용 스레드에서 돈다."""
+    hang = threading.Event()                 # 절대 set 안 함
+    src = _source(lambda: hang.wait() or _payload(), wait_timeout_s=1.0)
+    t0 = time.monotonic()
+    found, failed = src.statuses_by_ids([1])
+    elapsed = time.monotonic() - t0
+    assert failed == {1} and not found       # 판단 보류
+    assert elapsed < 2.0, f"호출자가 {elapsed:.1f}s 붙잡힘"
+
+
+def test_hung_callback_recovers_when_the_server_comes_back():
+    """상한을 넘긴 조회를 인계하지 않으면 아무도 리더가 못 돼 서버가
+    회복돼도 영원히 '조회 장애'로 남는다."""
+    hang = threading.Event()
+    state = {"fetch": lambda: hang.wait() or _payload()}
+    src = _source(lambda: state["fetch"](), wait_timeout_s=0.3)
+    assert src.statuses_by_ids([9])[1] == {9}        # 장애
+    state["fetch"] = lambda: _payload(_job(9))       # 서버 회복
+    for _ in range(5):                               # 인계 후 정상화
+        found, failed = src.statuses_by_ids([9])
+        if found:
+            break
+    assert [st.job_id for st in found] == [9] and not failed
+
+
+def test_inflight_fetches_are_capped():
+    """콜백이 영영 안 돌아오는데 인계를 무한 허용하면 스레드가 쌓인다."""
+    hang = threading.Event()
+    src = _source(lambda: hang.wait() or _payload(), wait_timeout_s=0.1)
+    for _ in range(10):
+        src.statuses_by_ids([1])
+    assert src.stats()["inflight"] <= src.MAX_INFLIGHT
+
+
+def test_shutdown_releases_waiting_callers():
+    """폴링 스레드가 조회를 기다리는 중 shutdown이 걸리면 wait_timeout
+    (기본 120초)만큼 종료가 밀린다."""
+    hang = threading.Event()
+    src = _source(lambda: hang.wait() or _payload(), wait_timeout_s=60.0)
+    threading.Thread(target=lambda: src.statuses_by_ids([1]),
+                     daemon=True).start()
+    time.sleep(0.2)
+    done = []
+    t = threading.Thread(
+        target=lambda: done.append(src.statuses_by_ids([2])), daemon=True)
+    t.start()
+    time.sleep(0.1)
+    src.shutdown()
+    t.join(3.0)
+    assert done, "shutdown이 대기 중 호출자를 풀어 주지 않았다"
+
+
+@pytest.mark.parametrize("stat,expected", [
+    ("RUN", JobState.RUN), ("Run", JobState.RUN), ("run", JobState.RUN),
+    ("RUNNING", JobState.RUN), ("pending", JobState.PEND),
+    ("EXITED", JobState.EXIT), (" done ", JobState.DONE),
+])
+def test_stat_is_normalized(stat, expected):
+    """대소문자 하나에 전 job이 UNKWN이 되면 UNKWN은 terminal이 아니라서
+    폴링이 안 멈추고 jobset_finished/post_process가 영영 발화하지 않는다."""
+    (st,) = parse_internal_jobs(_payload(_job(1, stat=stat)))
+    assert st.state is expected
+
+
+def test_unknown_stat_warns_once(caplog):
+    """모르는 상태는 UNKWN으로 두되 **보이게** 남긴다(매 폴링 반복은 금지)."""
+    import lsfmgr.internal_status as mod
+    mod._warned_stats.discard("MYSTERY")
+    with caplog.at_level("WARNING", logger="lsfmgr.internal_status"):
+        for _ in range(3):
+            parse_internal_jobs(_payload(_job(1, stat="MYSTERY")))
+    warns = [r for r in caplog.records if "MYSTERY" in r.message]
+    assert len(warns) == 1, f"경고 {len(warns)}회"
+
+
+def test_all_rows_unparsable_is_a_failure_not_an_empty_answer():
+    """dataId 표기가 다른 사이트면 전 행이 조용히 버려지고 빈 목록이 나간다 —
+    정상 '없음'과 구별되지 않아 유예가 끝나는 대로 전 job이 LOST가 된다."""
+    src = _source(lambda: _payload(_job(1, dataId="cluster1.1432342"),
+                                   _job(2, dataId="job_777")))
+    found, failed = src.statuses_by_ids([1, 2])
+    assert found == [] and failed == {1, 2}, "판단 보류가 아니라 '없음'으로 나감"
+
+
+def test_untracked_jobs_are_not_kept():
+    """콜백은 유저의 전 job을 주는데 lsfmgr가 추적하는 건 그중 일부다 —
+    나머지까지 2주 보관하면 원장이 무관한 job으로 부풀어 오른다."""
+    src = _source(lambda: _payload(*[_job(i) for i in range(100, 200)]))
+    found, _f = src.statuses_by_ids([150])
+    assert [st.job_id for st in found] == [150]
+    assert src.stats()["entries"] == 1, src.stats()
+
+
+def test_interest_is_registered_before_the_merge():
+    """등록이 병합보다 늦으면 갓 제출된 job이 첫 조회에서 통째로 누락된다."""
+    src = _source(lambda: _payload(_job(4242)))
+    found, failed = src.statuses_by_ids([4242])       # 첫 조회
+    assert [st.job_id for st in found] == [4242] and not failed
+
+
+def test_run_time_advances_for_jobs_absent_from_an_incremental_payload():
+    """증분 조회에서 상태가 안 바뀐 RUN job은 payload에 안 온다 — 그대로
+    두면 경과시간이 옛 값에 멈춰 UI의 타이머가 정지한다."""
+    started = (datetime.now() - timedelta(seconds=100)).strftime(
+        "%Y-%m-%dT%H:%M:%S")
+    payloads = [_payload(_job(1, stat="RUN", startTime=started)),
+                _payload()]                  # 2회차: 갱신분 없음
+    src = _source(lambda: payloads.pop(0))
+    (first,), _f = src.statuses_by_ids([1])
+    time.sleep(1.1)
+    (again,), _f = src.statuses_by_ids([1])
+    assert again.run_time_s > first.run_time_s, (
+        f"경과시간 정지: {first.run_time_s} → {again.run_time_s}")
+
+
+def test_terminal_job_run_time_is_not_recomputed():
+    """끝난 job의 실행시간은 실측이다 — 나중 시각으로 늘리면 안 된다."""
+    payloads = [_payload(_job(1, stat="DONE",
+                              startTime="2026-08-08T12:00:00",
+                              finishTime="2026-08-08T12:01:40")),
+                _payload()]
+    src = _source(lambda: payloads.pop(0))
+    (first,), _f = src.statuses_by_ids([1])
+    time.sleep(1.1)
+    (again,), _f = src.statuses_by_ids([1])
+    assert first.run_time_s == again.run_time_s == 100
+
+
+@pytest.mark.parametrize("value,expected", [
+    (1723118400, datetime.fromtimestamp(1723118400)),
+    ("1723118400", datetime.fromtimestamp(1723118400)),
+    (1723118400000, datetime.fromtimestamp(1723118400)),
+])
+def test_epoch_timestamps_are_parsed(value, expected):
+    """숫자 시각을 조용히 None으로 버리면 start_time/run_time이 통째로 빈다."""
+    assert parse_time(value) == expected
+
+
+def test_refresh_interval_follows_the_actual_polling_rate(qtbot, fake_lsf):
+    """갱신 간격 기본값은 LsfConfig.poll_interval_s에서 유도되는데, 앱은
+    start_polling으로 더 빠르게 돌릴 수 있다 — 그때 캐시가 폴링보다 느리면
+    갱신이 밀린다."""
+    mgr = _internal_mgr(fake_lsf, lambda: _payload(),
+                        internal_refresh_min_s=None)
+    try:
+        src = mgr.command.internal_status
+        assert src._refresh_min_s == 5.0            # config 10초의 절반
+        mgr.start_polling(mgr.create_jobset([], job_keys=[]).id, 2.0)
+        assert src._refresh_min_s == 1.0            # 실제 주기 2초의 절반
+    finally:
+        mgr.shutdown()
+
+
+def test_explicit_refresh_interval_is_not_overridden(qtbot, fake_lsf):
+    """앱이 값을 명시했으면 라이브러리가 마음대로 낮추지 않는다."""
+    mgr = _internal_mgr(fake_lsf, lambda: _payload(),
+                        internal_refresh_min_s=8.0)
+    try:
+        src = mgr.command.internal_status
+        mgr.start_polling(mgr.create_jobset([], job_keys=[]).id, 2.0)
+        assert src._refresh_min_s == 8.0
+    finally:
+        mgr.shutdown()
+
+
+def test_manager_kwarg_poll_interval_reaches_the_source(qtbot, fake_lsf):
+    """poll_interval_s는 MANAGER_ONLY가 아니라 _defaults로 가서 config에
+    안 실린다 — 그대로 두면 앱 설정이 갱신 간격에 반영되지 않는다."""
+    mgr = LsfJobManager(store=InMemoryStore(),
+                        config=LsfConfig(retry_delay_s=0.05),
+                        runner=fake_lsf, poll_interval_s=30.0,
+                        job_status_fetcher=lambda: _payload())
+    try:
+        assert mgr.command.internal_status._refresh_min_s == 15.0
+    finally:
+        mgr.shutdown()

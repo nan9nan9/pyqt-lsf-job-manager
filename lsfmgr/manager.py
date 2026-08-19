@@ -152,6 +152,10 @@ class LsfJobManager(QObject):
 
         # --- 컴포넌트 조립 ---
         self.command = LsfCommand(self.config, runner, job_status_fetcher)
+        # 콜백 조회원의 갱신 간격 기본값은 LsfConfig.poll_interval_s에서
+        # 유도되는데, 앱이 manager kwarg로 준 poll_interval_s는 config가
+        # 아니라 _defaults로 들어간다 — 여기서 실효값을 알려 맞춘다.
+        self.command.note_poll_interval(self._defaults["poll_interval_s"])
         self.jobsets = JobSetManager(self.store)
         self.querier = JobsetQuerier(self.store, self.command)
 
@@ -378,6 +382,9 @@ class LsfJobManager(QObject):
             # 직접 호출은 무검증이었음)
             raise ValueError(f"interval_s는 양수여야 합니다 (got {eff})")
         self._poll_intervals[jobset_id] = eff    # 편집/재제출 재개용 기억
+        # 실제 주기를 조회원에 알린다 — 캐시가 폴링보다 느려 갱신이 밀리는
+        # 것을 막는다(콜백 조회원이 아니면 no-op).
+        self.command.note_poll_interval(eff)
         self.polling.start_polling(jobset_id, eff)
 
     def stop_polling(self, jobset_id: str) -> None:
@@ -1233,6 +1240,9 @@ class LsfJobManager(QObject):
         steps = [("handlers", self.handlers.shutdown),
                  ("submitter", self.submitter.shutdown),
                  ("completion", self._completion.shutdown),
+                 # 조회원을 먼저 닫는다 — 폴링 스레드가 콜백 결과를 기다리는
+                 # 중이면 여기서 풀어 줘야 polling.shutdown이 안 밀린다.
+                 ("status", self.command.shutdown_status_source),
                  ("polling", self.polling.shutdown),
                  ("killer", self.killer.shutdown),
                  ("store", self.store.store_dispose)]
