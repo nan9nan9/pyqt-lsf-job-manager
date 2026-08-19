@@ -140,13 +140,18 @@ class _SubmitTask(QRunnable):
             sub._task_cancelled(ctx, self.job_key)
             return
         try:
-            sub.store.transition(ctx.jobset_id, self.job_key,
-                                 JobState.SUBMITTING)
+            starting = sub.store.transition(ctx.jobset_id, self.job_key,
+                                            JobState.SUBMITTING)
         except _RECORD_GONE:
             # 착수 직전에 레코드가 지워졌다 — 아직 wrapper를 안 돌렸으므로
             # LSF에 흔적이 없다. 조용히 1단위 계상하고 끝낸다.
             sub._task_vanished(ctx, self.job_key, job_id=None)
             return
+        if self.attempt:
+            # 재시도의 SUBMITTING만 알린다 — 최초 시도분은 착수 시점의
+            # 리셋 배치가 이미 발행했고, 거기에 또 얹으면 대량 제출에서
+            # job 수만큼 중복 레코드가 흐른다.
+            sub._note_transition(ctx, starting)
         if not ctx.limiter.acquire(ctx.cancel_event):   # rate limit
             sub._task_cancelled(ctx, self.job_key)
             return
@@ -607,11 +612,12 @@ class BulkSubmitter(QObject):
             # fail_message: 재시도 대기 중에도 마지막 시도의 터미널 메시지를
             # 표에 보여줄 수 있고, 포기 확정(_finalize_retry) 시에도 잔존한다
             try:
-                self.store.transition(ctx.jobset_id, job_key,
-                                      JobState.RETRY_WAIT,
-                                      retry_count=attempt + 1,
-                                      fail_reason=err.fail_reason,
-                                      fail_message=err.diagnostic()[:4000])
+                waiting = self.store.transition(
+                    ctx.jobset_id, job_key,
+                    JobState.RETRY_WAIT,
+                    retry_count=attempt + 1,
+                    fail_reason=err.fail_reason,
+                    fail_message=err.diagnostic()[:4000])
             except _RECORD_GONE:
                 # 재시도할 레코드가 사라졌다 — 타이머를 걸면 발화 때 또 같은
                 # 소실을 만난다. 여기서 1단위 계상하고 끝낸다.
@@ -619,6 +625,9 @@ class BulkSubmitter(QObject):
                 return
             with ctx.lock:
                 ctx.retried_keys.add(job_key)
+            # 타이머를 걸기 **전에** 알린다 — 재시도가 먼저 끝나 PEND가 나가면
+            # UI가 RETRY_WAIT를 건너뛴다.
+            self._note_transition(ctx, waiting)
             self._schedule_retry(
                 ctx, job_key, ctx.options.retry_delay_s(attempt),
                 lambda: retry_factory(attempt + 1))
@@ -783,7 +792,27 @@ class BulkSubmitter(QObject):
         self._emit_progress(ctx)
         self._finish_if_done(ctx)
 
-    def _emit_progress(self, ctx: _SubmitContext) -> None:
+    def _note_transition(self, ctx: _SubmitContext, changed) -> None:
+        """**완료 계상 없이** 전이만 발행한다 (RETRY_WAIT 등 과도 상태).
+
+        _count는 '작업 1단위 완료' 계상기다 — 재시도 중에 부르면 done이 부풀어
+        submit_finished가 조기 발화한다. 그렇다고 안 부르면 전이가 아예 발행되지
+        않았다: 발행 버퍼(changed_buffer)를 흘려보내는 유일한 통로가 계상에만
+        물려 있었기 때문이다. 그래서 계상 없이 같은 cadence로 흘려보내는 경로를
+        따로 둔다.
+
+        이게 없으면 재시도 중인 job이 UI에서 SUBMITTING에 머문다 — 몇 분 걸리는
+        재시도가 '멈춘 것'으로 보이고, store에 있는 retry_count/fail_message
+        (터미널 원문)가 표에 영영 안 뜬다.
+        """
+        if changed is None:
+            return
+        with ctx.lock:
+            ctx.changed_buffer.append(changed)
+        self._emit_progress(ctx, progress=False)
+
+    def _emit_progress(self, ctx: _SubmitContext,
+                       progress: bool = True) -> None:
         # 발화(progress·jobs_changed)를 ctx.lock 안에서 수행한다 — drain과 emit이
         # 원자적이어야, 다른 worker 스레드의 _finish_if_done가 그 사이에 끼어들어
         # finished를 마지막 per-job jobs_changed보다 먼저 post하는 경합을 막는다
@@ -796,7 +825,10 @@ class BulkSubmitter(QObject):
                 return
             batch = ctx.changed_buffer
             ctx.changed_buffer = []
-            self.progress.emit(ctx.jobset_id, done, total)
+            if progress:
+                # 계상이 안 움직인 호출(_note_transition)은 진행률을 다시
+                # 쏘지 않는다 — 같은 수치를 반복 발행할 이유가 없다.
+                self.progress.emit(ctx.jobset_id, done, total)
             if batch:
                 self.jobs_changed.emit(ctx.jobset_id, batch)
 

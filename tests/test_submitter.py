@@ -205,3 +205,80 @@ def test_cancel_submit(qtbot, manager, fake_lsf):
 # ----------------------------------------------------------------------
 # array
 # ----------------------------------------------------------------------
+
+
+# ----------------------------------------------------------------------
+# 재시도 중 상태가 UI로 나가는가 (실환경 신고: bsub가 몇 번 실패했다 성공하는
+# 동안 표가 SUBMITTING에 고착 — store엔 RETRY_WAIT가 있는데 신호가 없었다)
+# ----------------------------------------------------------------------
+def _states_of(manager, key="k0"):
+    seen = []
+    manager.jobs_updated.connect(
+        lambda jsid, recs: seen.extend(
+            r.state.name for r in recs if r.job_key == key))
+    return seen
+
+
+def test_retry_wait_reaches_the_ui(qtbot, manager, fake_lsf):
+    """재시도 중인 job이 표에서 SUBMITTING으로 보이면 몇 분짜리 재시도가
+    '멈춘 것'으로 읽힌다 — RETRY_WAIT가 신호로 나가야 한다."""
+    seen = _states_of(manager)
+    fake_lsf.fail_next_bsub = 2
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        jsid = submit_cmds(manager, ["mytool a.sp"], auto_poll=False).id
+    assert "RETRY_WAIT" in seen, f"RETRY_WAIT 미발행: {seen}"
+    assert seen[-1] == "PEND"                 # 최종적으로는 제출 성공
+    rec = manager.get_jobs(jsid)[0]
+    assert rec.state is JobState.PEND and rec.retry_count == 2
+
+
+def test_retry_cycle_is_visible_in_order(qtbot, manager, fake_lsf):
+    """재시도마다 SUBMITTING↔RETRY_WAIT가 순서대로 보인다 — 몇 번째 시도인지
+    표에서 읽을 수 있어야 한다."""
+    seen = _states_of(manager)
+    fake_lsf.fail_next_bsub = 2
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        submit_cmds(manager, ["mytool a.sp"], auto_poll=False)
+    # 중복 인접분을 접어 전이 시퀀스만 본다
+    seq = [s for i, s in enumerate(seen) if i == 0 or s != seen[i - 1]]
+    assert seq == ["CREATED", "SUBMITTING", "RETRY_WAIT", "SUBMITTING",
+                   "RETRY_WAIT", "SUBMITTING", "PEND"], seq
+
+
+def test_retry_does_not_inflate_progress(qtbot, manager, fake_lsf):
+    """RETRY_WAIT 발행이 완료 계상에 얹히면 done이 부풀어 submit_finished가
+    조기 발화한다 — 계상 없는 발행 경로여야 한다."""
+    progress = []
+    manager.submit_progress.connect(
+        lambda jsid, done, total: progress.append((done, total)))
+    fake_lsf.fail_next_bsub = 2
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000) as blk:
+        submit_cmds(manager, ["mytool a.sp"], auto_poll=False)
+    rpt = blk.args[1]
+    assert (rpt.ok, rpt.failed, rpt.total) == (1, 0, 1)
+    assert all(done <= total for done, total in progress), progress
+
+
+def test_retry_wait_carries_the_failure_message(qtbot, manager, fake_lsf):
+    """왜 재시도 중인지 표에서 보여야 한다 — 마지막 시도의 터미널 원문이
+    RETRY_WAIT 레코드에 실려 나간다."""
+    waits = []
+    manager.jobs_updated.connect(
+        lambda jsid, recs: waits.extend(
+            r for r in recs if r.state is JobState.RETRY_WAIT))
+    fake_lsf.fail_next_bsub = 1
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        submit_cmds(manager, ["mytool a.sp"], auto_poll=False)
+    assert waits, "RETRY_WAIT 미발행"
+    assert waits[0].retry_count == 1
+    assert waits[0].fail_reason and waits[0].fail_message
+
+
+def test_first_attempt_submitting_is_not_emitted_twice(qtbot, manager,
+                                                       fake_lsf):
+    """최초 시도의 SUBMITTING은 착수 리셋 배치가 이미 발행한다 — task에서
+    또 얹으면 대량 제출에서 job 수만큼 중복 레코드가 흐른다."""
+    seen = _states_of(manager)
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        submit_cmds(manager, ["mytool a.sp"], auto_poll=False)
+    assert seen.count("SUBMITTING") == 1, seen
