@@ -221,11 +221,11 @@ mgr.remove_handler(js, "collect")        # 해제
 > `mgr.get_jobs()` 로도 조회할 수 있다. 작업 디렉토리는 여기 없다 — 폴링이
 > 아니라 제출 시 지정하는 `submit_cwd`(`work_dir`/`work_dirs`) 다.
 >
-> `run_time_s`(경과 실행시간)는 RUN 중 매 폴링마다 갱신돼 **`jobs_updated` Signal 로
-> live 발행**된다 — UI 가 받은 `JobRecord.run_time_s` 로 경과시간을 실시간 표시하면
-> 된다. 수만 개 규모에서 RUN job 전원이 매 폴링 재전이되는 부하가 부담되면
-> `LsfJobManager(poll_runtime_updates=False)` 로 끈다(그때 `run_time_s` 는 상태 전이
-> 시점에만 반영).
+> `run_time_s`(경과 실행시간)는 기본적으로 **상태 전이 시점에만** 반영된다
+> (`poll_runtime_updates=False`). 표에 흐르는 경과시간 열이 필요하면
+> `LsfJobManager(poll_runtime_updates=True)` 로 켠다 — 그러면 RUN 중 매 폴링마다
+> 갱신돼 `jobs_updated` 로 live 발행되지만, **RUN job 전원이 매 폴링 재전이**된다
+> (5000건이면 사이클당 5000레코드 배치).
 
 > 참고 — **LSF MultiCluster forwarding**: `LsfJobManager(collect_clusters=True)` 면
 > 폴링이 `bjobs -o` 에 `source_cluster`·`forward_cluster` 필드를 추가해

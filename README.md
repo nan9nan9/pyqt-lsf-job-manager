@@ -152,7 +152,7 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)     # 이번 submit만
 | `internal_refresh_min_s` | `poll_interval_s`/2 | internal 조회원의 최소 갱신 간격(초). 이 안에 겹쳐 들어온 조회는 콜백을 다시 돌리지 않음. 0이면 캐시 없음 (§5.8) |
 | `internal_retention_days` | 14 | internal 원장에서 **종료 job**을 보존할 기간(일). 넘으면 버려 메모리 누적을 막음. 0이면 만료 없음 (§5.8) |
 | `internal_lost_grace_s` | 60 | 콜백 조회원에서 **제출 후 이 시간 안**의 미발견은 LOST로 세지 않음 — 상태 원본(REST) 집계 지연 유예. 0이면 유예 없음 (§5.8) |
-| `poll_runtime_updates` | True | RUN 중 `run_time_s`(경과시간) 변화도 `jobs_updated`로 live 발행. 수만 개 규모면 False 권장 |
+| `poll_runtime_updates` | False | RUN 중 `run_time_s`(경과시간) 변화도 `jobs_updated`로 live 발행. 켜면 **RUN 전원이 매 폴링 재전이**된다(5000건 기준 사이클당 5000 transition + 5000레코드 배치). 끄면 경과시간은 상태 전이 시점에만 갱신 — 표에 실시간 경과시간 열이 꼭 필요할 때만 켤 것 |
 | `collect_clusters` | False | MultiCluster forwarding 정보 수집 — `JobRecord.source_cluster`/`forward_cluster`를 폴링으로 채움 |
 | `kill_status_policy` | `"optimistic"` | `"optimistic"`=kill 수락 확인 시 즉시 EXIT / `"actual"`=실제 LSF 상태(폴링)로만 |
 | `kill_max_retry` | 2 | kill 확인 실패 시 재시도 횟수 |
@@ -1003,8 +1003,10 @@ js.kill_finished.connect(lambda rep: spinner.stop())
 - **`jobs_updated`는 전체가 아니라 변경분**입니다 — 테이블 전체 리셋 대신
   `rec.job_key`로 해당 행만 갱신하세요 (`QAbstractTableModel`이면 해당 행
   `dataChanged`만).
-- **RUN 수천 개 이상을 다루면 `poll_runtime_updates=False`** 권장 — 기본값(True)은
-  실행 경과시간을 매 폴링 갱신하므로 RUN 전원이 매 주기 변경분 배치에 실립니다.
+- **`poll_runtime_updates`는 기본 False**입니다 — 켜면 실행 경과시간을 매 폴링
+  갱신하느라 RUN 전원이 매 주기 변경분 배치에 실립니다(5000건이면 사이클당
+  5000레코드). 표에 흐르는 경과시간 열이 꼭 필요하고 RUN이 수백 규모일 때만
+  켜세요.
 - `kill_status_policy`는 기본(`"optimistic"`)을 유지하세요 — kill 확인 즉시 EXIT가
   반영됩니다. `"actual"`이면 다음 폴링(기본 10초)까지 PEND/RUN으로 보입니다.
 

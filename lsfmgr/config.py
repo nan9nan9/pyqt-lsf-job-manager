@@ -148,11 +148,17 @@ class LsfConfig:
     #: 강등(FULL+cluster → FULL)돼 run_time 등 다른 확장 필드는 유지된다.
     collect_clusters: bool = False
 
-    #: RUN 중 run_time_s(경과 실행시간) 변화도 폴링 갱신·jobs_updated 발행 대상에
-    #: 포함할지. True면 UI가 매 폴링마다 살아있는 job의 runtime을 갱신받는다.
-    #: 대신 RUN job 전원이 매 폴링 재전이돼(수만 개 규모에선 폴링 부하↑) 부담되면
-    #: False로 끈다 — 그때 run_time_s는 상태 전이(RUN→DONE 등) 시점에만 반영된다.
-    poll_runtime_updates: bool = True
+    #: RUN 중 run_time_s(경과 실행시간) 변화도 폴링 갱신·jobs_updated 발행
+    #: 대상에 포함할지.
+    #:
+    #: 기본 False — 켜면 **RUN job 전원이 매 폴링 재전이**된다. 5000건 기준
+    #: 사이클당 5000 transition + 5000레코드짜리 jobs_updated 1회이고(실측
+    #: 217ms), 그 배치를 받는 앱의 표 갱신이 진짜 부담이다. 상태가 그대로인
+    #: job을 매 주기 다시 그릴 이유가 없다.
+    #: 끄면 run_time_s는 **상태 전이 시점**(RUN→DONE 등)에만 반영된다 — 표의
+    #: 경과시간 열이 실시간으로 흐르지 않는다. 그 열이 꼭 필요하고 RUN이 수백
+    #: 규모라면 True로 켠다.
+    poll_runtime_updates: bool = False
 
     #: pre_submit 게이트가 False를 반환(제출 거부)했을 때 submit_finished를
     #: 발화할지. True(기본)면 게이트 거부도 submit_finished(cancelled=N)로

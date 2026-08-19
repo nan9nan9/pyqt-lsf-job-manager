@@ -503,7 +503,7 @@ mgr = LsfJobManager(progress_min_interval_s=1.0,    # 기본 0.5
                     progress_min_step_ratio=0.02)   # 기본 0.01
 ```
 
-RUN이 수천 개 이상이면 `poll_runtime_updates=False`도 함께 고려한다(README §6.4).
+`poll_runtime_updates`는 기본 False다 — 켜면 RUN 전원이 매 주기 배치에 실린다(README §6.4).
 
 ---
 
