@@ -66,7 +66,7 @@ class Options:
     workers: int = 32
     max_retry: int = 3
     retry_backoff: str = "fixed:2"
-    rate_limit_per_s: Optional[float] = 5.0
+    rate_limit_per_s: Optional[float] = 20.0
     poll_interval_s: float = 10.0
     auto_poll: bool = True
     submit_timeout_s: float = 30.0

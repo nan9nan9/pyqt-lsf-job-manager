@@ -76,14 +76,16 @@ class LsfConfig:
     max_retry: int = 3                   # submit 재시도 횟수
     retry_delay_s: float = 2.0           # 첫 재시도 대기 (v7 기본 "fixed:2")
     retry_backoff: float = 1.0           # >1.0이면 지수 backoff("expo")
-    #: bsub 초당 호출 제한. 기본 5 — 동시 제출이 LSF 인증(eauth)/mbatchd를
+    #: bsub 초당 호출 제한. 기본 20 — 동시 제출이 LSF 인증(eauth)/mbatchd를
     #: 두들기면 bsub가 간헐적으로 "User permission denied"(exit 255)로 떨어진다.
     #: 재시도로 결국 성공하긴 하지만 제출이 느려지고 로그가 시끄러워진다.
     #: workers(동시 실행 수)와 함께 건다 — 부하를 정하는 건 '몇 개가 동시에
     #: 붙느냐'보다 '초당 몇 번 붙느냐'인 경우가 많다.
     #: None이면 제한 없음(빠르지만 대량 제출에서 위 증상 위험).
-    #: ⚠ 처리량 상한이 그대로 이 값이다 — 5면 5000 job 제출에 약 17분.
-    rate_limit_per_s: Optional[float] = 5.0
+    #: ⚠ 지속 처리량 상한이 그대로 이 값이다 — 20이면 5000 job에 약 4분,
+    #: 20000 job에 약 17분(실측 기준). 버킷 용량(rate×10)만큼은 즉시 나가므로
+    #: 소량 제출은 영향을 받지 않는다 (lsfmgr/util.py BURST_FACTOR).
+    rate_limit_per_s: Optional[float] = 20.0
 
     kill_max_retry: int = 2              # kill 확인 실패 시 재시도
     kill_retry_delay_s: float = 3.0      # kill 재시도 간격 — bkill은 비동기라

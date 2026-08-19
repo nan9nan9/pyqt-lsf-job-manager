@@ -131,7 +131,7 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)     # 이번 submit만
 | `workers` | 32 | 병렬 submit worker 수 (1~64) |
 | `max_retry` | 3 | submit 실패 재시도 (0=끔) |
 | `retry_backoff` | `"fixed:2"` | `"fixed:N"`(N초 고정) / `"expo:N"`(지수) |
-| `rate_limit_per_s` | 5 | 초당 제출 상한 (LSF 부하 보호). 동시 제출이 인증(eauth)/mbatchd를 두들기면 bsub가 간헐적으로 `User permission denied`(exit 255)로 떨어져 재시도가 늘어남. `None`이면 무제한 — **처리량 상한이 곧 이 값**이라 5면 5000 job에 약 17분 |
+| `rate_limit_per_s` | 20 | 초당 제출 상한 (LSF 부하 보호). 동시 제출이 인증(eauth)/mbatchd를 두들기면 bsub가 간헐적으로 `User permission denied`(exit 255)로 떨어져 재시도가 늘어남. `None`이면 무제한. **지속 처리량 상한이 곧 이 값** — 20이면 5000 job에 약 4분, 20000 job에 약 17분. 버킷 용량(=`rate`×10)만큼은 즉시 나가 소량 제출은 영향 없음 |
 | `submit_timeout_s` | 30 | 제출 1건 timeout(초) |
 | `poll_interval_s` | 10 | polling 주기 (5~60) |
 | `auto_poll` | True | submit 후 polling 자동 시작 |

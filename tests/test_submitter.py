@@ -358,3 +358,49 @@ def test_store_failure_during_reset_is_reported_as_error(qtbot, fake_lsf):
         assert errs and "ka" in errs[0], errs
     finally:
         mgr.shutdown()
+
+
+# ----------------------------------------------------------------------
+# rate limit — 지속 처리량은 누르되 소량 제출은 통과시킨다
+# ----------------------------------------------------------------------
+def test_burst_lets_small_submits_through():
+    """버킷 용량이 rate와 같으면 30건짜리 소량 제출도 5초씩 걸렸다 —
+    eauth를 두들기는 건 지속 부하이지 짧은 버스트가 아니다."""
+    import time
+    from lsfmgr.util import BURST_FACTOR, TokenBucketLimiter
+
+    lim = TokenBucketLimiter(20.0)
+    assert lim.capacity == 20.0 * BURST_FACTOR
+    t0 = time.monotonic()
+    for _ in range(int(lim.capacity)):          # 용량만큼은 즉시
+        assert lim.acquire()
+    assert time.monotonic() - t0 < 0.5
+
+
+def test_sustained_rate_is_still_capped():
+    """버스트를 키워도 지속 구간은 초당 rate로 눌려야 한다."""
+    import time
+    from lsfmgr.util import TokenBucketLimiter
+
+    lim = TokenBucketLimiter(20.0, burst=2)     # 용량을 작게 줘 빠르게 검증
+    t0 = time.monotonic()
+    for _ in range(12):
+        lim.acquire()
+    elapsed = time.monotonic() - t0
+    assert elapsed >= (12 - 2) / 20.0 * 0.8, elapsed
+
+
+def test_rate_limit_wait_is_cancellable():
+    """rate limit 대기 중에도 kill이 즉시 먹혀야 한다 — 대량 제출 도중
+    kill이 초당 rate만큼 밀리면 '멈추라고 눌렀는데 안 멈춘다'가 된다."""
+    import threading
+    import time
+    from lsfmgr.util import TokenBucketLimiter
+
+    lim = TokenBucketLimiter(1.0, burst=1)
+    lim.acquire()                                # 토큰 소진
+    ev = threading.Event()
+    threading.Timer(0.05, ev.set).start()
+    t0 = time.monotonic()
+    assert lim.acquire(ev) is False              # 취소로 빠져나온다
+    assert time.monotonic() - t0 < 0.5

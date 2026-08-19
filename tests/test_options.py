@@ -21,7 +21,7 @@ def test_builtin_defaults_only():
     assert opts.workers == 32
     assert opts.max_retry == 3
     assert opts.retry_backoff == "fixed:2"
-    assert opts.rate_limit_per_s == 5.0     # bsub 초당 호출 제한(기본 켜짐)
+    assert opts.rate_limit_per_s == 20.0    # bsub 초당 호출 제한(기본 켜짐)
     assert opts.poll_interval_s == 10.0
     assert opts.auto_poll is True
     assert opts.verify_kill is False
