@@ -327,12 +327,17 @@ class BulkSubmitter(QObject):
                 log.info("삭제된 job의 리셋 건너뜀: %s/%s", jobset_id, key)
                 self._count(ctx, cancelled=True)
                 continue
-            except Exception:                # noqa: BLE001
+            except Exception as e:           # noqa: BLE001
                 # store 장애 — 이 키만 건너뛰고 나머지는 진행. 여기서
                 # 전파되면 ctx가 미완(finished 미발행)으로 고착되어
                 # jobset이 잠긴다.
                 log.exception("재제출 리셋 실패 — 건너뜀: %s/%s",
                               jobset_id, key)
+                # 계상은 cancelled로 갈 수밖에 없지만(작업 1단위는 끝났다),
+                # 그대로 두면 앱에는 "취소됨"으로만 보여 store 장애가
+                # kill과 구별되지 않는다. error로 따로 알린다.
+                self._safe_emit(self.error, jobset_id,
+                                f"{key}: 제출 리셋 실패 — {e!r}")
                 self._count(ctx, cancelled=True)
                 continue
             if rec is not None:

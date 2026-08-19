@@ -28,6 +28,7 @@ class JobSet(QObject):
     #   jobs_failed — jobs_updated에서 실패분만 걸러 주는 핸들 전용 파생
     jobset_updated = Signal(dict)      # 요약 {"total":.., "RUN":.., ...}
     jobs_updated = Signal(list)        # 상태 변경분 [JobRecord] — 테이블 행 갱신용
+    submit_started = Signal()          # 제출 착수 (pre_submit 지정 시 게이트 통과 후)
     submit_progress = Signal(int, int) # submit 진행 (done, total), throttled
     submit_finished = Signal(object)   # SubmitReport (retry 포함 최종)
     jobs_failed = Signal(list)         # SUBMIT_FAILED/EXIT/LOST 변경분 [JobRecord]

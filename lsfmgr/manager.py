@@ -219,7 +219,8 @@ class LsfJobManager(QObject):
         # 동명 Signal 일괄 중계 — 목록에 이름만 추가하면 배선은 이 루프가
         # 한다. submit_finished/jobs_updated는 파생 신호(jobs_failed 등)가
         # 있어 아래 전용 slot으로 중계한다.
-        for name in ("submit_progress", "jobset_updated", "kill_started",
+        for name in ("submit_started", "submit_progress",
+                     "jobset_updated", "kill_started",
                      "kill_finished", "kill_progress", "error_occurred",
                      "handler_finished", "pre_submit_started",
                      "pre_submit_finished", "jobset_finished",

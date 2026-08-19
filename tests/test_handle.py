@@ -11,7 +11,7 @@ from lsfmgr import (
     JobState,
     LsfJobManager,
 )
-from tests.conftest import submit_cmds
+from tests.conftest import mk_jobset, submit_cmds
 
 
 # ----------------------------------------------------------------------
@@ -279,3 +279,49 @@ def test_handle_jobs_updated_derived(qtbot, manager, fake_lsf):
     qtbot.waitUntil(lambda: any(batches), timeout=5000)
     keys = {r.job_key for batch in batches for r in batch}
     assert keys == {r.job_key for r in js.jobs()}   # 초기 배치가 전원 포함
+
+
+# ----------------------------------------------------------------------
+# 핸들 Signal 카탈로그 — README §6.1과 구현이 어긋나지 않게
+# ----------------------------------------------------------------------
+def test_handle_relays_submit_started(qtbot, manager, fake_lsf):
+    """README §6.1이 js.submit_started를 문서화했는데 핸들에 없어서
+    js.submit_started.connect(...)가 AttributeError였다. kill_started는
+    있는데 submit_started만 빠진 비대칭이었다."""
+    js = mk_jobset(manager, ["echo a"])
+    seq = []
+    js.submit_started.connect(lambda: seq.append("started"))
+    js.submit_finished.connect(lambda r: seq.append("finished"))
+    with qtbot.waitSignal(js.submit_finished, timeout=10000):
+        manager.submit(js, auto_poll=False)
+    assert seq == ["started", "finished"], seq
+
+
+def test_documented_handle_signals_all_exist(qtbot, manager):
+    """README §6.1 표의 js.* 신호가 전부 실제로 있어야 한다 — 문서에만 있고
+    구현에 없으면 앱이 connect에서 AttributeError로 깨진다."""
+    js = mk_jobset(manager, ["echo a"])
+    documented = [
+        "jobset_updated", "jobs_updated", "jobs_failed", "submit_started",
+        "submit_progress", "submit_finished", "pre_submit_started",
+        "pre_submit_finished", "jobset_finished", "post_processing_started",
+        "post_processing_finished", "kill_started", "kill_progress",
+        "kill_finished", "handler_finished", "error_occurred",
+    ]
+    missing = [n for n in documented if not hasattr(js, n)]
+    assert not missing, f"README에는 있는데 핸들에 없는 신호: {missing}"
+
+
+def test_total_summary_aggregates_across_jobsets(qtbot, manager, fake_lsf):
+    """공개 API인데 테스트가 없었다 — 전 jobset 합산과 total 불변식."""
+    a = mk_jobset(manager, ["echo a", "echo b"])
+    b = mk_jobset(manager, ["echo c"])
+    ts = manager.total_summary()
+    assert ts["total"] == 3
+    assert sum(v for k, v in ts.items() if k != "total") == 3
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        manager.submit(a, auto_poll=False)
+    ts = manager.total_summary()
+    assert ts["total"] == 3 and ts.get("PEND") == 2 and ts.get("CREATED") == 1
+    manager.remove_jobset(b.id, force=True)
+    assert manager.total_summary()["total"] == 2

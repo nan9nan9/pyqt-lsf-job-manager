@@ -324,3 +324,37 @@ def test_forced_finish_does_not_fake_a_complete_progress(qtbot, manager):
     manager.submitter._finish_if_done(ctx, force=True)
     qtbot.wait(200)
     assert (50, 50) not in seen, seen
+
+
+def test_store_failure_during_reset_is_reported_as_error(qtbot, fake_lsf):
+    """store 장애로 제출을 못 한 job이 report.cancelled로만 잡히면 앱은
+    kill로 취소된 것과 구별할 수 없다 — error_occurred로 따로 알린다."""
+    from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
+
+    class FlakyStore(InMemoryStore):
+        def __init__(self):
+            super().__init__()
+            self.boom_keys = set()
+
+        def transition(self, jobset_id, job_key, new_state, *a, **kw):
+            if job_key in self.boom_keys:
+                self.boom_keys.discard(job_key)
+                raise RuntimeError("store 장애 주입")
+            return super().transition(jobset_id, job_key, new_state, *a, **kw)
+
+    store = FlakyStore()
+    mgr = LsfJobManager(store=store, runner=fake_lsf,
+                        config=LsfConfig(rate_limit_per_s=None,
+                                         retry_delay_s=0.05))
+    try:
+        errs = []
+        mgr.error_occurred.connect(lambda j, e: errs.append(e))
+        js = mgr.create_jobset(["a", "b"], job_keys=["ka", "kb"])
+        store.boom_keys = {"ka"}
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000) as blk:
+            mgr.submit(js, auto_poll=False)
+        rpt = blk.args[1]
+        assert rpt.cancelled == 1 and rpt.succeeded == 1
+        assert errs and "ka" in errs[0], errs
+    finally:
+        mgr.shutdown()
