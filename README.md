@@ -66,6 +66,11 @@ js.jobset_updated.connect(lambda s: print(f"RUN={s['RUN']} DONE={s['DONE']}/{s['
 핸들(JobSet)에는 **명령 메서드가 없습니다** — 명령 진입점이 `mgr` 한 곳이라
 "어디를 불러야 하나"를 고민할 일이 없습니다.
 
+> **jobset 인자는 핸들이든 id 문자열이든 됩니다.** `mgr.query_once(js)`와
+> `mgr.query_once(js.id)`가 같습니다(타입: `JobSetRef`). 핸들을 들고 있으면
+> 그대로 넘기고, `list_jobsets()`/`search_jobsets()` 결과처럼 id만 있으면
+> id를 넘기거나 `mgr.jobset(id)`로 핸들을 받아 쓰면 됩니다.
+
 ### 2.1 상태
 
 ```python

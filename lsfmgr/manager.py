@@ -16,7 +16,7 @@ import shlex
 from collections import Counter
 from dataclasses import replace as dc_replace
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Union
 
 from .command import LsfCommand, Runner
 from .completion import CompletionTracker
@@ -49,6 +49,11 @@ from .store.base import JobSetStore
 from .store.memory import InMemoryStore
 
 log = logging.getLogger("lsfmgr.manager")
+
+#: jobset 지정 방식 — **핸들이든 jobset_id 문자열이든** 받는다(_jsid가 정규화).
+#: 문서·예제는 전부 핸들을 넘기는데(`mgr.query_once(js)`) 힌트만 str이면
+#: 타입 체커·IDE가 문서대로 쓴 코드에 오류를 낸다 — 실제 계약을 적는다.
+JobSetRef = Union["JobSet", str]
 
 
 class LsfJobManager(QObject):
@@ -266,7 +271,7 @@ class LsfJobManager(QObject):
     # ------------------------------------------------------------------
     # High-level submit (v7 §1.1) — JobSet 핸들 반환
     # ------------------------------------------------------------------
-    def submit(self, js, *,
+    def submit(self, js: JobSetRef, *,
                only: Optional[Sequence] = None,
                pre_submit: Optional[Callable[[List[str]], bool]] = None,
                post_process: Optional[Callable[[list], Any]] = None,
@@ -317,6 +322,14 @@ class LsfJobManager(QObject):
         return self._submit_jobset(js, only=only, pre_submit=pre_submit,
                                    post_process=post_process, **kwargs)
 
+    def _is_busy(self, jobset_id: str) -> bool:
+        """이 jobset에 진행 중인 **수명주기 작업**(submit/kill)이 있는가.
+
+        제출·편집·삭제 가드와 can_submit이 같은 술어를 봐야 한다 — 네 곳에
+        복사돼 있으면 활동 종류가 하나 늘 때 한 곳이 조용히 빠진다."""
+        return (self.submitter.is_active(jobset_id)
+                or self.killer.is_active(jobset_id))
+
     @staticmethod
     def _jsid(js) -> str:
         """명령 인자 정규화 — JobSet 핸들 또는 jobset_id 문자열을 받는다.
@@ -326,10 +339,13 @@ class LsfJobManager(QObject):
             return js._jobset_id
         return js
 
-    def jobset(self, jobset_id: str) -> JobSet:
+    def jobset(self, jobset_id: JobSetRef) -> JobSet:
         """[sync, snapshot] JobSet 핸들 재획득 (복원/검색 결과에서).
         삭제된(remove_jobset) jobset은 레코드가 없으므로
-        JobSetNotFoundError — 새 열린 핸들이 발급될 여지가 없다."""
+        JobSetNotFoundError — 새 열린 핸들이 발급될 여지가 없다.
+        (핸들을 넘기면 그 핸들이 그대로 유효한지 확인해 돌려준다 — 다른
+        명령과 인자 규약을 맞춘다.)"""
+        jobset_id = self._jsid(jobset_id)
         handle = self._handles.get(jobset_id)
         if handle is not None:
             return handle
@@ -341,19 +357,19 @@ class LsfJobManager(QObject):
     # ------------------------------------------------------------------
     # Low-level submit (v6 유지)
     # ------------------------------------------------------------------
-    def cancel_submit(self, jobset_id: str) -> None:
+    def cancel_submit(self, jobset_id: JobSetRef) -> None:
         """[async→Signal] 진행 중 submit 중단 — submit된 job은 유지."""
         jobset_id = self._jsid(jobset_id)
         self.submitter.cancel_submit(jobset_id)
 
-    def is_submitting(self, jobset_id: str) -> bool:
+    def is_submitting(self, jobset_id: JobSetRef) -> bool:
         """[sync] 이 jobset에 진행 중인 submit/resubmit이 있는지.
         대량 제출을 백그라운드로 돌려놓고 진행 dialog를 닫은 뒤에도, 아직
         도는 중인지 아무 때나 확인한다."""
         jobset_id = self._jsid(jobset_id)
         return self.submitter.is_active(jobset_id)
 
-    def submit_snapshot(self, jobset_id: str) -> "Optional[SubmitProgress]":
+    def submit_snapshot(self, jobset_id: JobSetRef) -> "Optional[SubmitProgress]":
         """[sync] 진행 중 submit의 실시간 스냅샷 (done/total/성공/실패/취소) —
         없거나 이미 끝났으면 None. submit_progress Signal을 놓친 시점에도 현재
         진행을 pull로 조회한다(백그라운드 제출 상태 패널 재구성용).
@@ -362,20 +378,20 @@ class LsfJobManager(QObject):
         jobset_id = self._jsid(jobset_id)
         return self.submitter.progress_snapshot(jobset_id)
 
-    def is_killing(self, jobset_id: str) -> bool:
+    def is_killing(self, jobset_id: JobSetRef) -> bool:
         """[sync] 이 jobset에 진행 중인 kill이 있는지. 대량 chunked kill을
         백그라운드로 돌려놓고 진행 dialog를 닫은 뒤에도 확인한다."""
         jobset_id = self._jsid(jobset_id)
         return self.killer.is_active(jobset_id)
 
-    def kill_snapshot(self, jobset_id: str) -> "Optional[KillProgress]":
+    def kill_snapshot(self, jobset_id: JobSetRef) -> "Optional[KillProgress]":
         """[sync] 진행 중 kill의 실시간 스냅샷(done/total) — 없으면 None.
         kill_progress Signal을 놓친 시점에도 현재 진행을 pull로 조회한다."""
         jobset_id = self._jsid(jobset_id)
         return self.killer.progress_snapshot(jobset_id)
 
     # --- 내부 submit 구현 (High/Low 공유) ---
-    def start_polling(self, jobset_id: str,
+    def start_polling(self, jobset_id: JobSetRef,
                       interval_s: Optional[float] = None) -> None:
         """[async→Signal] 주기 polling 시작 — 갱신은 jobset_updated."""
         jobset_id = self._jsid(jobset_id)
@@ -392,7 +408,7 @@ class LsfJobManager(QObject):
         self.command.note_poll_interval(eff)
         self.polling.start_polling(jobset_id, eff)
 
-    def stop_polling(self, jobset_id: str) -> None:
+    def stop_polling(self, jobset_id: JobSetRef) -> None:
         """[async→Signal] polling 중지."""
         jobset_id = self._jsid(jobset_id)
         # 재개 기억도 지운다 — 재제출(_on_records_reset)이 옛 interval로
@@ -404,12 +420,12 @@ class LsfJobManager(QObject):
         self._poll_intervals.pop(jobset_id, None)
         self.polling.stop_polling(jobset_id)
 
-    def query_once(self, jobset_id: str) -> None:
+    def query_once(self, jobset_id: JobSetRef) -> None:
         """[async→Signal] 1회 갱신 — 결과는 jobset_updated/jobs_updated."""
         jobset_id = self._jsid(jobset_id)
         self.polling.poll_now(jobset_id)
 
-    def summary(self, jobset_id: str) -> Dict[str, Any]:
+    def summary(self, jobset_id: JobSetRef) -> Dict[str, Any]:
         """[sync, snapshot] Store의 현재 요약 (LSF 호출 없음)."""
         jobset_id = self._jsid(jobset_id)
         return self.store.summary(jobset_id)
@@ -432,7 +448,7 @@ class LsfJobManager(QObject):
                 continue
         return dict(agg)
 
-    def get_jobs(self, jobset_id: str,
+    def get_jobs(self, jobset_id: JobSetRef,
                  states: Optional[Set[JobState]] = None) -> List[JobRecord]:
         """[sync, snapshot] job 상세 (Store 조회)."""
         jobset_id = self._jsid(jobset_id)
@@ -441,7 +457,7 @@ class LsfJobManager(QObject):
     # ------------------------------------------------------------------
     # Kill
     # ------------------------------------------------------------------
-    def kill(self, jobset_id, *,
+    def kill(self, jobset_id: JobSetRef, *,
                     only_state: Optional[JobState] = None,
                     verify: Optional[bool] = None) -> None:
         """[async→Signal] JobSet kill — 결과는 kill_finished.
@@ -751,7 +767,7 @@ class LsfJobManager(QObject):
                 user_data=ud, submit_cwd=cwd))
         return records
 
-    def set_user_data(self, jobset_id: str, ref, user_data: Optional[dict]
+    def set_user_data(self, jobset_id: JobSetRef, ref, user_data: Optional[dict]
                     ) -> JobRecord:
         """[sync] job의 user_data 교체 — ref는 job_key(str) 또는 job_id(int).
         갱신 레코드를 jobs_updated로 발행한다.
@@ -778,7 +794,7 @@ class LsfJobManager(QObject):
         다른 job을 가리킨다(레코드 삽입 순서에 좌우된다)."""
         return self._resolve_refs(jobset_id, [ref])[0]
 
-    def add_handler(self, jobset_id: str, name: str,
+    def add_handler(self, jobset_id: JobSetRef, name: str,
                     fn: "Callable[[HandlerContext], Any]", *,
                     start_states: StateSpec = None,
                     end_states: StateSpec = None) -> None:
@@ -796,7 +812,7 @@ class LsfJobManager(QObject):
             jobset_id, name, fn,
             start_states=start_states, end_states=end_states)
 
-    def remove_handler(self, jobset_id: str, name: str) -> None:
+    def remove_handler(self, jobset_id: JobSetRef, name: str) -> None:
         """[main] handler 해제."""
         jobset_id = self._jsid(jobset_id)
         self.handlers.remove_handler(jobset_id, name)
@@ -809,7 +825,7 @@ class LsfJobManager(QObject):
     # 셋 다 도메인에선 local_edit_jobs 한 몸통을 공유한다 — 가드와
     # intended_count 규칙이 갈릴 수 없게.
     # ------------------------------------------------------------------
-    def add_jobs(self, jobset_id, commands: Sequence, *,
+    def add_jobs(self, jobset_id: JobSetRef, commands: Sequence, *,
                  job_keys: Optional[Sequence[str]] = None,
                  user_datas: Optional[Sequence[Optional[dict]]] = None,
                  work_dir: Optional[str] = None,
@@ -825,7 +841,7 @@ class LsfJobManager(QObject):
                                job_keys=job_keys, user_datas=user_datas,
                                work_dir=work_dir, work_dirs=work_dirs)
 
-    def replace_jobs(self, jobset_id, commands: Sequence, *,
+    def replace_jobs(self, jobset_id: JobSetRef, commands: Sequence, *,
                      job_keys: Sequence[str],
                      user_datas: Optional[Sequence[Optional[dict]]] = None,
                      work_dir: Optional[str] = None,
@@ -842,7 +858,7 @@ class LsfJobManager(QObject):
                                work_dir=work_dir, work_dirs=work_dirs,
                                force=force)
 
-    def upsert_jobs(self, jobset_id, commands: Sequence, *,
+    def upsert_jobs(self, jobset_id: JobSetRef, commands: Sequence, *,
                     job_keys: Sequence[str],
                     user_datas: Optional[Sequence[Optional[dict]]] = None,
                     work_dir: Optional[str] = None,
@@ -858,13 +874,12 @@ class LsfJobManager(QObject):
                                work_dir=work_dir, work_dirs=work_dirs,
                                force=force)
 
-    def _edit_jobs(self, jobset_id, commands: Sequence, *, policy: str,
+    def _edit_jobs(self, jobset_id: JobSetRef, commands: Sequence, *, policy: str,
                    job_keys=None, user_datas=None, work_dir=None,
                    work_dirs=None, force: bool = False) -> List[JobRecord]:
         """add/replace/upsert_jobs의 구현 — 정책만 다르다."""
         jobset_id = self._jsid(jobset_id)
-        if (self.submitter.is_active(jobset_id)
-                or self.killer.is_active(jobset_id)):
+        if self._is_busy(jobset_id):
             # 진행 중 사이클은 착수 시점의 job 스냅샷으로 돈다 — 그 사이
             # 목록을 바꾸면 '추가했는데 이번 제출엔 없다'는 혼란만 남는다.
             raise JobEditNotAllowedError(
@@ -920,7 +935,7 @@ class LsfJobManager(QObject):
         if watchable:
             self.start_polling(jobset_id, self._poll_intervals.get(jobset_id))
 
-    def remove_jobs(self, jobset_id, refs: Sequence, *,
+    def remove_jobs(self, jobset_id: JobSetRef, refs: Sequence, *,
                     force: bool = False) -> List[JobRecord]:
         """[sync] 지정한 job들을 삭제 — refs는 job_key(str)/job_id(int) 목록.
 
@@ -939,7 +954,7 @@ class LsfJobManager(QObject):
         self._emit_summary(jobset_id)
         return removed
 
-    def clear_jobs(self, jobset_id, *,
+    def clear_jobs(self, jobset_id: JobSetRef, *,
                    force: bool = False) -> List[JobRecord]:
         """[sync] jobset의 **job 전부** 삭제 — remove_jobs과 동일 가드.
 
@@ -985,7 +1000,7 @@ class LsfJobManager(QObject):
     # ------------------------------------------------------------------
     # jobset 단위 submit (v9) — 전 job (재)제출
     # ------------------------------------------------------------------
-    def can_submit(self, jobset_id: str, *,
+    def can_submit(self, jobset_id: JobSetRef, *,
                    only: Optional[Sequence] = None) -> bool:
         """[sync, snapshot] submit 가능 여부 — 대상 job이 1건 이상 있고 전원
         비활성(CREATED/DONE/EXIT/SUBMIT_FAILED/CANCELLED/LOST)이며 진행 중
@@ -997,8 +1012,7 @@ class LsfJobManager(QObject):
         try:
             # 삭제된 jobset은 아래 get_jobs가 JobSetNotFoundError —
             # except LsfmgrError로 떨어져 False가 된다(submit()의 예외와 일치)
-            if (self.submitter.is_active(jobset_id)
-                    or self.killer.is_active(jobset_id)):
+            if self._is_busy(jobset_id):
                 return False
             jobs = self._submit_targets(jobset_id, only)
             return bool(jobs) and all(r.state.is_inactive for r in jobs)
@@ -1080,8 +1094,7 @@ class LsfJobManager(QObject):
                 f"{jobset_id}: shutdown 이후에는 submit할 수 없습니다",
                 jobset_id=jobset_id)
         self.store.get_jobset(jobset_id)     # 존재 검증 (삭제분이면 예외)
-        if (self.submitter.is_active(jobset_id)
-                or self.killer.is_active(jobset_id)):
+        if self._is_busy(jobset_id):
             raise SubmitNotAllowedError(
                 f"{jobset_id}: submit/kill 진행 중에는 submit할 수 없습니다",
                 jobset_id=jobset_id)
@@ -1153,7 +1166,7 @@ class LsfJobManager(QObject):
         command 문자열의 shlex 왕복이 원본 argv를 복원한다)."""
         return shlex.split(r.command)
 
-    def detect_lost(self, jobset_id: str) -> List[JobRecord]:
+    def detect_lost(self, jobset_id: JobSetRef) -> List[JobRecord]:
         """[sync] 손실 감지 — ID 미확보 SUBMITTING을 LOST 확정
         (v10: LSF 조회/복구 없음 — 순수 Store 판정).
 
@@ -1178,7 +1191,7 @@ class LsfJobManager(QObject):
         """[sync, snapshot] 세션 범위 검색."""
         return self.store.search(tag=tag, label=label, since=since)
 
-    def remove_jobset(self, jobset_id, *,
+    def remove_jobset(self, jobset_id: JobSetRef, *,
                       force: bool = False) -> JobSetRecord:
         """[sync] jobset **자체를 삭제** (전원 terminal일 때) — 핸들도 파괴.
 
@@ -1188,8 +1201,7 @@ class LsfJobManager(QObject):
         직전의 JobSetRecord다.
         job만 비우고 jobset은 재사용하려면 clear_jobs()."""
         jobset_id = self._jsid(jobset_id)
-        if (self.submitter.is_active(jobset_id)
-                or self.killer.is_active(jobset_id)):
+        if self._is_busy(jobset_id):
             # pre_submit 게이트 대기 중엔 레코드가 아직 전원 terminal이라
             # 아래 local_remove_jobset 검사를 통과해 버린다 — 게이트가 통과하면
             # 이미 사라진 jobset에 실제 LSF job이 제출되므로(job 편집과 동일 가드)
