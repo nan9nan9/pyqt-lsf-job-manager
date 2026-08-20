@@ -165,3 +165,21 @@ def test_options_defaults_match_lsfconfig():
                 for name in sorted(shared)
                 if getattr(opts, name) != getattr(cfg, name)}
     assert not mismatch, f"Options/LsfConfig 기본값 불일치 {{필드: (Options, LsfConfig)}}: {mismatch}"
+
+
+def test_removed_rate_limit_is_rejected_everywhere():
+    """rate_limit_per_s는 완전히 제거됐다(v11) — 경고-무시가 아니라 거부다.
+
+    조용히 무시하면 앱은 초당 상한이 걸린 줄 알고 계속 그 값을 넘긴다.
+    제출 부하 노브는 이제 workers 하나뿐이다."""
+    import pytest
+
+    from lsfmgr import LsfConfig
+    from lsfmgr.options import DEPRECATED_KEYS, SHARED_KEYS, resolve_options
+
+    assert "rate_limit_per_s" not in SHARED_KEYS
+    assert "rate_limit_per_s" not in DEPRECATED_KEYS
+    with pytest.raises(TypeError):
+        resolve_options({}, {"rate_limit_per_s": 20})
+    with pytest.raises(TypeError):
+        LsfConfig(rate_limit_per_s=20)

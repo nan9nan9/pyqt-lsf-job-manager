@@ -33,12 +33,7 @@ SHARED_KEYS = frozenset({
 #: label/tags/description: submit이 jobset을 만들던 시절(v9 이전)의 메타
 #: 인자 — jobset 메타는 create_jobset 인자다. 받아서 검증만 하고 아무도
 #: 읽지 않던 함정이라 경고-무시로 강등.
-#: rate_limit_per_s: 초당 제출 상한(v11 삭제). 동시 제출 수만큼 곱해지는
-#: 사이클별 값이었고, workers가 전역 상한이 되면서 실효가 사라졌다. 게다가
-#: 공용 풀에서 rate 대기가 worker 슬롯을 물고 있어 다른 jobset을 굶겼다.
-#: 초당 상한이 필요하면 workers를 낮춘다(초당 ≈ workers / bsub 1회 소요).
 DEPRECATED_KEYS = frozenset({
-    "rate_limit_per_s",
     "script_dir",
     "queue", "resource_req", "output_dir",
     "default_queue", "lsf_group_root", "bsub_path", "bgdel_path",
