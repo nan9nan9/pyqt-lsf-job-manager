@@ -73,10 +73,10 @@ class LsfConfig:
     chunk_size: int = 500
     arg_max: int = 131072                # 명령줄 인자 총 길이 상한 (보수적)
 
-    #: 병렬 submit worker 수 (1~64). 기본 8.
-    #: ⚠ **제출 사이클 1건당** 상한이다 — 전역이 아니다. 사이클마다 QThreadPool을
-    #: 새로 만들기 때문에, jobset을 3개 동시에 제출하면 wrapper 프로세스가
-    #: 8이 아니라 24개 뜬다(실측). rate_limit_per_s도 마찬가지로 사이클별이다.
+    #: 동시에 도는 wrapper 프로세스 수 상한 (1~64). 기본 8.
+    #: **전역**이다 — jobset을 몇 개 동시에 제출하든 총합이 이 값을 넘지 않는다
+    #: (util.WorkerSlots). 호출별 workers는 이 값 **아래로 낮추는** 용도다.
+    #: ⚠ rate_limit_per_s는 아직 사이클별이다(동시 제출 수만큼 배수).
     #: 크게 잡으면 submit 호스트 CPU/RAM과 LSF master(mbatchd/eauth)를 함께
     #: 두들겨 bsub가 간헐적으로 "User permission denied"로 떨어진다.
     #: rate_limit_per_s(초당 호출)와 축이 다르다 — 이건 '동시에 몇 개',

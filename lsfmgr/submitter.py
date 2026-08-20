@@ -38,7 +38,7 @@ from .qt import (
 from .reports import SubmitProgress, SubmitReport
 from .states import JobState
 from .store.base import JobSetStore
-from .util import EmitThrottler, TokenBucketLimiter
+from .util import EmitThrottler, TokenBucketLimiter, WorkerSlots
 
 log = logging.getLogger("lsfmgr.submit")
 
@@ -172,9 +172,13 @@ class _SubmitTask(QRunnable):
         # rate limit 대기는 job 단위 취소를 못 본다(limiter는 사이클 event만
         # 본다) — 대기가 끝난 지금 다시 확인해, 그 사이 kill 대상이 된 job은
         # wrapper를 돌리지 않고 CANCELLED로 확정한다.
-        with ctx.lock:
-            cancelled = self.job_key in ctx.cancelled_keys
-        if cancelled:
+        if self._cancelled():
+            sub._task_cancelled(ctx, self.job_key)
+            return
+        # 전역 동시 제출 슬롯 — 사이클이 여러 개여도 wrapper 총수가 workers를
+        # 넘지 않게 한다. 취소(사이클/job 단위)를 보며 기다리므로 kill이
+        # 슬롯 대기에 갇히지 않는다.
+        if not sub._slots.acquire(self._cancelled):
             sub._task_cancelled(ctx, self.job_key)
             return
         try:
@@ -185,7 +189,17 @@ class _SubmitTask(QRunnable):
             sub._task_failed(ctx, self.job_key, self.attempt, e,
                              self._retry_factory())
             return
+        finally:
+            sub._slots.release()
         sub._task_succeeded(ctx, self.job_key, job_id)
+
+    def _cancelled(self) -> bool:
+        """이 job의 제출을 그만둬야 하는가 (사이클 전체 취소 또는 job 단위)."""
+        ctx = self.ctx
+        if ctx.cancel_event.is_set():
+            return True
+        with ctx.lock:
+            return self.job_key in ctx.cancelled_keys
 
     def _retry_factory(self):
         """attempt→새 task를 만드는 콜백 — 지연 실행되므로 값(로컬)만 캡처하고
@@ -218,11 +232,17 @@ class BulkSubmitter(QObject):
     def __init__(self, store: JobSetStore, command: LsfCommand,
                  config: Optional[LsfConfig] = None,
                  parent: Optional[QObject] = None,
-                 gate: Optional[SubmitGate] = None):
+                 gate: Optional[SubmitGate] = None,
+                 worker_limit: Optional[int] = None):
         super().__init__(parent)
         self.store = store
         self.command = command
         self.config = config or command.config
+        # 동시 제출 상한은 **전역**이다 — 사이클(=진행 중인 jobset)마다가 아니라
+        # manager 전체에서 이만큼만 wrapper가 동시에 돈다. worker_limit는
+        # manager가 해석한 실효 workers(①config + ②manager kwarg)를 넘겨준다.
+        self._slots = WorkerSlots(
+            self.config.workers if worker_limit is None else worker_limit)
         # kill 우선권 게이트 — manager가 killer와 공유하는 것을 주입한다.
         # (단독 사용 시 자체 생성 — barrier 없는 항상-허용 게이트로 동작)
         self._gate = gate or SubmitGate()
@@ -447,7 +467,9 @@ class BulkSubmitter(QObject):
         제출에서 빠진다. barrier 확인과 등록이 게이트 lock 아래 원자적이라
         'kill의 취소를 빠져나가는 늦은 사이클'이 구조적으로 불가능하다."""
         pool = QThreadPool()
-        pool.setMaxThreadCount(options.workers)
+        # 이 사이클의 상한은 전역 상한을 넘을 수 없다 — 호출별 workers는
+        # 전역 상한 **아래로 낮추는** 용도다(높여도 세마포어가 막는다).
+        pool.setMaxThreadCount(min(options.workers, self._slots.limit))
         ctx = _SubmitContext(
             jobset_id=jobset_id, total=len(keys), pool=pool,
             limiter=TokenBucketLimiter(options.rate_limit_per_s),

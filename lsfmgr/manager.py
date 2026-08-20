@@ -176,9 +176,12 @@ class LsfJobManager(QObject):
         self._gate = SubmitGate()
 
         from .submitter import BulkSubmitter
+        # 동시 제출 상한은 **전역**이다 — ①config + ②manager kwarg로 해석된
+        # 실효 workers를 넘긴다(호출별 workers는 그 아래로 낮추는 용도).
         self.submitter = BulkSubmitter(self.store, self.command,
                                        self.config, parent=self,
-                                       gate=self._gate)
+                                       gate=self._gate,
+                                       worker_limit=self._defaults["workers"])
         self.submitter.progress.connect(self.submit_progress)
         self.submitter.finished.connect(self.submit_finished)
         self.submitter.error.connect(self.error_occurred)
