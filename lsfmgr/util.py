@@ -52,39 +52,6 @@ class TokenBucketLimiter:
                 time.sleep(min(wait, 0.05))
 
 
-class WorkerSlots:
-    """**전역** 동시 제출 상한 — 제출 사이클이 몇 개든 동시에 도는 wrapper
-    프로세스 총수가 이 값을 넘지 않게 한다.
-
-    왜 사이클별 QThreadPool만으로는 부족한가: 풀은 제출 사이클마다 새로
-    만들어지므로(submitter._new_context) jobset을 3개 동시에 제출하면
-    wrapper가 8이 아니라 24개 뜬다. workers를 낮게 잡아 LSF 인증(eauth)/
-    mbatchd 과부하를 막으려는 사이트에서 그 보호가 동시 제출 수만큼 무력화된다.
-
-    풀을 하나로 합치지 않고 세마포어를 얹는 이유: 사이클별 pool.waitForDone이
-    "내 사이클의 제출이 멎었는가"를 뜻해야 한다(kill 우선권의 quiesce가
-    그 위에 서 있다). 풀을 공유하면 A jobset의 kill이 B jobset의 제출까지
-    기다리게 된다.
-
-    acquire()는 슬롯이 날 때까지 짧게 대기하며, should_stop()이 True면
-    False를 반환하고 즉시 빠져나온다(취소가 슬롯 대기에 갇히지 않게).
-    """
-
-    def __init__(self, limit: int):
-        self.limit = max(1, int(limit))
-        self._sem = threading.Semaphore(self.limit)
-
-    def acquire(self, should_stop=None) -> bool:
-        while True:
-            if self._sem.acquire(timeout=0.05):
-                return True
-            if should_stop is not None and should_stop():
-                return False
-
-    def release(self) -> None:
-        self._sem.release()
-
-
 class EmitThrottler:
     """progress Signal emit 빈도 제한 — thread-safe.
 

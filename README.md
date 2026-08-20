@@ -133,10 +133,10 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)     # 이번 submit만
 
 | 옵션 | 기본값 | 설명 |
 |---|---|---|
-| `workers` | 8 | 동시에 뜨는 wrapper(bsub) 프로세스 수 상한 — **전역**입니다. jobset을 몇 개 동시에 제출하든 총합이 이 값을 넘지 않습니다. 호출별 `workers`는 이 값 **아래로 낮추는** 용도(올려도 전역 상한이 이깁니다). `rate_limit_per_s`와 축이 다름(동시성 vs 초당 횟수) — 부하 보호는 둘 다 걸어야 함 |
+| `workers` | 8 | 병렬 submit worker 수 (1~64) = 동시에 뜨는 bsub 프로세스 수. `rate_limit_per_s`와 축이 다름(동시성 vs 초당 횟수) — 부하 보호는 둘 다 걸어야 함. ⚠ **제출 사이클 1건당**이다(전역 아님) — jobset 3개를 동시에 제출하면 8이 아니라 24개가 뜬다 |
 | `max_retry` | 3 | submit 실패 재시도 (0=끔) |
 | `retry_backoff` | `"fixed:2"` | `"fixed:N"`(N초 고정) / `"expo:N"`(지수) |
-| `rate_limit_per_s` | 20 | 초당 제출 상한 (LSF 부하 보호). ⚠ `workers`와 달리 아직 **제출 사이클 1건당**입니다 — jobset 2개를 동시에 제출하면 전역 실효 상한이 2배(실측 41/s). 동시 제출을 하신다면 이 점을 감안하세요. 동시 제출이 인증(eauth)/mbatchd를 두들기면 bsub가 간헐적으로 `User permission denied`(exit 255)로 떨어져 재시도가 늘어남. `None`이면 무제한. **지속 처리량 상한이 곧 이 값** — 20이면 5000 job에 약 4분, 20000 job에 약 17분. 버킷 용량(=`rate`×10)만큼은 즉시 나가 소량 제출은 영향 없음 |
+| `rate_limit_per_s` | 20 | 초당 제출 상한 (LSF 부하 보호). ⚠ `workers`와 마찬가지로 **제출 사이클 1건당**이다 — jobset 2개를 동시에 제출하면 전역 실효 상한이 2배(실측 41/s). 동시 제출이 인증(eauth)/mbatchd를 두들기면 bsub가 간헐적으로 `User permission denied`(exit 255)로 떨어져 재시도가 늘어남. `None`이면 무제한. **지속 처리량 상한이 곧 이 값** — 20이면 5000 job에 약 4분, 20000 job에 약 17분. 버킷 용량(=`rate`×10)만큼은 즉시 나가 소량 제출은 영향 없음 |
 | `submit_timeout_s` | 30 | 제출 1건 timeout(초) |
 | `poll_interval_s` | 10 | polling 주기 (5~60) |
 | `auto_poll` | True | submit 후 polling 자동 시작 |
