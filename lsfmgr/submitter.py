@@ -9,6 +9,9 @@ retry 원장(ctx.pending_retries): QTimer 대기 중인 재시도는 pool 밖에
 waitForDone이 기다려주지 않는다. 대기 중 재시도를 전부 원장에 등록해 두고,
 발화(fire)·포기(cancel/shutdown)가 원장에서의 원자적 pop으로만 결정되게
 하면 어느 쪽이 먼저 오든 정확히 한 번만 처리된다.
+이 원장은 ctx.lock이 아니라 **ctx.retry_lock**으로 잠근다 — 근거는
+_SubmitContext.retry_lock 주석(main 스레드가 혼잡한 ctx.lock을 기다리지
+않게 한다).
 """
 from __future__ import annotations
 
@@ -65,6 +68,14 @@ class _SubmitContext:
     # 영구 데드락(GUI freeze)이 났다. RLock은 같은 스레드 재진입만 허용해
     # 이 계열을 없애고 cross-thread 배타는 그대로 유지한다.
     lock: threading.RLock = field(default_factory=threading.RLock)
+    #: 재시도 원장 전용 lock — **ctx.lock과 겹치지 않는다**.
+    #: ctx.lock은 순서 보장을 위해 worker가 신호를 발화하는 동안에도 쥐고
+    #: 있어(‑> _emit_progress) 대량 제출에서 상시 혼잡하다. 재시도 원장까지
+    #: 거기 얹으면 main 스레드의 _on_retry_requested가 매번 그 혼잡을 기다린다
+    #: — 2000건 재시도 폭풍 실측에서 main이 lock 대기로만 628ms를 썼다.
+    #: 원장은 카운터와 원자적일 이유가 없으므로 따로 잠근다.
+    #: 중첩 취득 없음(원장 lock을 쥔 채 ctx.lock을 잡는 경로가 없다).
+    retry_lock: threading.Lock = field(default_factory=threading.Lock)
     started_at: float = field(default_factory=time.monotonic)
     done: int = 0
     succeeded: int = 0
@@ -72,6 +83,7 @@ class _SubmitContext:
     cancelled: int = 0
     retried_keys: set = field(default_factory=set)
     fail_reasons: Dict[str, int] = field(default_factory=dict)
+    #: QTimer 대기 중인 재시도 원장 — **retry_lock**으로만 잠근다(ctx.lock 아님)
     pending_retries: Dict[str, _PendingRetry] = field(default_factory=dict)
     finished: bool = False
     # 진행 중 상태 전이분(PEND/SUBMIT_FAILED) 버퍼 — progress와 같은 cadence로
@@ -540,7 +552,7 @@ class BulkSubmitter(QObject):
         # 잔존하지 않고 finished도 발행된다.
         # waitForDone 이후에는 원장에 새 항목이 추가되지 않는다.
         for ctx in contexts:
-            with ctx.lock:
+            with ctx.retry_lock:
                 entries = list(ctx.pending_retries.values())
                 ctx.pending_retries.clear()
             for entry in entries:
@@ -566,7 +578,7 @@ class BulkSubmitter(QObject):
         """abort_retries의 본체 — **이 ctx**의 원장만 건드린다. kill 콜백
         (_cancel_scope)처럼 ctx를 이미 쥔 caller는 이름 재조회 없이 직접
         부른다(사이클 교체 경합 창 제거)."""
-        with ctx.lock:
+        with ctx.retry_lock:
             if keys is None:
                 entries = list(ctx.pending_retries.values())
                 ctx.pending_retries.clear()
@@ -726,7 +738,7 @@ class BulkSubmitter(QObject):
                         delay_s: float,
                         make_task: Callable[[], QRunnable]) -> None:
         """RETRY_WAIT 전이 직후 worker 스레드에서 호출 — 원장에 등록한다."""
-        with ctx.lock:
+        with ctx.retry_lock:
             ctx.pending_retries[key] = _PendingRetry(key, delay_s, make_task)
         self._retry_requested.emit(ctx.jobset_id, key)
 
@@ -737,7 +749,7 @@ class BulkSubmitter(QObject):
             return
 
         def fire():
-            with ctx.lock:
+            with ctx.retry_lock:
                 entry = ctx.pending_retries.pop(entry_key, None)
             if entry is None:
                 return                  # shutdown이 이미 확정 — 정확히 한 번
@@ -749,7 +761,7 @@ class BulkSubmitter(QObject):
         if self._shutdown or ctx.cancel_event.is_set():
             fire()                      # 대기 없이 즉시 포기 확정
             return
-        with ctx.lock:
+        with ctx.retry_lock:
             entry = ctx.pending_retries.get(entry_key)
         if entry is not None:
             QTimer.singleShot(int(entry.delay_s * 1000), fire)

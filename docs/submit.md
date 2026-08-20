@@ -130,6 +130,13 @@ exec bsub "$@"      # bsub 의 stdout("Job <id> ...")·exit code 를 그대로 �
 `"expo:N"`)를 따르며 QTimer 로 스케줄된다(스레드 sleep 없음). 대기 중 job 은
 `RETRY_WAIT` 상태로 보이고, 실패 원문은 `JobRecord.fail_message` 에 남는다.
 
+> **대량 실패에도 GUI 는 계속 돈다.** LSF 인증(eauth) 과부하로 수천 건이
+> 한꺼번에 `BSUB_EXIT_255` 로 떨어지는 상황이 실제로 있다. 재시도 접수는
+> main 스레드에서 일어나므로, 재시도 원장은 제출 카운터/신호 발화가 쓰는
+> lock 과 **분리해서** 잠근다 — 안 그러면 재시도 1 건마다 main 이 worker
+> 8 개가 붙잡은 lock 을 기다린다(2000 건 실측: main 이벤트 루프 응답 지연
+> p99 1164ms → 2.0ms).
+
 ---
 
 ## 4. 실행 방식 — 멀티 프로세스

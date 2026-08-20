@@ -27,8 +27,8 @@ from lsfmgr import LsfJobManager
 # --- 경로: 저장소 루트/bin (예제는 examples/ 하위) --------------------------
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(_REPO_ROOT, "bin")
-# 저장소 루트를 import 경로에 — mocklsf(가상 LSF 패키지, 미설치)를 예제에서
-# import 할 수 있게 한다 (cluster_env_path 등).
+# 저장소 루트를 import 경로에 — 예제에서 mocklsf(가상 LSF 패키지, 미설치)를
+# 직접 들여다볼 수 있게 한다. bin/의 가상 명령은 별도 프로세스라 무관하다.
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
@@ -113,15 +113,6 @@ def configure_mocklsf(*, pend=None, run=None, submit_delay=None,
         os.environ["MOCKLSF_FORWARD_CLUSTERS"] = ",".join(forward_clusters)
     if forward_rate is not None:
         os.environ["MOCKLSF_FORWARD_RATE"] = str(forward_rate)
-
-
-def cluster_env_path(cluster: str) -> str:
-    """forward 클러스터 <cluster>의 cshrc(env) 경로 — lsfmgr kill의
-    mocklsf의 클러스터 컨텍스트 표식. mocklsf가 첫 DB 접근 시 자동
-    생성한다(홈 보장 후 반환)."""
-    from mocklsf import config as mockcfg
-    mockcfg.ensure_home()                 # clusterenv/<cluster>.cshrc 생성 보장
-    return mockcfg.cluster_env_path(cluster)
 
 
 # 프로세스 시작 시 1회: 격리 홈 + 데모용 빠른 기본 타이밍.

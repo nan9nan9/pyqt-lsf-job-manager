@@ -46,7 +46,6 @@ env 지정 없는 일반 bkill 로 죽입니다 — forward job 이 로컬 bkill
   - `wrapper(tool, *args)` — 제출 wrapper 커맨드(토큰 리스트) 생성.
   - `configure_mocklsf(pend=, run=, submit_fail_rate=, exit_rate=,
     forward_clusters=, forward_rate=, ...)` — `MOCKLSF_*` 환경변수 설정.
-  - `cluster_env_path(cluster)` — forward 클러스터 cshrc 경로(mocklsf 내부용).
   - `install_logging`, `maybe_autoquit`(`LSFMGR_DEMO_AUTOQUIT=<초>`).
 
 > 참고: LOST(job이 흔적 없이 소실)는 mocklsf 가 재현하지 않습니다. `detect_lost()`
