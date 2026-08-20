@@ -12,7 +12,7 @@ import logging
 import re
 import subprocess
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -38,6 +38,9 @@ class CommandResult:
 # runner 시그니처: (argv, timeout_s, cwd) -> CommandResult
 # cwd: 제출(bsub/wrapper) 시 subprocess를 실행할 작업 디렉토리(None=부모 cwd).
 # 커스텀 runner를 주입하는 경우 이 3번째 인자를 받아야 한다(하위호환 계약 변경).
+# **thread-safe여야 한다** — 제출은 workers개, kill은 kill_workers개 스레드에서
+# 동시에 부른다(조회도 폴링/verify가 겹칠 수 있다). 공유 가변 상태를 두려면
+# runner 쪽에서 잠글 것.
 Runner = Callable[[Sequence[str], float, Optional[str]], CommandResult]
 
 
@@ -742,17 +745,17 @@ class LsfCommand:
                                  self.config.arg_max, self._bkill_base_len()))
         if not chunks:
             return set(), 0, set()
-        timed_out: Set[str] = set()
-        state = {"processed": 0}
-        lock = threading.Lock()
 
-        def run_chunk(chunk: List[str]) -> Set[str]:
-            """chunk 1건 실행 → 해소된 target 집합. timeout은 timed_out으로."""
+        def run_chunk(chunk: List[str]):
+            """[worker] chunk 1건 실행 → (해소된 target, timeout난 target).
+
+            **공유 상태를 건드리지 않는다** — 자기 결과만 돌려주고 집계는
+            호출 스레드가 한다. 병렬 chunk가 공유 집합에 쓰면 lock이 필요하고,
+            그 lock 안에서 진행 통지까지 하면 Qt 신호가 여기서 나가게 된다
+            (아래 참고)."""
             argv = self._bkill_argv(chunk)
             try:
                 res = self._run(argv, self.config.kill_timeout_s)
-                got = _parse_bkill_resolved(
-                    res.stdout + "\n" + res.stderr, set(chunk))
             except subprocess.TimeoutExpired:
                 # 죽었는지 **모르는** 상태다 (위 docstring). 재조회로 판정한다.
                 log.warning(
@@ -761,26 +764,37 @@ class LsfCommand:
                     "자주 나오면 kill_chunk_size를 줄이거나 "
                     "kill_timeout_s를 늘리세요: %s",
                     self.config.kill_timeout_s, len(chunk), chunk[:20])
-                got = set()
-                with lock:
-                    timed_out.update(chunk)
-            # 진행 통지는 lock 안에서 — 병렬 chunk가 섞여도 누적치가
-            # 뒤로 가지 않게(진행바가 되감기면 안 된다).
-            with lock:
-                state["processed"] += len(chunk)
-                done = state["processed"]
-                if on_progress:
-                    on_progress(done)
-            return got
+                return set(), set(chunk)
+            return _parse_bkill_resolved(
+                res.stdout + "\n" + res.stderr, set(chunk)), set()
 
+        resolved: Set[str] = set()
+        timed_out: Set[str] = set()
+        processed = 0
         workers = max(1, min(int(self.config.kill_workers), len(chunks)))
         if workers == 1:
-            results = [run_chunk(c) for c in chunks]
+            done_iter = ((run_chunk(c), len(c)) for c in chunks)
+            for (got, late), n in done_iter:
+                resolved |= got
+                timed_out |= late
+                processed += n
+                if on_progress:
+                    on_progress(processed)
         else:
+            # 집계·진행 통지는 **호출 스레드**에서 한다(as_completed).
+            # ① Qt 신호(kill_progress)를 Qt가 모르는 순수 파이썬 스레드에서
+            #    쏘지 않는다 — 이 라이브러리의 다른 발화 지점은 전부 main이나
+            #    QThread(Pool) 위다. 여기만 예외를 만들 이유가 없다.
+            # ② 집계가 단일 스레드라 공유 집합용 lock이 아예 필요 없고,
+            #    진행 누적이 자연히 단조증가한다(진행바 되감김 불가).
             with ThreadPoolExecutor(max_workers=workers,
                                     thread_name_prefix="lsfmgr-bkill") as ex:
-                results = list(ex.map(run_chunk, chunks))
-        resolved: Set[str] = set()
-        for got in results:
-            resolved |= got
+                pending = {ex.submit(run_chunk, c): len(c) for c in chunks}
+                for fut in as_completed(pending):
+                    got, late = fut.result()
+                    resolved |= got
+                    timed_out |= late
+                    processed += pending[fut]
+                    if on_progress:
+                        on_progress(processed)
         return resolved, len(chunks), timed_out

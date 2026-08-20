@@ -132,3 +132,113 @@ def test_workers_is_clamped():
     assert LsfConfig(kill_workers=999).kill_workers == 32
     with pytest.raises(ValueError):
         LsfJobManager(kill_workers=0)          # 옵션 계층은 1~32 강제
+
+
+# ----------------------------------------------------------------------
+# 병렬화가 새로 만든 스레드 경계
+# ----------------------------------------------------------------------
+def test_qt_signals_are_not_emitted_from_executor_threads(qtbot, fake_lsf):
+    """chunk를 병렬로 돌려도 Qt 신호는 **Qt가 아는 스레드**에서만 나가야 한다.
+
+    이 라이브러리의 다른 발화 지점은 전부 main이거나 QThread(Pool) 위다.
+    순수 파이썬 스레드(ThreadPoolExecutor)에서 쏘면 Qt가 그 스레드를 임시로
+    입양했다 스레드 종료와 함께 파기하는 경로가 kill마다 반복된다 — 여기만
+    예외를 만들 이유가 없다. 집계·통지는 호출 스레드가 한다(as_completed)."""
+    import lsfmgr.killer as killer_mod
+
+    emitted_from = []
+    real = killer_mod._KillTask._emit_progress
+
+    def spy(self, done, total):
+        emitted_from.append(threading.current_thread().name)
+        return real(self, done, total)
+
+    killer_mod._KillTask._emit_progress = spy
+    mgr = LsfJobManager(
+        store=InMemoryStore(),
+        config=LsfConfig(rate_limit_per_s=None, kill_chunk_size=4,
+                         kill_workers=4, progress_min_interval_s=0.0,
+                         progress_min_step_ratio=0.0),
+        runner=_WatchBkill(fake_lsf, delay=0.01))
+    try:
+        with qtbot.waitSignal(mgr.submit_finished, timeout=30000):
+            js = submit_cmds(mgr, [f"mytool {i}.sp" for i in range(40)],
+                             auto_poll=False)
+        with qtbot.waitSignal(mgr.kill_finished, timeout=30000):
+            mgr.kill(js)
+        qtbot.wait(200)
+    finally:
+        killer_mod._KillTask._emit_progress = real
+        mgr.shutdown()
+    assert emitted_from, "진행 통지가 아예 없었다 — 테스트가 무의미"
+    bad = sorted({t for t in emitted_from if t.startswith("lsfmgr-bkill")})
+    assert not bad, f"executor 스레드에서 Qt 신호 발화: {bad}"
+
+
+def test_shutdown_during_a_parallel_kill_leaves_no_threads(qtbot, fake_lsf):
+    """chunk가 병렬로 도는 한복판에 shutdown — 좀비 스레드가 남으면 안 된다."""
+    mgr = LsfJobManager(
+        store=InMemoryStore(),
+        config=LsfConfig(rate_limit_per_s=None, kill_chunk_size=4,
+                         kill_workers=8),
+        runner=_WatchBkill(fake_lsf, delay=0.3))
+    with qtbot.waitSignal(mgr.submit_finished, timeout=30000):
+        js = submit_cmds(mgr, [f"mytool {i}.sp" for i in range(200)],
+                         auto_poll=False)
+    mgr.kill(js)
+    qtbot.wait(150)                            # chunk가 도는 한복판
+    mgr.shutdown()                             # 진행 중 bkill이 끝날 때까지만
+    qtbot.wait(200)
+    left = [t.name for t in threading.enumerate()
+            if t.name.startswith("lsfmgr-bkill")]
+    assert not left, f"executor 스레드 잔존: {left}"
+
+
+def test_parallel_kill_under_stress_keeps_every_contract(qtbot, fake_lsf):
+    """jobset 4개를 verify와 함께 동시에 병렬 kill — 계약이 다 버티나."""
+    import random
+
+    problems = []
+    progress = []
+    mgr = LsfJobManager(
+        store=InMemoryStore(),
+        config=LsfConfig(rate_limit_per_s=None, kill_chunk_size=4,
+                         kill_workers=16, kill_retry_delay_s=0.01,
+                         progress_min_interval_s=0.0,
+                         progress_min_step_ratio=0.0),
+        runner=_WatchBkill(fake_lsf, delay=0.005))
+    mgr.error_occurred.connect(lambda j, m: problems.append(f"error: {m}"))
+    mgr.kill_progress.connect(lambda j, d, t: progress.append((j, d)))
+    try:
+        sets = []
+        for k in range(4):
+            with qtbot.waitSignal(mgr.submit_finished, timeout=60000):
+                sets.append(submit_cmds(
+                    mgr, [f"mytool {k}_{i}.sp" for i in range(120)],
+                    auto_poll=False, workers=8))
+        for js in sets:
+            mgr.kill(js, verify=True)
+        qtbot.waitUntil(lambda: all(not mgr.is_killing(js.id) for js in sets),
+                        timeout=120000)
+        qtbot.wait(300)
+
+        for js in sets:
+            if any(r.state is not JobState.EXIT for r in js.jobs()):
+                problems.append(f"{js.id}: 안 죽은 레코드")
+            s = dict(mgr.summary(js.id))
+            total = s.pop("total")
+            if sum(s.values()) != total:
+                problems.append(f"{js.id}: 요약 불변식 {s} != {total}")
+            if not mgr.store._debug_counts_ok(js.id):
+                problems.append(f"{js.id}: 증분 카운트 불일치")
+        if fake_lsf.alive_jobs():
+            problems.append(f"kill 후 살아있는 job "
+                            f"{len(fake_lsf.alive_jobs())}건")
+        seen = {}
+        for jsid, done in progress:            # jobset별 진행 단조증가
+            if done < seen.get(jsid, 0):
+                problems.append(f"{jsid}: 진행 되감김 {seen[jsid]} → {done}")
+            seen[jsid] = done
+    finally:
+        mgr.shutdown()
+    assert not problems, "\n".join(problems[:10])
