@@ -209,10 +209,9 @@ def test_cancel_marks_cancelled_and_clears_failure_residue(qtbot, manager,
     달고 남으면 원인 표시가 오해된다. (CREATED로 되돌리면 한 번도 손대지
     않은 job과 구별되지 않아 kill 흔적이 사라진다)"""
     from lsfmgr.options import Options
-    from lsfmgr.qt import QThreadPool
     from lsfmgr.states import JobRecord
     from lsfmgr.submitter import _SubmitContext
-    from lsfmgr.util import TokenBucketLimiter
+    from lsfmgr.util import TokenBucketLimiter, WorkerSlots
 
     jsid = mk_jobset(manager, intended_count=1).id
     key = f"{jsid}_0"
@@ -222,7 +221,8 @@ def test_cancel_marks_cancelled_and_clears_failure_residue(qtbot, manager,
         fail_message="bsub: timeout after 30s", retry_count=2,
         command="echo x")])
     ctx = _SubmitContext(jobset_id=jsid, total=1,
-                         pool=QThreadPool(), limiter=TokenBucketLimiter(None),
+                         slots=WorkerSlots(8),
+                         limiter=TokenBucketLimiter(None),
                          options=Options())
 
     manager.submitter._mark_cancelled(ctx, [key])

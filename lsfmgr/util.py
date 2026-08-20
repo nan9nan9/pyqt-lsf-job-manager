@@ -52,6 +52,33 @@ class TokenBucketLimiter:
                 time.sleep(min(wait, 0.05))
 
 
+class WorkerSlots:
+    """동시 제출 슬롯 — 사이클 하나의 동시 wrapper 수를 묶는다.
+
+    전역 상한은 submitter의 **공용 QThreadPool 크기**가 잡는다. 이 클래스는
+    호출별 workers가 그보다 **낮을 때** 그 사이클만 더 조이는 용도다
+    (풀은 공용이라 사이클마다 크기를 달리 줄 수 없다).
+
+    acquire()는 슬롯이 날 때까지 짧게 대기하며, should_stop()이 True면
+    False를 반환하고 즉시 빠져나온다 — 취소(kill)가 슬롯 대기에 갇히면
+    quiesce가 그만큼 밀린다.
+    """
+
+    def __init__(self, limit: int):
+        self.limit = max(1, int(limit))
+        self._sem = threading.Semaphore(self.limit)
+
+    def acquire(self, should_stop=None) -> bool:
+        while True:
+            if self._sem.acquire(timeout=0.05):
+                return True
+            if should_stop is not None and should_stop():
+                return False
+
+    def release(self) -> None:
+        self._sem.release()
+
+
 class EmitThrottler:
     """progress Signal emit 빈도 제한 — thread-safe.
 

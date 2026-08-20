@@ -289,14 +289,14 @@ def test_final_progress_survives_the_finish_race(qtbot, manager):
     worker가 finished를 세우면 최종 (total,total)이 유실됐다 — 진행바가
     49/50에서 멈춘 채 완료된다. _finish_if_done이 직접 낸다."""
     from lsfmgr.options import Options
-    from lsfmgr.qt import QThreadPool
     from lsfmgr.submitter import _SubmitContext
-    from lsfmgr.util import TokenBucketLimiter
+    from lsfmgr.util import TokenBucketLimiter, WorkerSlots
 
     seen = []
     manager.submitter.progress.connect(lambda j, d, t: seen.append((d, t)))
     ctx = _SubmitContext(jobset_id="js1", total=50,
-                         pool=QThreadPool(), limiter=TokenBucketLimiter(None),
+                         slots=WorkerSlots(8),
+                         limiter=TokenBucketLimiter(None),
                          options=Options())
     ctx.done = 50
     # throttle 창을 소진시켜 _emit_progress가 못 내는 상황을 만든다
@@ -311,14 +311,14 @@ def test_forced_finish_does_not_fake_a_complete_progress(qtbot, manager):
     """게이트 거부처럼 done<total로 끝나는 경로에서 (total,total)을 지어내면
     '전부 처리됨'으로 오보된다."""
     from lsfmgr.options import Options
-    from lsfmgr.qt import QThreadPool
     from lsfmgr.submitter import _SubmitContext
-    from lsfmgr.util import TokenBucketLimiter
+    from lsfmgr.util import TokenBucketLimiter, WorkerSlots
 
     seen = []
     manager.submitter.progress.connect(lambda j, d, t: seen.append((d, t)))
     ctx = _SubmitContext(jobset_id="js2", total=50,
-                         pool=QThreadPool(), limiter=TokenBucketLimiter(None),
+                         slots=WorkerSlots(8),
+                         limiter=TokenBucketLimiter(None),
                          options=Options())
     ctx.done = 3
     manager.submitter._finish_if_done(ctx, force=True)
@@ -380,7 +380,7 @@ def test_burst_lets_small_submits_through():
 def test_sustained_rate_is_still_capped():
     """버스트를 키워도 지속 구간은 초당 rate로 눌려야 한다."""
     import time
-    from lsfmgr.util import TokenBucketLimiter
+    from lsfmgr.util import TokenBucketLimiter, WorkerSlots
 
     lim = TokenBucketLimiter(20.0, burst=2)     # 용량을 작게 줘 빠르게 검증
     t0 = time.monotonic()
@@ -395,7 +395,7 @@ def test_rate_limit_wait_is_cancellable():
     kill이 초당 rate만큼 밀리면 '멈추라고 눌렀는데 안 멈춘다'가 된다."""
     import threading
     import time
-    from lsfmgr.util import TokenBucketLimiter
+    from lsfmgr.util import TokenBucketLimiter, WorkerSlots
 
     lim = TokenBucketLimiter(1.0, burst=1)
     lim.acquire()                                # 토큰 소진
