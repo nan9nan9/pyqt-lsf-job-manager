@@ -191,9 +191,21 @@ class JobSetHandlerService(QObject):
             self.remove_handler(jobset_id, name)
 
     def shutdown(self) -> None:
+        """[main] 종료 — 대기 중인 **중간 실행분은 버리고** 최종 실행분만 돌린다.
+
+        중간 실행(final=False)은 "이번 폴링 사이클의 수집"이라 종료 시점에
+        굳이 따라잡을 이유가 없다. 그대로 두면 큐에 쌓인 만큼 종료가 밀린다
+        — job 60건 x 핸들러 0.5초면 shutdown이 7.3초였다(실측).
+        최종 실행(final=True)은 "이 job은 이렇게 끝났다"는 마지막 수집이라
+        버리지 않는다. 이미 도는 것은 앱 코드라 멈출 수 없으니 기다린다."""
         self._handlers.clear()
-        # 큐에 남은 대기분까지 drain worker가 다 돌고 나서 반환한다
-        # (job당 task를 pool에 넣던 시절 waitForDone의 의미와 동일).
+        with self._queue_lock:
+            dropped = [q for q in self._queue if not q[2]]
+            if dropped:
+                self._queue = deque(q for q in self._queue if q[2])
+        if dropped:
+            log.info("shutdown: 대기 중이던 handler 중간 실행 %d건 생략 "
+                     "(최종 실행분은 그대로 수행)", len(dropped))
         self._pool.waitForDone(-1)       # 도는 task가 각자 표식을 해제한다
         with self._inflight_lock:
             self._inflight.clear()       # 혹시 남은 잔재까지 정리

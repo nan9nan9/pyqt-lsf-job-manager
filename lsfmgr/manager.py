@@ -401,6 +401,11 @@ class LsfJobManager(QObject):
                       interval_s: Optional[float] = None) -> None:
         """[async→Signal] 주기 polling 시작 — 갱신은 jobset_updated."""
         jobset_id = self._jsid(jobset_id)
+        if self._shutdown_done:
+            # 폴링 스레드가 이미 죽어 queued 요청이 영영 배달되지 않는다 —
+            # 조용히 넘기면 앱은 폴링이 도는 줄 안다(kill과 같은 규칙).
+            log.warning("shutdown 후 start_polling 요청 무시: %s", jobset_id)
+            return
         eff = float(interval_s if interval_s is not None
                     else self._defaults["poll_interval_s"])
         if not (0 < eff <= MAX_POLL_INTERVAL_S):
@@ -434,6 +439,9 @@ class LsfJobManager(QObject):
     def query_once(self, jobset_id: JobSetRef) -> None:
         """[async→Signal] 1회 갱신 — 결과는 jobset_updated/jobs_updated."""
         jobset_id = self._jsid(jobset_id)
+        if self._shutdown_done:
+            log.warning("shutdown 후 query_once 요청 무시: %s", jobset_id)
+            return
         self.polling.poll_now(jobset_id)
 
     def summary(self, jobset_id: JobSetRef) -> Dict[str, Any]:
@@ -818,6 +826,12 @@ class LsfJobManager(QObject):
         온다. 별도 주기 없이 `poll_interval_s`에 tie되며, **폴링이 돌고 있어야
         동작**한다."""
         jobset_id = self._jsid(jobset_id)
+        if self._shutdown_done:
+            # 등록해도 tick이 돌지 않는다 — 조용히 넘기면 앱은 handler가
+            # 붙은 줄 안다.
+            log.warning("shutdown 후 add_handler 요청 무시: %s/%s",
+                        jobset_id, name)
+            return
         self.store.get_jobset(jobset_id)          # 존재 검증
         self.handlers.add_handler(
             jobset_id, name, fn,
