@@ -74,3 +74,72 @@ def test_whole_array_kill_still_resolves_from_element_replies(qtbot, manager):
             "Job <1000[1]> is being terminated\n")
     assert _parse_bkill_resolved(text, {"1000"}) == {
         "1000[0]", "1000[1]", "1000"}
+
+
+# ----------------------------------------------------------------------
+# R6-3 — handler tick이 main 스레드를 job 수만큼 잡지 않는다
+# ----------------------------------------------------------------------
+def test_handler_tick_does_not_block_the_main_thread(qtbot):
+    """job 1건당 QRunnable 1개를 pool에 넣으면 tick이 main에서 pool.start
+    비용(이 바인딩 기준 건당 ~180us, pool 크기와 무관하게 선형)을 job 수만큼
+    문다 — RUN 5000건이면 **폴링 사이클마다** ~1.1초, 2만 건이 한꺼번에
+    종료되면 4.4초 GUI 정지였다. 동시 실행은 어차피 상한이 있으니 큐잉만
+    main에서 하고 꺼내 도는 일은 worker가 한다."""
+    import time
+    from datetime import datetime
+
+    from lsfmgr import InMemoryStore
+    from lsfmgr.handlers import JobSetHandlerService
+    from lsfmgr.states import JobRecord, JobSetRecord
+
+    n = 5000
+    store = InMemoryStore()
+    store.store_insert_jobset(JobSetRecord(jobset_id="js", intended_count=n,
+                                           created_at=datetime.now()))
+    store.store_add_jobs([
+        JobRecord(job_id=1000 + i, array_index=None, jobset_id="js",
+                  job_key=f"k{i}", state=JobState.RUN, command="x")
+        for i in range(n)])
+    svc = JobSetHandlerService(store)
+    svc.add_handler("js", "h", lambda ctx: None)
+    try:
+        t0 = time.perf_counter()
+        svc.tick("js")                       # 폴링 사이클 1회 = main 스레드
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    finally:
+        svc.shutdown()
+    # 수정 전 ~1100ms / 수정 후 ~35ms. 느린 CI를 감안해도 300ms면 충분히 가른다.
+    assert elapsed_ms < 300, f"tick이 main을 {elapsed_ms:.0f}ms 잡았다"
+
+
+def test_handler_runs_exactly_once_per_job(qtbot):
+    """큐 방식이 실행을 빠뜨리거나 중복하지 않는다 (실행 상한만 바뀐 것)."""
+    import threading
+    from datetime import datetime
+
+    from lsfmgr import InMemoryStore
+    from lsfmgr.handlers import JobSetHandlerService
+    from lsfmgr.states import JobRecord, JobSetRecord
+
+    n = 500
+    store = InMemoryStore()
+    store.store_insert_jobset(JobSetRecord(jobset_id="js", intended_count=n,
+                                           created_at=datetime.now()))
+    store.store_add_jobs([
+        JobRecord(job_id=1000 + i, array_index=None, jobset_id="js",
+                  job_key=f"k{i}", state=JobState.DONE, command="x")
+        for i in range(n)])
+    seen, lock = [], threading.Lock()
+
+    def fn(ctx):
+        with lock:
+            seen.append((ctx.job_key, ctx.final))
+
+    svc = JobSetHandlerService(store)
+    svc.add_handler("js", "h", fn)
+    svc.tick("js")
+    svc.shutdown()                           # 큐 잔여분까지 drain 후 반환
+
+    assert len(seen) == n, f"실행 {len(seen)}회 (기대 {n})"
+    assert len({k for k, _ in seen}) == n, "같은 job이 두 번 돌았다"
+    assert all(final for _, final in seen), "종료 상태인데 final=False"

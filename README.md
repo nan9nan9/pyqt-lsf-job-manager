@@ -584,6 +584,10 @@ mgr.remove_handler(js, "collect")          # 해제
 
 - `handler_finished`는 **1회 실행이 끝날 때마다** job별로 옵니다 — 최종 실행은
   `res.final`로 구분. 예외는 `res.error`에 담겨 옵니다(다른 job에 영향 없음).
+- 동시에 도는 handler는 **4개까지**입니다(`handlers.MAX_HANDLER_WORKERS`). 나머지는
+  큐에서 대기하므로, job이 수천 개여도 폴링 사이클이 GUI를 잡지 않습니다 —
+  대신 handler 하나가 오래 걸리면 그만큼 뒤가 밀립니다(무거운 작업은 콜백 안에서
+  더 잘게 나누거나 자체 큐로 넘길 것).
 - **폴링이 돌고 있어야 동작**합니다(auto_poll 기본이면 자동). 첫 실행은 다음 폴링
   사이클이며, `mgr.query_once(js)`로 즉시 1회 유도 가능합니다.
 - `mgr.submit(js)`로 전체 재실행하면 진행 상태가 자동 재무장되어 새 실행에서 다시 돕니다.

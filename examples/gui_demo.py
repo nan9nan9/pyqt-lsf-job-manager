@@ -629,7 +629,9 @@ def main():
     if n:
         configure_mocklsf(submit_fail_rate=0, submit_delay=0)
         win.form.count.setValue(int(n))
-        win.form.workers.setValue(32)
+        # workers는 폼 기본값(8) 그대로 둔다 — 대량 제출에서 동시 bsub를
+        # 키우면 submit 호스트와 LSF master(mbatchd/eauth)를 함께 두들겨
+        # "User permission denied"가 나기 시작한다(README §1.2 workers).
         QTimer.singleShot(300, win.submit)
     # 스모크 훅: 기동 → 소량 제출(handler 포함) → kill → autoquit.
     if os.environ.get("LSFMGR_DEMO_AUTORUN") == "1":

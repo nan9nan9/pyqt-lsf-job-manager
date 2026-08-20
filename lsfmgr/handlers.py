@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, FrozenSet, Iterable, Optional, Tuple, Union
 
@@ -33,6 +34,9 @@ DEFAULT_END_STATES: FrozenSet[JobState] = frozenset({
     JobState.DONE, JobState.EXIT})
 
 StateSpec = Union[JobState, Iterable[JobState], None]
+
+#: 동시에 도는 handler 수 상한 (= drain worker 수).
+MAX_HANDLER_WORKERS = 4
 
 
 def _as_states(x: StateSpec, default: FrozenSet[JobState]) -> FrozenSet[JobState]:
@@ -110,7 +114,7 @@ class JobSetHandlerService(QObject):
         super().__init__(parent)
         self.store = store
         self._pool = QThreadPool()
-        self._pool.setMaxThreadCount(4)
+        self._pool.setMaxThreadCount(MAX_HANDLER_WORKERS)
         self._handlers: Dict[Tuple[str, str], _Handler] = {}
         # 실행 중인 (jobset_id, handler_name, job_key) — _Handler 밖에 둔다.
         # _Handler 안에 있으면 remove_handler → add_handler 재등록 때 이 표식이
@@ -119,6 +123,17 @@ class JobSetHandlerService(QObject):
         # 서로 다른 handler는 여전히 독립적으로 돈다.
         self._inflight: set = set()
         self._inflight_lock = threading.Lock()
+        # 실행 대기 큐 + 그 큐를 비우는 worker 수.
+        # **job 1건당 QRunnable 1개를 pool에 넣지 않는다** — QThreadPool.start는
+        # 이 바인딩에서 건당 ~180us라(pool 크기와 무관, 선형) tick이 main
+        # 스레드에서 그 비용을 job 수만큼 문다: RUN 5000건이면 폴링 사이클마다
+        # ~1.1초, 2만 건이 한꺼번에 종료되면 4.4초 GUI 정지였다(실측).
+        # 어차피 동시 실행은 MAX_HANDLER_WORKERS로 묶여 있어 나머지는 큐에서
+        # 대기할 뿐이므로, 큐에 넣는 일은 main에서 O(1)로 하고 worker가 꺼내
+        # 돈다 — pool.start 호출은 tick당 최대 worker 수만큼이다.
+        self._queue: deque = deque()
+        self._queue_lock = threading.Lock()
+        self._draining = 0                   # 도는 drain worker 수
         self._remove_requested.connect(self.remove_handler)
         self._recheck.connect(self._on_recheck)
 
@@ -177,6 +192,8 @@ class JobSetHandlerService(QObject):
 
     def shutdown(self) -> None:
         self._handlers.clear()
+        # 큐에 남은 대기분까지 drain worker가 다 돌고 나서 반환한다
+        # (job당 task를 pool에 넣던 시절 waitForDone의 의미와 동일).
         self._pool.waitForDone(-1)       # 도는 task가 각자 표식을 해제한다
         with self._inflight_lock:
             self._inflight.clear()       # 혹시 남은 잔재까지 정리
@@ -203,6 +220,7 @@ class JobSetHandlerService(QObject):
             return
         for h in hs:
             self._run_cycle(h, recs)
+        self._pump()                        # 쌓인 대기분에 worker 배정
 
     def _run_cycle(self, h: _Handler, recs) -> None:
         with h.lock:
@@ -230,7 +248,8 @@ class JobSetHandlerService(QObject):
         final = in_end
         h.status[rec.job_key] = _FINISHED if final else _RUNNING
         self._mark_inflight(h, rec.job_key)
-        self._pool.start(_HandlerTask(self, h, rec, final))
+        with self._queue_lock:
+            self._queue.append((h, rec, final))
 
     # ------------------------------------------------------------------
     # inflight 표식 — handler 객체 수명과 분리 (재등록에도 새지 않는다).
@@ -268,6 +287,36 @@ class JobSetHandlerService(QObject):
             return
         with h.lock:
             self._eval_record(h, rec)
+        self._pump()
+
+    # ------------------------------------------------------------------
+    # 실행 큐 — main은 넣기만, worker가 꺼내 돈다
+    # ------------------------------------------------------------------
+    def _pump(self) -> None:
+        """대기분이 있으면 drain worker를 상한까지 채운다 (호출 스레드 무관)."""
+        with self._queue_lock:
+            want = min(MAX_HANDLER_WORKERS - self._draining, len(self._queue))
+            self._draining += want
+        for _ in range(want):
+            self._pool.start(_DrainTask(self))
+
+    def _drain(self) -> None:
+        """[worker] 큐가 빌 때까지 handler를 실행한다.
+
+        '큐 비었나' 확인과 worker 수 감소를 **같은 lock 획득 안에서** 한다 —
+        갈라 놓으면 그 틈에 들어온 항목이 아무 worker에도 안 잡힌 채로
+        남는다(_pump는 _draining이 아직 안 줄어 새 worker를 안 띄운다)."""
+        while True:
+            with self._queue_lock:
+                if not self._queue:
+                    self._draining -= 1
+                    return
+                h, rec, final = self._queue.popleft()
+            try:
+                self._run(h, rec, final)
+            except Exception:                # noqa: BLE001 — worker 보호
+                log.exception("handler 실행 루프 예외(무시): %s/%s",
+                              h.jobset_id, h.name)
 
     # worker 스레드에서 호출
     def _run(self, h: _Handler, rec: JobRecord, final: bool) -> None:
@@ -287,17 +336,15 @@ class JobSetHandlerService(QObject):
             self._recheck.emit(h.jobset_id, h.name, rec.job_key)
 
 
-class _HandlerTask(QRunnable):
-    """handler 1회 실행 worker."""
+class _DrainTask(QRunnable):
+    """실행 큐를 비우는 worker — 큐가 빌 때까지 handler를 연달아 돌린다.
+    (job 1건당 QRunnable 1개를 만들던 방식은 tick이 main 스레드에서
+     pool.start 비용을 job 수만큼 물어 GUI를 초 단위로 멈췄다.)"""
 
-    def __init__(self, service: JobSetHandlerService, h: _Handler,
-                 rec: JobRecord, final: bool):
+    def __init__(self, service: JobSetHandlerService):
         super().__init__()
         self.setAutoDelete(True)
         self.service = service
-        self.h = h
-        self.rec = rec
-        self.final = final
 
     def run(self):
-        self.service._run(self.h, self.rec, self.final)
+        self.service._drain()
