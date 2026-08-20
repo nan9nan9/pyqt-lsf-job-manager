@@ -73,7 +73,10 @@ class LsfConfig:
     chunk_size: int = 500
     arg_max: int = 131072                # 명령줄 인자 총 길이 상한 (보수적)
 
-    #: 병렬 submit worker 수 (1~64). 기본 8 — 동시에 뜨는 bsub 프로세스 수다.
+    #: 병렬 submit worker 수 (1~64). 기본 8.
+    #: ⚠ **제출 사이클 1건당** 상한이다 — 전역이 아니다. 사이클마다 QThreadPool을
+    #: 새로 만들기 때문에, jobset을 3개 동시에 제출하면 wrapper 프로세스가
+    #: 8이 아니라 24개 뜬다(실측). rate_limit_per_s도 마찬가지로 사이클별이다.
     #: 크게 잡으면 submit 호스트 CPU/RAM과 LSF master(mbatchd/eauth)를 함께
     #: 두들겨 bsub가 간헐적으로 "User permission denied"로 떨어진다.
     #: rate_limit_per_s(초당 호출)와 축이 다르다 — 이건 '동시에 몇 개',
@@ -82,7 +85,9 @@ class LsfConfig:
     max_retry: int = 3                   # submit 재시도 횟수
     retry_delay_s: float = 2.0           # 첫 재시도 대기 (v7 기본 "fixed:2")
     retry_backoff: float = 1.0           # >1.0이면 지수 backoff("expo")
-    #: bsub 초당 호출 제한. 기본 20 — 동시 제출이 LSF 인증(eauth)/mbatchd를
+    #: bsub 초당 호출 제한. **제출 사이클 1건당**이다 — jobset 2개를 동시에
+    #: 제출하면 전역 실효 상한이 2배가 된다(실측: 설정 20 → 지속 41/s).
+    #: 기본 20 — 동시 제출이 LSF 인증(eauth)/mbatchd를
     #: 두들기면 bsub가 간헐적으로 "User permission denied"(exit 255)로 떨어진다.
     #: 재시도로 결국 성공하긴 하지만 제출이 느려지고 로그가 시끄러워진다.
     #: workers(동시 실행 수)와 함께 건다 — 부하를 정하는 건 '몇 개가 동시에
