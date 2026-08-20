@@ -350,7 +350,8 @@ class InternalStatusSource:
                  refresh_min_s: float,
                  wait_timeout_s: float,
                  retention_days: float = 14.0,
-                 auto_refresh: bool = False):
+                 auto_refresh: bool = False,
+                 track_runtime: bool = True):
         if not callable(fetcher):
             raise ValueError(
                 f"job_status_fetcher는 호출 가능해야 합니다 (got {fetcher!r})")
@@ -368,6 +369,13 @@ class InternalStatusSource:
         self._wait_timeout_s = max(1.0, float(wait_timeout_s))
         #: 종료 job 보존 기간 — 넘으면 원장에서 버린다.
         self._retention = timedelta(days=max(0.0, float(retention_days)))
+        #: 증분 payload에 안 온 진행 중 job의 경과시간을 매 조회마다 갱신할지
+        #: (= config.poll_runtime_updates). 꺼져 있으면 monitor가 run_time
+        #: 변화를 갱신 대상으로 보지 않으므로 그 갱신은 통째로 버려진다 —
+        #: 원장 전수 스캔 + JobStatus/_Entry 재생성을 조회마다 하는 값이
+        #: 아무 데도 안 쓰인다(2만 건 기준 조회당 37ms, 그동안 원장 lock을
+        #: 쥐고 있어 폴링 읽기가 그만큼 밀린다).
+        self._track_runtime = bool(track_runtime)
         # 원장·진행 상태·대기를 한 lock으로 묶는다 — 병합과 조회가 섞이면
         # 반쯤 병합된 원장이 보인다. 콜백은 전용 스레드에서 lock 없이 돈다.
         self._cv = threading.Condition(threading.Lock())
@@ -418,6 +426,24 @@ class InternalStatusSource:
         (누적 데이터가 아니라 '언제 마지막으로 받았나'만 무효화)."""
         with self._cv:
             self._last_fetch_at = float("-inf")
+
+    def forget(self, job_ids: Sequence[int]) -> None:
+        """추적을 그만둔 job을 원장·관심 집합에서 즉시 버린다
+        (remove_jobs/clear_jobs/remove_jobset).
+
+        만료(_prune_locked)만으로는 안 빠지는 것들이 있다: 만료는 **종료
+        (DONE/EXIT)** 항목만 보고, 원장에 아예 오른 적 없는 job(LOST/
+        SUBMIT_FAILED/CANCELLED)은 관심 집합에만 남는다. 레코드가 사라져
+        아무도 조회하지 않게 된 뒤에도 그 항목은 매 조회의 전수 스캔
+        대상으로 남아, jobset을 만들고 지우기를 반복하는 장수 세션에서
+        원장이 계속 커진다."""
+        ids = {int(i) for i in job_ids}
+        if not ids:
+            return
+        with self._cv:
+            self._interest -= ids
+            for job_id in ids:
+                self._ledger.pop(job_id, None)
 
     def note_poll_interval(self, interval_s: float) -> None:
         """실제 폴링 주기를 알려 준다 — 자동 모드면 갱신 간격을 **가장 짧은**
@@ -541,11 +567,18 @@ class InternalStatusSource:
         error: Optional[BaseException] = None
         at = time.monotonic()
         now = datetime.now()
-        with self._cv:
-            keep = set(self._interest)       # 파싱 단계 필터용 스냅샷
         try:
             try:
-                statuses = parse_internal_jobs(self._fetcher(), now, keep)
+                payload = self._fetcher()
+                # 관심 스냅샷은 콜백이 **돌아온 뒤에** 뜬다 — 콜백 앞에서 뜨면
+                # 그 왕복(수 초) 동안 새로 제출돼 조회에 들어온 job이 파싱
+                # 필터에 걸려 버려진다. 병합은 그 job을 받아들이는데(관심
+                # 검사는 lock 아래 최신값) 파싱이 이미 지웠으니, 결과는
+                # '조회 장애'가 아니라 **미발견**이라 monitor의 LOST 스트릭이
+                # 올라간다(유예를 0으로 둔 앱에서는 곧장 LOST).
+                with self._cv:
+                    keep = set(self._interest)   # 파싱 단계 필터용 스냅샷
+                statuses = parse_internal_jobs(payload, now, keep)
             except Exception as e:               # noqa: BLE001 — 조회 장애로 강등
                 error = e
         finally:
@@ -597,7 +630,8 @@ class InternalStatusSource:
             fresh_keys.add((st.job_id, st.array_index))
         if skipped:
             log.debug("internal status: 추적 대상 아닌 job %d건 미보관", skipped)
-        self._refresh_runtimes_locked(now, fresh_keys)
+        if self._track_runtime:
+            self._refresh_runtimes_locked(now, fresh_keys)
 
     def _refresh_runtimes_locked(self, now: datetime, fresh_keys: set) -> None:
         """이번 payload에 **안 온** 진행 중 job의 경과시간을 갱신한다.
@@ -605,6 +639,11 @@ class InternalStatusSource:
         증분 조회에서는 상태가 안 바뀐 RUN job이 payload에 안 온다. 그대로
         두면 그 job의 run_time이 옛 값에 멈춰 UI의 경과시간이 정지한다.
         (payload에 온 job은 파싱 단계에서 이미 최신이다.)
+
+        원장 전수 스캔이라 비용이 원장 크기에 비례한다 —
+        poll_runtime_updates가 꺼져 있으면(_track_runtime=False) 아예
+        호출되지 않는다. 그때는 monitor가 run_time 변화를 갱신 대상에서
+        빼므로 여기서 만든 값이 어차피 쓰이지 않는다.
         """
         for job_id, elems in self._ledger.items():
             for idx, entry in elems.items():

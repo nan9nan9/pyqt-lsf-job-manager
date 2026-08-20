@@ -139,6 +139,11 @@ class CompletionTracker:
         if not self._all_terminal(recs):
             self._finished_latch.discard(jobset_id)   # 다시 활성 — 재무장
             return
+        # 무장 해제는 **jobset_finished 발화보다 먼저** 한다(순서 고정).
+        # 그 slot에서 곧장 재제출하는 GUI 패턴이 흔한데, submit이 부르는
+        # stage()가 _post_process를 비운다 — 뒤로 미루면 방금 도달한 완료의
+        # 후처리가 새 사이클의 접수에 지워져 영영 실행되지 않는다
+        # (회귀 가드: test_post_process_survives_resubmit_from_slot).
         fn = self._post_process.pop(jobset_id, None)  # 한 번만
         if all(r.killed for r in recs):
             # 전원이 내 kill로 끝났다(EXIT는 bkill, CANCELLED는 제출 취소 —

@@ -286,7 +286,7 @@ def submit_with_dialog(self, js):
             f"제출 완료 — 성공 {report.succeeded} / 실패 {report.failed}")
     js.submit_finished.connect(on_finished)
 
-    # 취소 버튼: 아직 제출 안 된 job만 CREATED로 되돌린다.
+    # 취소 버튼: 아직 제출 안 된 job만 CANCELLED로 확정한다.
     #   ⚠️ 이미 제출된 job은 이걸로 안 멈춘다 — 그건 kill의 영역.
     dlg.canceled.connect(lambda: self.mgr.cancel_submit(js))
 

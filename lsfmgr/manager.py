@@ -525,7 +525,7 @@ class LsfJobManager(QObject):
         핸들 kill_finished로도 중계된다.
 
         **선택 대상이 제출 중이면 그 job의 제출은 항상 멈춘다** — 아직
-        wrapper를 안 돌린 대상은 CREATED로 되돌리고, 이미 도는 대상은 끝나길
+        wrapper를 안 돌린 대상은 CANCELLED로 확정하고, 이미 도는 대상은 끝나길
         기다렸다가 확보된 job_id로 죽인다. 안 그러면 job_id가 없는 대상이
         key→id 해석에서 빠져 bkill이 안 나가고, 그 job은 제출을 마쳐 PEND→RUN
         으로 살아난다. 대상 **아닌** job의 제출은 계속된다 — jobset의 제출을
@@ -915,7 +915,8 @@ class LsfJobManager(QObject):
         keys = [r.job_key for r in self._resolve_refs(jobset_id, refs)]
         removed = self.jobsets.local_remove_jobs(
             jobset_id, keys, force=force)
-        self._forget_paced(jobset_id, [r.job_key for r in removed])
+        self._forget_paced(jobset_id, [r.job_key for r in removed],
+                           self._ids_of(removed))
         self._emit_summary(jobset_id)
         return removed
 
@@ -929,21 +930,32 @@ class LsfJobManager(QObject):
         jobset 자체를 없애려면 remove_jobset()."""
         jobset_id = self._jsid(jobset_id)
         removed = self.jobsets.local_clear_jobs(jobset_id, force=force)
-        self._forget_paced(jobset_id)
+        self._forget_paced(jobset_id, job_ids=self._ids_of(removed))
         self._emit_summary(jobset_id)
         return removed
 
     def _forget_paced(self, jobset_id: str,
-                      job_keys: Optional[List[str]] = None) -> None:
+                      job_keys: Optional[List[str]] = None,
+                      job_ids: Optional[List[int]] = None) -> None:
         """사라진 job/jobset에 매달린 **보류 상태**를 일괄 정리한다.
 
         - pacer: 보류 중인 표시 전이 — dwell 창 안에 삭제되면 늦게 도착한
           전이가 지워진 행을 되살린다.
         - querier: LOST 미발견 스트릭 — jobset이 통째로 사라지면(remove_jobset)
-          그 jobset으로는 다시 query()가 안 불려 항목이 영영 남는다."""
+          그 jobset으로는 다시 query()가 안 불려 항목이 영영 남는다.
+        - 콜백 조회원(job_status_fetcher)의 누적 원장: 만료는 종료(DONE/EXIT)
+          항목만 걷어내므로, 삭제된 job은 여기서 명시적으로 버려야 원장이
+          create/remove를 반복하는 세션에서 계속 커지지 않는다."""
         if self._pacer is not None:
             self._pacer.forget(jobset_id, job_keys)
         self.querier.forget(jobset_id, job_keys)
+        if job_ids:
+            self.command.forget_status(job_ids)
+
+    @staticmethod
+    def _ids_of(records) -> List[int]:
+        """레코드 목록에서 확보된 job_id만 — 조회원 원장 정리용."""
+        return [r.job_id for r in records if r.job_id is not None]
 
     def _emit_summary(self, jobset_id: str) -> None:
         try:
@@ -1173,14 +1185,20 @@ class LsfJobManager(QObject):
                     jobset_id=jobset_id)
             self.submitter.cancel_submit(jobset_id)
             self.submitter.abort_retries(jobset_id)
+        # 조회원 원장 정리에 쓸 job_id를 삭제 **전에** 떠 둔다 — 삭제 후에는
+        # 레코드가 없어 어느 id를 버려야 할지 알 방법이 없다.
+        try:
+            gone_ids = self._ids_of(self.store.get_jobs(jobset_id))
+        except LsfmgrError:
+            gone_ids = []
         # 실패 시 예외 — 아래 정리는 하지 않는다(polling/핸들 그대로 유지)
         removed = self.jobsets.local_remove_jobset(jobset_id, force=force)
         # 사라진 jobset에 매달린 것들을 정리한다 —
         # 남기면 매 주기 JobSetNotFoundError가 터진다.
         self.polling.stop_polling(jobset_id)
         self.handlers.remove_all(jobset_id)
-        self._forget_paced(jobset_id)    # dwell 보류분 — 삭제된 jobset의
-                                         # 늦은 발행 방지
+        # dwell 보류분(삭제된 jobset의 늦은 발행) + 조회원 원장
+        self._forget_paced(jobset_id, job_ids=gone_ids)
         self._poll_intervals.pop(jobset_id, None)
         self._completion.forget(jobset_id)   # 무장분·latch 일괄 정리
         self._invalidate_handle(jobset_id)

@@ -157,7 +157,7 @@ class _SubmitTask(QRunnable):
             return
         # rate limit 대기는 job 단위 취소를 못 본다(limiter는 사이클 event만
         # 본다) — 대기가 끝난 지금 다시 확인해, 그 사이 kill 대상이 된 job은
-        # wrapper를 돌리지 않고 CREATED로 되돌린다.
+        # wrapper를 돌리지 않고 CANCELLED로 확정한다.
         with ctx.lock:
             cancelled = self.job_key in ctx.cancelled_keys
         if cancelled:

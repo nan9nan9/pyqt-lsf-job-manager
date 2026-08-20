@@ -309,7 +309,10 @@ class LsfCommand:
                 retention_days=self.config.internal_retention_days,
                 # 앱이 값을 명시하지 않았으면(=폴링 주기에서 유도) 실제
                 # 폴링 주기를 알게 될 때 자동으로 낮출 수 있게 한다.
-                auto_refresh=self.config.internal_refresh_min_s is None)
+                auto_refresh=self.config.internal_refresh_min_s is None,
+                # run_time 갱신을 monitor가 버리는 설정이면 원장에서도
+                # 만들지 않는다 (전수 스캔 비용을 통째로 없앤다).
+                track_runtime=self.config.poll_runtime_updates)
             log.info("상태 조회원: job_status_fetcher 콜백 (bjobs 미사용, 최소 "
                      "갱신 간격 %.1fs, 종료 job 보존 %.0f일)",
                      self.config.effective_internal_refresh_min_s,
@@ -332,6 +335,12 @@ class LsfCommand:
         bjobs 경로면 아무 일도 하지 않는다."""
         if self._internal is not None:
             self._internal.note_poll_interval(interval_s)
+
+    def forget_status(self, job_ids: Sequence[int]) -> None:
+        """추적 종료(레코드 삭제) 통지 — 콜백 조회원의 원장에서 버린다.
+        bjobs 경로면 no-op(누적 원장이 없다)."""
+        if self._internal is not None:
+            self._internal.forget(job_ids)
 
     def shutdown_status_source(self) -> None:
         """콜백 조회원 종료 — 대기 중인 폴링/verify 스레드를 즉시 풀어 준다.

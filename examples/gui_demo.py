@@ -421,7 +421,7 @@ class Dashboard(QWidget):
         """테이블 선택 행만 kill (kill_jobs — array element 는 id[idx]).
 
         제출 중인 행을 선택해도 안전하다 — 라이브러리가 그 job 의 제출만
-        멈추고(미착수분은 CREATED 복귀, 실행 중인 wrapper 는 job_id 확보까지
+        멈추고(미착수분은 CANCELLED 확정, 실행 중인 wrapper 는 job_id 확보까지
         대기) 죽인다. 선택 안 한 job 의 제출은 계속된다."""
         js = self._handle()
         if js is None:

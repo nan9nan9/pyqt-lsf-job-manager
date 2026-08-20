@@ -323,6 +323,48 @@ def test_explicit_bjobs_path_is_warned_as_ignored(caplog):
     assert len(warns) == 1, f"경고 {len(warns)}회 (생성 시 1회여야 함)"
 
 
+def test_poll_runtime_updates_reaches_the_source():
+    """monitor가 run_time 변화를 버리는 설정(기본)이면 원장도 그 값을
+    안 만들어야 한다 — 두 곳이 어긋나면 조회마다 전수 스캔이 그냥 낭비다."""
+    def cmd(runtime):
+        return LsfCommand(LsfConfig(rate_limit_per_s=None,
+                                    poll_runtime_updates=runtime,
+                                    job_status_fetcher=lambda: _payload()))
+    assert cmd(False).internal_status._track_runtime is False
+    assert cmd(True).internal_status._track_runtime is True
+
+
+def test_removed_jobs_are_dropped_from_the_ledger(qtbot, fake_lsf):
+    """삭제된 job이 원장에 남으면 jobset을 만들고 지우기를 반복하는 장수
+    세션에서 계속 커진다 — 만료는 종료(DONE/EXIT) 항목만 걷어낸다."""
+    ids = []
+
+    def fetch():
+        return _payload(*[_job(i, stat="RUN") for i in ids])
+
+    mgr = _internal_mgr(fake_lsf, fetch)
+    try:
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            js = submit_cmds(mgr, ["mytool a.sp", "mytool b.sp"],
+                             auto_poll=False)
+        ids.extend(r.job_id for r in js.jobs())
+        mgr.query_once(js.id)
+        src = mgr.command.internal_status
+        qtbot.waitUntil(lambda: src.stats()["entries"] == 2, timeout=10000)
+
+        mgr.kill(js)                          # 지우려면 먼저 비활성으로
+        qtbot.waitUntil(lambda: js.is_inactive, timeout=10000)
+        removed = mgr.remove_jobs(js, [js.jobs()[0].job_key])
+        assert len(removed) == 1
+        assert src.stats()["entries"] == 1, src.stats()
+
+        mgr.remove_jobset(js.id)
+        assert src.stats() == {"job_ids": 0, "entries": 0,
+                               "tracked_ids": 0, "inflight": 0}, src.stats()
+    finally:
+        mgr.shutdown()
+
+
 def test_default_bjobs_path_is_not_warned(caplog):
     """안 건드린 기본값까지 경고하면 정상 사용에 잡음만 남는다."""
     with caplog.at_level("WARNING", logger="lsfmgr.command"):
@@ -629,6 +671,66 @@ def test_interest_is_registered_before_the_merge():
     src = _source(lambda: _payload(_job(4242)))
     found, failed = src.statuses_by_ids([4242])       # 첫 조회
     assert [st.job_id for st in found] == [4242] and not failed
+
+
+def test_interest_registered_during_a_fetch_is_not_dropped():
+    """조회가 **이미 떠 있는 동안** 새 job이 조회에 들어오면(제출 직후가
+    정확히 그 순간이다), 그 job은 payload에 있어도 파싱 필터에 걸려 버려질
+    수 있다. 결과가 '조회 장애'가 아니라 **미발견**이라 monitor의 LOST
+    스트릭이 올라간다 — internal_lost_grace_s를 0으로 둔 앱은 곧장 LOST."""
+    gate = threading.Event()
+
+    def fetcher():
+        gate.wait(5.0)                       # 콜백이 도는 동안 등록이 들어온다
+        return _payload(_job(100), _job(200))
+
+    src = _source(fetcher)
+    out = {}
+    first = threading.Thread(
+        target=lambda: out.__setitem__("a", src.statuses_by_ids([100])))
+    first.start()
+    time.sleep(0.3)                          # 조회가 확실히 떠 있는 상태
+    second = threading.Thread(
+        target=lambda: out.__setitem__("b", src.statuses_by_ids([200])))
+    second.start()
+    time.sleep(0.3)
+    gate.set()
+    first.join(5.0)
+    second.join(5.0)
+    src.shutdown()
+
+    found_b, failed_b = out["b"]
+    assert [st.job_id for st in found_b] == [200], (
+        f"조회 중 등록된 job이 누락됨: {out['b']}")
+    assert not failed_b
+
+
+def test_runtime_refresh_is_skipped_when_the_app_does_not_want_it():
+    """poll_runtime_updates가 꺼져 있으면 monitor가 run_time 변화를 갱신
+    대상에서 뺀다 — 그런데도 원장이 매 조회마다 전수 스캔으로 값을 다시
+    만들면(2만 건 기준 조회당 37ms, 그동안 원장 lock 점유) 그 일이 통째로
+    버려진다."""
+    started = (datetime.now() - timedelta(seconds=100)).strftime(
+        "%Y-%m-%dT%H:%M:%S")
+    payloads = [_payload(_job(1, stat="RUN", startTime=started)),
+                _payload()]                  # 2회차: 갱신분 없음
+    src = _source(lambda: payloads.pop(0), track_runtime=False)
+    (first,), _f = src.statuses_by_ids([1])
+    time.sleep(1.1)
+    (again,), _f = src.statuses_by_ids([1])
+    assert again.run_time_s == first.run_time_s
+
+
+def test_forget_drops_the_ledger_and_the_interest():
+    """추적이 끝난 job(remove_jobs/clear_jobs/remove_jobset)은 만료를 기다릴
+    수 없다 — 만료는 종료(DONE/EXIT) 항목만 보고, 원장에 오른 적 없는
+    job(LOST/CANCELLED)은 관심 집합에만 남는다."""
+    src = _source(lambda: _payload(_job(1), _job(2)))
+    src.statuses_by_ids([1, 2, 3])           # 3은 payload에 없다(관심에만 등록)
+    assert src.stats()["entries"] == 2 and src.stats()["tracked_ids"] == 3
+    src.forget([1, 3])
+    st = src.stats()
+    assert st["entries"] == 1 and st["tracked_ids"] == 1, st
 
 
 def test_run_time_advances_for_jobs_absent_from_an_incremental_payload():
