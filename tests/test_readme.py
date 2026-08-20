@@ -124,3 +124,55 @@ def test_documented_signals_exist():
                                "_progress", "_occurred", "_failed", "_lost"))}
     ghosts = sorted(suspects - have)
     assert not ghosts, f"문서에만 있고 코드엔 없는 신호: {ghosts}"
+
+
+# ----------------------------------------------------------------------
+# 옵션 카탈로그 드리프트 — 신호 카탈로그와 같은 계약
+# ----------------------------------------------------------------------
+def _option_rows():
+    """README §3.1 옵션 표의 이름들. `a` / `b` 처럼 묶인 행도 푼다."""
+    import re
+
+    text = _doc_text("README.md")
+    start = text.index("### 3.1 옵션 카탈로그")
+    end = text.index("## 4. 제출", start)
+    names = set()
+    for line in text[start:end].splitlines():
+        m = re.match(r"^\|\s*(`[a-z_][a-z0-9_]*`(?:\s*/\s*`[a-z_][a-z0-9_]*`)*)\s*\|",
+                     line)
+        if m:
+            names |= set(re.findall(r"`([a-z_][a-z0-9_]*)`", m.group(1)))
+    return names
+
+
+def test_every_option_is_in_the_catalog():
+    """옵션을 추가하고 카탈로그를 빼먹으면 앱은 그 노브의 존재를 모른다.
+    (kill_timeout_s가 실제로 빠져 있었고, 실환경에서 오설정으로 이어졌다)"""
+    from dataclasses import fields
+
+    from lsfmgr.config import LsfConfig
+    from lsfmgr.options import MANAGER_ONLY_KEYS, SHARED_KEYS
+
+    documented = _option_rows()
+    # 카탈로그에 일부러 안 싣는 것: retry_delay_s는 retry_backoff("fixed:N")로
+    # 표현되고, test_submit_wrapper_pattern_cmd는 §4.3에 전용 절이 있다.
+    BY_DESIGN = {"retry_delay_s", "retry_backoff_num", "job_status_fetcher",
+                 "test_submit_wrapper_pattern_cmd"}
+    keys = set(SHARED_KEYS | MANAGER_ONLY_KEYS
+               | {f.name for f in fields(LsfConfig)}) - BY_DESIGN
+    missing = sorted(k for k in keys if k not in documented)
+    assert not missing, f"카탈로그에 없는 옵션: {missing}"
+
+
+def test_catalog_has_no_ghost_options():
+    """제거된 옵션의 행이 표에 남아 있으면 앱이 계속 그 값을 넘긴다
+    (rate_limit_per_s 삭제 때 실제로 남을 뻔했다)."""
+    from dataclasses import fields
+
+    from lsfmgr.config import LsfConfig
+    from lsfmgr.options import MANAGER_ONLY_KEYS, SHARED_KEYS
+
+    known = (SHARED_KEYS | MANAGER_ONLY_KEYS
+             | {f.name for f in fields(LsfConfig)})
+    ghosts = sorted(n for n in _option_rows() if n not in known)
+    assert not ghosts, f"문서에만 있고 코드엔 없는 옵션: {ghosts}"
