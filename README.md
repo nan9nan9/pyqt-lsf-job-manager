@@ -968,6 +968,11 @@ src.invalidate()                       # 다음 조회에서 반드시 콜백 �
 | `job_lost` | `JobRecord` | LOST 확정 시 (`mgr.job_lost(jsid, rec)` — 전역 계층에만 있음) |
 | `error_occurred` | `str` | worker 예외 등 |
 
+> ⚠️ **slot에서 예외를 흘리면 프로세스가 abort됩니다.** PyQt는 slot 밖으로 나간
+> 예외를 `qFatal()`로 처리합니다(direct·queued 둘 다 — 실측 exit 134). slot 본문을
+> `try/except`로 감싸세요. 라이브러리는 자기 코드가 slot에서 터지는 경로를 전부
+> 막아 뒀지만, 앱이 연결한 slot 안의 예외는 가로챌 수 없습니다.
+
 배선 예제·발화 주기(cadence)·진행 표시 패턴은 [`docs/gui.md`](docs/gui.md).
 
 ### 6.2 명령 → Signal 타임라인 (무엇이 언제 오나)

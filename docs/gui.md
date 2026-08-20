@@ -20,6 +20,23 @@ PyQt/qtpy 앱에서 `LsfJobManager`로 대량 job을 제출·감시·kill할 때
    나중에 Signal로 온다 — 늦게 연결하면 초기 발화를 놓친다.
 4. **콜백에서 위젯을 만지지 마라.** Signal slot은 main 스레드지만
    `pre_submit`/`post_process`/handler 콜백은 **worker 스레드**다.
+5. **slot 에서 예외를 흘리지 마라 — 프로세스가 죽는다.** PyQt 는 slot 밖으로
+   나간 예외를 `qFatal()` 로 처리해 **abort(core dump)** 한다. direct 든
+   queued(worker→main) 든 마찬가지다(둘 다 실측 exit 134).
+
+   ```python
+   def on_jobs_updated(self, jsid, records):
+       try:
+           self.table.apply(records)
+       except Exception:                     # 앱 코드의 버그가 GUI를 죽이지 않게
+           log.exception("jobs_updated 처리 실패")
+   ```
+
+   라이브러리는 **자기 코드**가 slot 에서 터지는 경로를 전부 막아 두었지만
+   (`handlers.tick`, `pacer._drain`, `_emit_summary` …), **앱이 연결한 slot**
+   안에서 나는 예외는 라이브러리가 가로챌 수 없다. 특히 `_safe_emit` 은
+   **direct 연결에서만** 방어가 된다 — queued 면 `emit()` 은 이벤트를 post 만
+   하고 slot 은 나중에 이벤트 루프에서 돌기 때문이다.
 
 ---
 
