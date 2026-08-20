@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from ..errors import JobNotFoundError, JobSetNotFoundError
 from ..states import JobRecord, JobSetRecord, JobState
-from .base import JobSetStore, make_summary
+from .base import JobSetStore, summary_from_counts
 
 
 class InMemoryStore(JobSetStore):
@@ -19,6 +19,14 @@ class InMemoryStore(JobSetStore):
         self._jobsets: Dict[str, JobSetRecord] = {}
         # jobset_id → {job_key → JobRecord}
         self._jobs: Dict[str, Dict[str, JobRecord]] = {}
+        # jobset_id → {state.value → 개수}. summary()를 전수 스캔 없이 답하려고
+        # **증분으로** 유지한다. 스캔판은 O(job수)라 대량 제출 중 main 스레드가
+        # 그 값을 물었다(2만 건 실측: 호출당 15ms × 104회 = 1.6s, 게다가 그동안
+        # store lock을 쥐고 있어 worker 전이까지 밀렸다).
+        # 개수가 0이 된 상태는 키를 지운다 — "0인 상태는 키 자체가 없다"는
+        # 요약 계약(README §5.5)을 카운트 단계에서 지킨다.
+        # ※ 레코드 쓰기는 반드시 _put_rec/_drop_rec만 거친다.
+        self._counts: Dict[str, Dict[str, int]] = {}
 
     # ------------------------------------------------------------------
     # JobSet CRUD
@@ -31,6 +39,7 @@ class InMemoryStore(JobSetStore):
                 record = replace(record, created_at=datetime.now())
             self._jobsets[record.jobset_id] = record
             self._jobs.setdefault(record.jobset_id, {})
+            self._counts.setdefault(record.jobset_id, {})
             return record
 
     def get_jobset(self, jobset_id: str) -> JobSetRecord:
@@ -51,10 +60,58 @@ class InMemoryStore(JobSetStore):
         with self._lock:
             self._jobsets.pop(jobset_id, None)
             self._jobs.pop(jobset_id, None)
+            self._counts.pop(jobset_id, None)
 
     def list_jobsets(self) -> List[JobSetRecord]:
         with self._lock:
             return list(self._jobsets.values())
+
+    # ------------------------------------------------------------------
+    # 레코드 쓰기 funnel — 여기만 self._jobs를 직접 건드린다
+    # ------------------------------------------------------------------
+    def _put_rec(self, record: JobRecord) -> None:
+        """[lock 보유] 레코드 1건 삽입/교체 + 상태 카운트 갱신.
+        이 함수를 우회해 self._jobs에 대입하면 summary가 조용히 어긋난다."""
+        jobs = self._jobs[record.jobset_id]
+        old = jobs.get(record.job_key)
+        if old is not None:
+            self._count_del(record.jobset_id, old.state)
+        jobs[record.job_key] = record
+        counts = self._counts.setdefault(record.jobset_id, {})
+        key = record.state.value
+        counts[key] = counts.get(key, 0) + 1
+
+    def _drop_rec(self, jobset_id: str, job_key: str) -> Optional[JobRecord]:
+        """[lock 보유] 레코드 1건 제거 + 카운트 갱신. 없으면 None."""
+        jobs = self._jobs.get(jobset_id)
+        if jobs is None:
+            return None
+        old = jobs.pop(job_key, None)
+        if old is not None:
+            self._count_del(jobset_id, old.state)
+        return old
+
+    def _count_del(self, jobset_id: str, state: JobState) -> None:
+        """[lock 보유] 카운트 1 감소 — 0이 되면 키를 지운다."""
+        counts = self._counts.get(jobset_id)
+        if not counts:
+            return
+        key = state.value
+        n = counts.get(key, 0) - 1
+        if n > 0:
+            counts[key] = n
+        else:
+            counts.pop(key, None)
+
+    def _debug_counts_ok(self, jobset_id: str) -> bool:
+        """증분 카운트가 실제 레코드와 일치하는가 (테스트/진단 전용).
+        denormalize한 값은 쓰기 경로를 하나라도 빠뜨리면 조용히 어긋나므로,
+        교차 검증 수단을 코드 옆에 둔다."""
+        with self._lock:
+            actual: Dict[str, int] = {}
+            for rec in self._jobs.get(jobset_id, {}).values():
+                actual[rec.state.value] = actual.get(rec.state.value, 0) + 1
+            return actual == self._counts.get(jobset_id, {})
 
     # ------------------------------------------------------------------
     # JobRecord
@@ -70,7 +127,7 @@ class InMemoryStore(JobSetStore):
                     f"job_key 중복: {record.jobset_id}/{record.job_key}")
             if record.updated_at is None:
                 record = replace(record, updated_at=datetime.now())
-            self._jobs[record.jobset_id][record.job_key] = record
+            self._put_rec(record)
             return record
 
     def store_add_jobs(self, records) -> List[JobRecord]:
@@ -93,7 +150,7 @@ class InMemoryStore(JobSetStore):
             for record in records:
                 if record.updated_at is None:
                     record = replace(record, updated_at=now)
-                self._jobs[record.jobset_id][record.job_key] = record
+                self._put_rec(record)
                 out.append(record)
         return out
 
@@ -102,7 +159,7 @@ class InMemoryStore(JobSetStore):
             jobs = self._jobs.get(jobset_id)
             if jobs is None or job_key not in jobs:
                 raise JobNotFoundError(f"{jobset_id}/{job_key}")
-            return jobs.pop(job_key)
+            return self._drop_rec(jobset_id, job_key)
 
     def update_job(self, record: JobRecord) -> JobRecord:
         with self._lock:
@@ -111,7 +168,7 @@ class InMemoryStore(JobSetStore):
                 raise JobNotFoundError(
                     f"{record.jobset_id}/{record.job_key}")
             record = replace(record, updated_at=datetime.now())
-            jobs[record.job_key] = record
+            self._put_rec(record)
             return record
 
     def get_job(self, jobset_id: str, job_key: str) -> JobRecord:
@@ -143,7 +200,7 @@ class InMemoryStore(JobSetStore):
             new = replace(old, updated_at=datetime.now(),
                           state=old.state if new_state is None else new_state,
                           **fields)
-            self._jobs[jobset_id][job_key] = new
+            self._put_rec(new)
             return new
 
     def _transition_many_impl(self, jobset_id, specs):
@@ -162,7 +219,7 @@ class InMemoryStore(JobSetStore):
                 new = replace(
                     old, updated_at=now, **fields,
                     state=old.state if new_state is None else new_state)
-                jobs[job_key] = new
+                self._put_rec(new)
                 out.append(new)
         return out
 
@@ -170,9 +227,10 @@ class InMemoryStore(JobSetStore):
     # 조회/검색
     # ------------------------------------------------------------------
     def summary(self, jobset_id: str) -> Dict[str, Any]:
+        """증분 카운트에서 바로 만든다 — 전수 스캔 없음(O(상태 수))."""
         with self._lock:
             js = self.get_jobset(jobset_id)
-            return make_summary(js, self._jobs.get(jobset_id, {}).values())
+            return summary_from_counts(js, self._counts.get(jobset_id, {}))
 
     def search(self, *, tag: Optional[str] = None, label: Optional[str] = None,
                since: Optional[datetime] = None) -> List[JobSetRecord]:

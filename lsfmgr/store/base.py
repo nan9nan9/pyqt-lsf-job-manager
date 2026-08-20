@@ -189,15 +189,25 @@ class JobSetStore(ABC):
 
 def make_summary(jobset: JobSetRecord,
                  jobs: Iterable[JobRecord]) -> Dict[str, Any]:
-    """공통 요약 생성 — total은 intended_count (불변식)."""
+    """레코드를 훑어 요약 생성 — 카운트를 따로 안 들고 있는 백엔드용."""
     counts: Dict[str, int] = {}
-    n = 0
     for rec in jobs:
         counts[rec.state.value] = counts.get(rec.state.value, 0) + 1
-        n += 1
+    return summary_from_counts(jobset, counts)
+
+
+def summary_from_counts(jobset: JobSetRecord,
+                        counts: Dict[str, int]) -> Dict[str, Any]:
+    """상태별 개수 → 요약. **불변식(상태 합계 == intended_count) 규칙의 단일
+    소유자**다 — 전수 스캔판(make_summary)과 증분 카운트판이 같은 규칙을
+    쓰도록 여기 한 곳에만 둔다.
+
+    counts에 0인 상태는 없어야 한다(README §5.5: 개수가 0인 상태는 키 자체가
+    없다 — 앱이 s.get(state, 0)로 읽는 계약)."""
+    counts = dict(counts)
     out: Dict[str, Any] = {"total": jobset.intended_count}
     # 아직 레코드가 생성되지 않은 몫은 CREATED로 계상 → 합계 == intended_count
-    missing = jobset.intended_count - n
+    missing = jobset.intended_count - sum(counts.values())
     if missing > 0:
         counts[JobState.CREATED.value] = (
             counts.get(JobState.CREATED.value, 0) + missing)

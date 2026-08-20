@@ -258,6 +258,9 @@ Exception
 
 - **QT-0 (API 계약)**: 명령 API는 **모두 즉시 반환하는 비동기**, 결과는 Signal로만.
   조회 API(summary/jobs)는 **동기이지만 Store 스냅샷만** 읽음(LSF 호출 없음).
+  `summary()`는 상태별 개수를 증분으로 들고 있어 job 수와 무관하게 O(1)이다 —
+  전수 스캔이면 제출 중 main 스레드가 배치마다 그 값을 물어 store lock을
+  쥐고, worker 전이까지 함께 밀린다(2만 건 실측 22.9s → 12.9s).
   public API docstring에 `[async→Signal]` / `[sync, snapshot]` 표기.
 - QT-1: main 스레드에서 blocking LSF 호출 금지
 - QT-2: worker → main 통지는 Signal (자동 queued connection)
