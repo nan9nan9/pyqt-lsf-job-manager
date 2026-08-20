@@ -159,8 +159,8 @@ poll_interval_s         = 10    # ② 폴링 주기(5~60)
 
 - `js.jobs_failed`는 `jobs_updated`에서 실패분만 걸러 발화하므로 **같은 주기**다.
 - kill 은 job_id 를 `kill_chunk_size`(기본 16) 단위로 나눠 `bkill` 한다. 기본은
-  **직렬**(`kill_workers=1`)이라 한 kill 의 소요는 `ceil(N/chunk) x bkill 1회`다 —
-  대량 kill 이 오래 걸리면 `kill_workers` 를 올려 chunk 를 병렬로 돌린다. 대상이 한
+  chunk 를 `kill_workers`(기본 4) 개까지 **동시에** 돌린다 — 직렬이면 소요가
+  `ceil(N/chunk) x bkill 1회`로 늘어선다. 대상이 한
   chunk 안에 들어가면 호출 1회로 끝나 진행이 바로 100%가 되고, `kill_progress`가
   의미 있는 건 **대량 kill**과 **`verify`(재조회 루프)** 일 때다.
 - **`min_state_dwell_s`**(기본 0=끔)는 위 cadence 위에 얹히는 **표시 간격**이다.

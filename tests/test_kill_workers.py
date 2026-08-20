@@ -60,14 +60,25 @@ def _kill_all(qtbot, runner, n, **cfg):
         mgr.shutdown()
 
 
-def test_default_is_serial(qtbot, fake_lsf):
-    """기본값 1 — 지금까지의 동작 그대로여야 한다(부하 특성 변경 금지)."""
-    assert LsfConfig().kill_workers == 1
+def test_default_bounds_concurrency(qtbot, fake_lsf):
+    """기본 4 x chunk 16 = 동시 64건 — submit의 workers=8이 거는 부하와 같은 급.
+    기본값이 조용히 커지면 mbatchd 부하가 그만큼 늘어난다."""
+    assert (LsfConfig().kill_workers, LsfConfig().kill_chunk_size) == (4, 16)
     w = _WatchBkill(fake_lsf)
     _dt, rpt, recs = _kill_all(qtbot, w, 100, kill_chunk_size=16)
     assert w.calls == 7 and set(w.sizes) == {16, 4}
-    assert w.peak == 1, f"기본값인데 동시 실행 {w.peak}"
+    assert w.peak <= 4, f"기본값 상한(4)을 넘겨 {w.peak}개 동시 실행"
     assert rpt.unconfirmed == 0
+    assert all(r.state is JobState.EXIT for r in recs)
+
+
+def test_workers_one_is_still_serial(qtbot, fake_lsf):
+    """1로 두면 옛 동작(직렬) 그대로 — 부하를 못 늘리는 사이트의 탈출구."""
+    w = _WatchBkill(fake_lsf)
+    _dt, rpt, recs = _kill_all(qtbot, w, 100,
+                               kill_chunk_size=16, kill_workers=1)
+    assert w.calls == 7
+    assert w.peak == 1, f"kill_workers=1인데 동시 실행 {w.peak}"
     assert all(r.state is JobState.EXIT for r in recs)
 
 
@@ -87,7 +98,7 @@ def test_chunks_run_in_parallel(qtbot, fake_lsf, workers):
 def test_parallel_is_faster_when_bkill_is_latency_bound(qtbot, fake_lsf):
     """MC처럼 bkill 1회가 오래 걸리는 환경 — 병렬이 실제로 줄여 주나."""
     serial, _r1, _j1 = _kill_all(qtbot, _WatchBkill(fake_lsf, delay=0.08), 96,
-                                 kill_chunk_size=16, kill_workers=1)
+                                 kill_chunk_size=16, kill_workers=1)   # 옛 동작
     par, _r2, _j2 = _kill_all(qtbot, _WatchBkill(fake_lsf, delay=0.08), 96,
                               kill_chunk_size=16, kill_workers=6)
     print(f"\n직렬 {serial:.2f}s → 병렬(6) {par:.2f}s")

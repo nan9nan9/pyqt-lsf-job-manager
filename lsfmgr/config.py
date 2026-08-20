@@ -106,16 +106,18 @@ class LsfConfig:
     #: 대량 kill에서 bkill 호출 횟수가 늘지만(1000건 → 63회) 각 호출이 확실히
     #: 완주하는 편이 잘려서 재시도하는 것보다 총 소요가 짧다.
     kill_chunk_size: int = 16
-    #: 한 kill 안에서 **동시에 띄울 bkill 프로세스 수** (1~32). 기본 1 = 직렬.
+    #: 한 kill 안에서 **동시에 띄울 bkill 프로세스 수** (1~32).
     #: kill_chunk_size가 "한 호출에 몇 건"이라면 이건 "그 호출을 몇 개 동시에".
     #: MC(job forwarding) 사이트에서 bkill은 원격 클러스터 왕복을 기다리는
     #: **지연 지배적** 작업이라, 병렬로 돌리면 대량 kill이 그만큼 빨라진다
-    #: (직렬이면 ceil(N/chunk)회를 한 줄로 세워 기다린다).
+    #: (직렬이면 ceil(N/chunk)회를 한 줄로 세워 기다린다 — 5000건에 bkill
+    #: 1회가 3초면 313회 x 3s = 16분이 한 줄로 늘어선다).
+    #: 기본 4 — 기본 chunk(16)와 곱해 동시 64건이면 submit의 workers=8이
+    #: 거는 부하와 같은 급이다. 1로 두면 직렬(옛 동작).
     #: ⚠ 동시에 mbatchd에 붙는 요청이 kill_workers x kill_chunk_size건이 된다 —
-    #: submit의 workers를 8로 낮춘 것과 같은 이유로 무작정 키우지 말 것.
-    #: 기본을 1로 두는 이유: 부하 특성을 바꾸는 값이라 사이트가 실측하고
-    #: 켜야 한다(bkill 1회 소요는 DEBUG 로그의 `exec bkill … → rc=0 (N.NNNs)`).
-    kill_workers: int = 1
+    #: 더 키울 때는 submit의 workers와 같은 이유로 실측하고 올릴 것
+    #: (bkill 1회 소요는 DEBUG 로그의 `exec bkill … → rc=0 (N.NNNs)`).
+    kill_workers: int = 4
     kill_max_retry: int = 2              # kill 확인 실패 시 재시도
     kill_retry_delay_s: float = 3.0      # kill 재시도 간격 — bkill은 비동기라
                                          # 확인('is being terminated')까지 여유

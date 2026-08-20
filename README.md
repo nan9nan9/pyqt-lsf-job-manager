@@ -161,7 +161,7 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)     # 이번 submit만
 | `collect_clusters` | False | MultiCluster forwarding 정보 수집 — `JobRecord.source_cluster`/`forward_cluster`를 폴링으로 채움 |
 | `kill_status_policy` | `"optimistic"` | `"optimistic"`=kill 수락 확인 시 즉시 EXIT / `"actual"`=실제 LSF 상태(폴링)로만 |
 | `kill_chunk_size` | 16 | **bkill** 한 번에 넘길 target 수. 조회와 따로 두는 이유: bjobs는 읽기라 500건도 금방이지만 bkill은 job마다 mbatchd가 실제 처리(+MC면 원격 클러스터 전달)를 하는 쓰기라 훨씬 느리다. `kill_timeout_s`는 **이 chunk 전체**의 상한이므로 둘을 같이 봐야 한다. 기본 16은 MC(forward된 job은 원격 왕복까지 기다린다) 기준 — 단일 클러스터면 키워서 호출 횟수를 줄여도 된다 |
-| `kill_workers` | 1 (직렬) | 한 kill 안에서 **동시에 띄울 bkill 프로세스 수**(1~32). `kill_chunk_size`가 "한 호출에 몇 건"이면 이건 "그 호출을 몇 개 동시에". MC 사이트의 bkill은 원격 왕복을 기다리는 **지연 지배적** 작업이라 병렬이 크게 먹힌다. ⚠ 동시에 mbatchd에 붙는 요청이 `kill_workers × kill_chunk_size`건이 된다 — submit의 `workers`와 같은 이유로 실측하고 켤 것 |
+| `kill_workers` | 4 | 한 kill 안에서 **동시에 띄울 bkill 프로세스 수**(1~32). `kill_chunk_size`가 "한 호출에 몇 건"이면 이건 "그 호출을 몇 개 동시에". MC 사이트의 bkill은 원격 왕복을 기다리는 **지연 지배적** 작업이라 병렬이 크게 먹힌다(직렬이면 `ceil(N/chunk)`회가 한 줄로 늘어선다). 기본 4 × chunk 16 = 동시 64건. 1로 두면 직렬. ⚠ 더 키울 때는 동시 요청이 `kill_workers × kill_chunk_size`건임을 감안할 것 |
 | `kill_max_retry` | 2 | kill 확인 실패 시 재시도 횟수 |
 | `kill_retry_delay_s` | 3.0 | kill 재확인 간격(초) — `bkill`이 비동기라 확인까지 여유를 둠 |
 | `progress_min_interval_s` | 0.5 | progress/`jobs_updated` 최소 발화 간격(초). 키우면 부하↓·반응성↓ |
