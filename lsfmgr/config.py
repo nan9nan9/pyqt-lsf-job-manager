@@ -96,8 +96,13 @@ class LsfConfig:
     #: kill_timeout_s를 넘기면 subprocess timeout이 bkill **클라이언트**를
     #: 중간에 죽여, 앞쪽 id만 죽고 뒤쪽은 요청조차 안 나간 채 잘린다 —
     #: 그 상태로 재시도하면 "bkill timeout" 경고가 반복된다.
-    #: 100이면 kill_timeout_s(기본 120s) 기준 job당 1.2초 여유다.
-    kill_chunk_size: int = 100
+    #: 기본 16 — MC(job forwarding) 사이트 기준으로 잡은 값이다. forward된 job의
+    #: bkill은 원격 클러스터 왕복까지 기다려 job당 수백 ms까지 가므로, chunk가
+    #: 크면 짧게 잡은 kill_timeout_s를 쉽게 넘긴다. 16이면 기본 120s에서 job당
+    #: 7.5초, 8초로 줄여 잡은 사이트에서도 job당 0.5초 여유가 남는다.
+    #: 대량 kill에서 bkill 호출 횟수가 늘지만(1000건 → 63회) 각 호출이 확실히
+    #: 완주하는 편이 잘려서 재시도하는 것보다 총 소요가 짧다.
+    kill_chunk_size: int = 16
     kill_max_retry: int = 2              # kill 확인 실패 시 재시도
     kill_retry_delay_s: float = 3.0      # kill 재시도 간격 — bkill은 비동기라
                                          # 확인('is being terminated')까지 여유
@@ -198,7 +203,7 @@ class LsfConfig:
         if self.chunk_size < 1:
             self.chunk_size = 500            # 필드 기본값과 동일한 폴백
         if self.kill_chunk_size < 1:
-            self.kill_chunk_size = 100
+            self.kill_chunk_size = 16        # 필드 기본값과 동일한 폴백
         # retry_backoff는 여기선 숫자다(>1.0이면 지수 backoff). 같은 이름의
         # submit()/LsfJobManager() kwarg는 'fixed:N'/'expo:N' 문자열이라 헷갈려
         # LsfConfig에 문자열을 넘기면, 예전엔 조용히 통과하다 manager 생성 시

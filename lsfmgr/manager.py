@@ -95,7 +95,7 @@ class LsfJobManager(QObject):
     #: kill 실패는 job 상태를 바꾸지 않는다(실패했다면 그 job은 LSF에서 여전히
     #: PEND/RUN이라 그게 맞는 상태다) — 그래서 이 신호가 없으면 사용자가 kill을
     #: 눌렀는데 표도 그대로, 알림도 없는 완전 무반응이 된다.
-    kill_error_occurred = Signal(str, str)     # jobset_id, message
+    kill_failed = Signal(str, str)     # jobset_id, message
     error_occurred = Signal(str, str)          # jobset_id, message
     handler_finished = Signal(str, str, object)  # jobset_id, handler_name, HandlerResult
 
@@ -190,7 +190,7 @@ class LsfJobManager(QObject):
                              parent=self)
         # kill_finished **앞에** 건다 — 같은 신호의 slot은 연결 순서대로 도므로
         # 실패 통지가 완료 통지보다 먼저 나간다(finished-last 계약).
-        self.killer.finished.connect(self._emit_kill_errors)
+        self.killer.finished.connect(self._emit_kill_failures)
         self.killer.finished.connect(self.kill_finished)
         self.killer.progress.connect(self.kill_progress)
         self.killer.error.connect(self.error_occurred)
@@ -231,7 +231,7 @@ class LsfJobManager(QObject):
         for name in ("submit_started", "submit_progress",
                      "jobset_updated", "kill_started",
                      "kill_finished", "kill_progress",
-                     "kill_error_occurred", "error_occurred",
+                     "kill_failed", "error_occurred",
                      "handler_finished", "pre_submit_started",
                      "pre_submit_finished", "jobset_finished",
                      "post_processing_started", "post_processing_finished"):
@@ -1340,7 +1340,7 @@ class LsfJobManager(QObject):
         # ctx가 확정된 이 시점(submit_finished)에 한 번 더 확인해 유실을 막는다.
         self._completion.maybe_finish(jsid)
 
-    def _emit_kill_errors(self, jsid: str, report) -> None:
+    def _emit_kill_failures(self, jsid: str, report) -> None:
         """[main] KillReport.errors를 kill 전용 신호로 흘려보낸다.
 
         kill 실패는 **레코드에 아무 흔적도 남기지 않는다** — 실패했다면 그 job은
@@ -1353,7 +1353,7 @@ class LsfJobManager(QObject):
           유지). 그 경우 report.errors에도 "internal: ..."로 실리므로 이
           신호로 한 번 더 온다."""
         for msg in getattr(report, "errors", None) or ():
-            self.kill_error_occurred.emit(jsid, msg)
+            self.kill_failed.emit(jsid, msg)
 
     def _emit_updates_after_kill(self, jsid: str, report) -> None:
         """kill 완료 시 상태 반영을 update Signal로 발화. optimistic 정책이면

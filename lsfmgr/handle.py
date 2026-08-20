@@ -35,7 +35,7 @@ class JobSet(QObject):
     kill_started = Signal()            # kill 접수 즉시(동기) — 착수 피드백
     kill_finished = Signal(object)     # KillReport
     kill_progress = Signal(int, int)   # chunk kill 진행 (done, total)
-    kill_error_occurred = Signal(str)  # kill 미확인/실패 사유 (kill_finished 직전)
+    kill_failed = Signal(str)  # kill 미확인/실패 사유 (kill_finished 직전)
     error_occurred = Signal(str)       # worker 예외 등
     handler_finished = Signal(str, object)   # handler_name, HandlerResult
     pre_submit_started = Signal()           # pre_submit 게이트 시작

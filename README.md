@@ -155,7 +155,7 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)     # 이번 submit만
 | `poll_runtime_updates` | False | RUN 중 `run_time_s`(경과시간) 변화도 `jobs_updated`로 live 발행. 켜면 **RUN 전원이 매 폴링 재전이**된다(5000건 기준 사이클당 5000 transition + 5000레코드 배치). 끄면 경과시간은 상태 전이 시점에만 갱신 — 표에 실시간 경과시간 열이 꼭 필요할 때만 켤 것 |
 | `collect_clusters` | False | MultiCluster forwarding 정보 수집 — `JobRecord.source_cluster`/`forward_cluster`를 폴링으로 채움 |
 | `kill_status_policy` | `"optimistic"` | `"optimistic"`=kill 수락 확인 시 즉시 EXIT / `"actual"`=실제 LSF 상태(폴링)로만 |
-| `kill_chunk_size` | 100 | **bkill** 한 번에 넘길 target 수. 조회와 따로 두는 이유: bjobs는 읽기라 500건도 금방이지만 bkill은 job마다 mbatchd가 실제 처리(+MC면 원격 클러스터 전달)를 하는 쓰기라 훨씬 느리다. `kill_timeout_s`는 **이 chunk 전체**의 상한이므로 둘을 같이 봐야 한다 |
+| `kill_chunk_size` | 16 | **bkill** 한 번에 넘길 target 수. 조회와 따로 두는 이유: bjobs는 읽기라 500건도 금방이지만 bkill은 job마다 mbatchd가 실제 처리(+MC면 원격 클러스터 전달)를 하는 쓰기라 훨씬 느리다. `kill_timeout_s`는 **이 chunk 전체**의 상한이므로 둘을 같이 봐야 한다. 기본 16은 MC(forward된 job은 원격 왕복까지 기다린다) 기준 — 단일 클러스터면 키워서 호출 횟수를 줄여도 된다 |
 | `kill_max_retry` | 2 | kill 확인 실패 시 재시도 횟수 |
 | `kill_retry_delay_s` | 3.0 | kill 재확인 간격(초) — `bkill`이 비동기라 확인까지 여유를 둠 |
 | `progress_min_interval_s` | 0.5 | progress/`jobs_updated` 최소 발화 간격(초). 키우면 부하↓·반응성↓ |
@@ -952,7 +952,7 @@ src.invalidate()                       # 다음 조회에서 반드시 콜백 �
 | `post_processing_started` / `post_processing_finished` | — / `object` | 전원 terminal 후처리 시작/완료 |
 | `kill_started` | — | kill 접수 즉시(동기) — 정지 대기로 완료가 늦어져도 UI가 바로 표시 |
 | `kill_progress` | `(done, total)` | chunk kill 진행 (throttled, 마지막 100%) |
-| `kill_error_occurred` | `str` | kill이 **일부라도 확인되지 않은 채** 끝남 — `KillReport.errors` 항목마다 1회, `kill_finished` **직전**. kill 실패는 job 상태를 바꾸지 않으므로(실패했다면 그 job은 LSF에서 여전히 PEND/RUN이다) 이 신호가 유일한 즉시 통지다 |
+| `kill_failed` | `str` | kill이 **일부라도 확인되지 않은 채** 끝남 — `KillReport.errors` 항목마다 1회, `kill_finished` **직전**. kill 실패는 job 상태를 바꾸지 않으므로(실패했다면 그 job은 LSF에서 여전히 PEND/RUN이다) 이 신호가 유일한 즉시 통지다 |
 | `kill_finished` | `KillReport` | kill 완료 |
 | `handler_finished` | `(name, HandlerResult)` | 등록한 handler 1회 실행 완료마다 |
 | `job_lost` | `JobRecord` | LOST 확정 시 (`mgr.job_lost(jsid, rec)` — 전역 계층에만 있음) |

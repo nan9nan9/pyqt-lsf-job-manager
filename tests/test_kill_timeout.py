@@ -110,15 +110,22 @@ def test_bkill_uses_its_own_chunk_size():
 
 
 def test_tight_kill_budget_warns_once(caplog):
-    """kill_timeout_s를 'job 1건'으로 오해한 설정을 생성 시 짚어 준다."""
+    """kill_timeout_s를 'job 1건'으로 오해한 설정을 생성 시 짚어 준다.
+    (그 값은 chunk **전체**의 상한이라 chunk가 크면 예산이 순식간에 없다)"""
     with caplog.at_level("WARNING", logger="lsfmgr.command"):
-        LsfCommand(LsfConfig(kill_timeout_s=8))          # 8s / 100건 = 80ms
+        LsfCommand(LsfConfig(kill_timeout_s=8,
+                             kill_chunk_size=500))       # 8s / 500건 = 16ms
     hits = [r for r in caplog.records if "호출 1회" in r.message]
     assert len(hits) == 1, [r.message for r in caplog.records]
-    caplog.clear()
-    with caplog.at_level("WARNING", logger="lsfmgr.command"):
-        LsfCommand(LsfConfig())                          # 기본 120s / 100건
-    assert not [r for r in caplog.records if "호출 1회" in r.message]
+
+    for cfg in (LsfConfig(),                             # 기본 120s / 16건
+                LsfConfig(kill_timeout_s=8)):            # 8s / 16건 = 500ms
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="lsfmgr.command"):
+            LsfCommand(cfg)
+        assert not [r for r in caplog.records if "호출 1회" in r.message], (
+            f"멀쩡한 설정에 경고: timeout={cfg.kill_timeout_s} "
+            f"chunk={cfg.kill_chunk_size}")
 
 
 # ----------------------------------------------------------------------
@@ -138,19 +145,19 @@ def test_failed_kill_does_not_touch_the_records(qtbot, manager, fake_lsf):
         JobState.PEND, False, None)
 
 
-def test_failed_kill_is_reported_on_kill_error_occurred(qtbot, manager,
+def test_failed_kill_is_reported_on_kill_failed(qtbot, manager,
                                                         fake_lsf):
     """상태에 흔적이 없으니 신호로 알려야 한다 — 없으면 사용자가 kill을
     눌렀는데 표도 그대로, 알림도 없는 완전 무반응이다."""
     seen, order = [], []
-    manager.kill_error_occurred.connect(
+    manager.kill_failed.connect(
         lambda j, m: (seen.append((j, m)), order.append("error")))
     manager.kill_finished.connect(lambda j, r: order.append("finished"))
 
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js = submit_cmds(manager, ["mytool a.sp"], auto_poll=False)
     handle_seen = []
-    js.kill_error_occurred.connect(handle_seen.append)
+    js.kill_failed.connect(handle_seen.append)
 
     fake_lsf.fail_next_bkill = 99
     with qtbot.waitSignal(manager.kill_finished, timeout=20000):
@@ -166,7 +173,7 @@ def test_failed_kill_is_reported_on_kill_error_occurred(qtbot, manager,
 def test_successful_kill_is_silent_on_the_error_signal(qtbot, manager):
     """정상 kill에서는 안 나와야 한다 (신호 노이즈 금지)."""
     seen = []
-    manager.kill_error_occurred.connect(lambda j, m: seen.append(m))
+    manager.kill_failed.connect(lambda j, m: seen.append(m))
     with qtbot.waitSignal(manager.submit_finished, timeout=10000):
         js = submit_cmds(manager, ["mytool a.sp"], auto_poll=False)
     with qtbot.waitSignal(manager.kill_finished, timeout=20000):

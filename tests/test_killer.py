@@ -65,16 +65,21 @@ def test_whole_kill_survives_chunk_failure_with_retry(qtbot, fake_lsf):
         mgr.shutdown()
 
 
-def test_kill_whole_jobset_chunk_single_call(qtbot, manager, fake_lsf,
-                                              submitted):
-    """전체 kill — 30 job이 chunk_size(200) 이내라 bkill 1회 (v10 단일 경로)."""
+def test_kill_whole_jobset_chunked(qtbot, manager, fake_lsf, submitted):
+    """전체 kill — job_id chunk 단일 경로 (v10). 호출 수는 kill_chunk_size로
+    갈린다(조회용 chunk_size와 별개 — bkill은 쓰기라 건당 비용이 크다)."""
+    import math
+
+    from lsfmgr import LsfConfig
     fake_lsf.calls.clear()
     with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blocker:
         manager.kill(submitted)
     jsid, report = blocker.args
     assert jsid == submitted
     assert report.requested == 30
-    assert report.command_calls == 1                  # bkill 1회
+    expected = math.ceil(30 / LsfConfig().kill_chunk_size)
+    assert report.command_calls == expected, (
+        f"bkill {report.command_calls}회 (기대 {expected})")
     assert report.strategies == ["chunk"]
     assert fake_lsf.alive_jobs() == []
 

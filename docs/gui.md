@@ -89,7 +89,7 @@ mgr.submit(js, post_process=post)
 | `job_lost` | `(jobset_id, JobRecord)` | polling · `query_once` · `detect_lost` — 소실 확정 |
 | `kill_started` | `(jobset_id)` | `kill(js)` · `kill_jobs(...)` 접수 즉시(동기) |
 | `kill_progress` | `(jobset_id, done, total)` | chunk kill 진행(throttled) |
-| `kill_error_occurred` | `(jobset_id, message)` | kill 미확인/실패 사유 — `KillReport.errors` 항목마다 1 회, `kill_finished` **직전** |
+| `kill_failed` | `(jobset_id, message)` | kill 미확인/실패 사유 — `KillReport.errors` 항목마다 1 회, `kill_finished` **직전** |
 | `kill_finished` | `(jobset_id, KillReport)` | `kill(js)` · `kill_jobs(...)` |
 | `handler_finished` | `(jobset_id, handler_name, HandlerResult)` | `add_handler` 로 등록한 handler 1회 실행 완료 시 |
 | `jobset_finished` | `(jobset_id, summary)` | 전 job 이 terminal 도달 — polling · `query_once` · submit 완료(전량 실패 시). **사용자 kill 로 끝난 완료는 발화 안 함** |
@@ -158,7 +158,7 @@ poll_interval_s         = 10    # ② 폴링 주기(5~60)
 | `error_occurred` | worker 예외 **발생 시마다** | 이벤트 |
 
 - `js.jobs_failed`는 `jobs_updated`에서 실패분만 걸러 발화하므로 **같은 주기**다.
-- kill 은 job_id 를 `kill_chunk_size`(기본 100) 단위로 나눠 `bkill` 한다 — 대상이 한
+- kill 은 job_id 를 `kill_chunk_size`(기본 16) 단위로 나눠 `bkill` 한다 — 대상이 한
   chunk 안에 들어가면 호출 1회로 끝나 진행이 바로 100%가 되고, `kill_progress`가
   의미 있는 건 **대량 kill**과 **`verify`(재조회 루프)** 일 때다.
 - **`min_state_dwell_s`**(기본 0=끔)는 위 cadence 위에 얹히는 **표시 간격**이다.
@@ -350,11 +350,11 @@ mgr.kill_jobs(js, self.table.selected_job_keys())   # 선택 행만
 - 진행 중 submit이 있으면 kill이 **우선권**을 갖는다(제출을 멈추고 kill).
 - **kill 실패는 상태를 바꾸지 않는다.** 실패했다면 그 job 은 LSF 에서 여전히
   PEND/RUN 이라 그게 맞는 상태이고, EXIT 로 찍으면 거짓말이 된다. 그래서 표에는
-  아무 변화가 없다 — `kill_error_occurred` 를 반드시 구독해라. 안 그러면
+  아무 변화가 없다 — `kill_failed` 를 반드시 구독해라. 안 그러면
   사용자가 kill 을 눌렀는데 표도 그대로, 알림도 없는 **완전 무반응**이 된다.
 
 ```python
-js.kill_error_occurred.connect(               # kill_finished 직전에 온다
+js.kill_failed.connect(               # kill_finished 직전에 온다
     lambda msg: self.statusBar().showMessage(f"kill 실패: {msg}", 10000))
 
 def _on_kill_done(self, jsid, rep):           # KillReport — 통계만
