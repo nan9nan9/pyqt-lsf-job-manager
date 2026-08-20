@@ -129,6 +129,10 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)     # 이번 submit만
 
 ### 3.1 옵션 카탈로그
 
+> 범위를 벗어난 값은 **거부**됩니다(조용히 보정하지 않습니다) — `LsfConfig`든
+> 생성자/`submit()` kwarg든 같습니다. 범위 규칙의 소유자는
+> `lsfmgr.config.NUMERIC_RANGES` 한 곳입니다.
+
 **제출·폴링 (생성자 + `submit()` 양쪽)**
 
 | 옵션 | 기본값 | 설명 |

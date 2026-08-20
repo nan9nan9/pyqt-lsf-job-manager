@@ -19,6 +19,56 @@ DEFAULT_BJOBS_PATH = "bjobs"
 #: min_state_dwell_s 상한(초) = 1시간. 표시 지연이 그보다 길 이유가 없다.
 MAX_STATE_DWELL_S = 3600.0
 
+#: 수치 필드의 허용 범위 — 이름 → (형변환, 하한, 상한, 하한 포함 여부).
+#: 상한 None은 없음. 하한 미포함(False)은 "초과", 즉 양수를 뜻한다.
+#:
+#: **범위 규칙의 단일 소유자**다. 예전엔 여기서 조용히 보정하고(clamp) 상위
+#: options 계층은 거부해서, 같은 값이 경로에 따라 다르게 처리됐다 —
+#: LsfConfig(chunk_size=0)이 500이 되어 오타가 묻혔다. 전부 거부로 통일한다.
+#: ※ poll_interval_s의 5~60 같은 **UX 정책 범위**는 상위 계층의 몫이다.
+#:   여기서는 구조적 불변식(양수)만 본다 — poll_interval_s=2(빠른 로컬 폴링)
+#:   같은 정당한 저수준 사용을 막지 않기 위해서다.
+#: ※ 0/음수 타임아웃은 증상이 조용하다: 전 chunk가 '조회 실패'로 귀속되고
+#:   monitor는 설계대로 판단을 보류해(LOST 확정 안 함) 폴링이 영영 상태를
+#:   못 올린 채 PEND에 고착된다. 그래서 생성 시점에 막는다.
+NUMERIC_RANGES = {
+    "workers":                  (int,   1, 64, True),
+    "max_retry":                (int,   0, None, True),
+    "retry_delay_s":            (float, 0.0, None, True),
+    "chunk_size":               (int,   1, 5000, True),
+    "arg_max":                  (int,   4096, None, True),
+    "kill_chunk_size":          (int,   1, 5000, True),
+    "kill_workers":             (int,   1, 32, True),
+    "kill_max_retry":           (int,   0, None, True),
+    "kill_retry_delay_s":       (float, 0.0, None, True),
+    "lost_after_missing_polls": (int,   1, None, True),
+    "progress_min_interval_s":  (float, 0.0, None, True),
+    "progress_min_step_ratio":  (float, 0.0, 1.0, True),
+    "min_state_dwell_s":        (float, 0.0, MAX_STATE_DWELL_S, True),
+    "internal_retention_days":  (float, 0.0, None, True),
+    "internal_lost_grace_s":    (float, 0.0, None, True),
+    "poll_interval_s":          (float, 0.0, None, False),
+    "submit_timeout_s":         (float, 0.0, None, False),
+    "query_timeout_s":          (float, 0.0, None, False),
+    "kill_timeout_s":           (float, 0.0, None, False),
+}
+
+
+def _in_range(value, name, cast, lo, hi, inclusive_lo):
+    """범위 검증 + 형 정규화. 위반이면 ValueError (조용한 보정 금지)."""
+    try:
+        v = cast(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{name}는 {cast.__name__} (got {value!r})") from None
+    ok = (v >= lo if inclusive_lo else v > lo) and (hi is None or v <= hi)
+    if not ok:
+        bound = (f"{lo:g} 이상" if inclusive_lo else f"{lo:g} 초과")
+        if hi is not None:
+            bound = f"{lo:g}~{hi:g}"
+        raise ValueError(f"{name}는 {bound} (got {value!r})")
+    return v
+
 
 @dataclass
 class LsfConfig:
@@ -209,12 +259,9 @@ class LsfConfig:
     min_state_dwell_s: float = 0.0
 
     def __post_init__(self):
-        self.workers = max(1, min(64, int(self.workers)))
-        if self.chunk_size < 1:
-            self.chunk_size = 500            # 필드 기본값과 동일한 폴백
-        if self.kill_chunk_size < 1:
-            self.kill_chunk_size = 16        # 필드 기본값과 동일한 폴백
-        self.kill_workers = max(1, min(32, int(self.kill_workers)))
+        for name, (cast, lo, hi, incl) in NUMERIC_RANGES.items():
+            setattr(self, name,
+                    _in_range(getattr(self, name), name, cast, lo, hi, incl))
         # retry_backoff는 여기선 숫자다(>1.0이면 지수 backoff). 같은 이름의
         # submit()/LsfJobManager() kwarg는 'fixed:N'/'expo:N' 문자열이라 헷갈려
         # LsfConfig에 문자열을 넘기면, 예전엔 조용히 통과하다 manager 생성 시
@@ -232,17 +279,6 @@ class LsfConfig:
             raise ValueError(
                 "kill_status_policy는 'optimistic' 또는 'actual' "
                 f"(got {self.kill_status_policy!r})")
-        if self.progress_min_interval_s < 0:
-            raise ValueError("progress_min_interval_s는 0 이상")
-        if not (0.0 <= self.progress_min_step_ratio <= 1.0):
-            raise ValueError("progress_min_step_ratio는 0~1")
-        # 상한도 본다 — 표시 지연이 1시간을 넘을 이유가 없고, 방치하면
-        # QTimer의 int32 ms를 넘겨 pacer의 재예약 slot에서 OverflowError가
-        # 난다(그 순간 전이 표시가 통째로 멎는다).
-        if not (0 <= self.min_state_dwell_s <= MAX_STATE_DWELL_S):
-            raise ValueError(
-                f"min_state_dwell_s는 0~{MAX_STATE_DWELL_S:g} "
-                f"(got {self.min_state_dwell_s!r})")
         # 형식 검증은 여기 한 곳 — 잘못된 값이 제출 worker 안에서야 터지면
         # 그 job만 SUBMIT_FAILED로 조용히 실패해 원인을 찾기 어렵다.
         if self.test_submit_wrapper_pattern_cmd is not None:
@@ -258,25 +294,6 @@ class LsfConfig:
                     f"glob (got {pattern!r})")
             validate_cmd_path(cmd, "test_submit_wrapper_pattern_cmd의 명령")
             self.test_submit_wrapper_pattern_cmd = (pattern, cmd)
-        # 주기/타임아웃도 여기서 검증한다 — 안 하면 LsfConfig(poll_interval_s=0)
-        # 같은 값이 통과해, auto_poll 시 start_polling(0.0)이 큐드 Qt slot 안에서
-        # ValueError를 던져 앱이 죽는다.
-        # 단, LsfConfig는 저수준 dataclass이므로 **구조적 불변식(양수)만** 강제한다
-        # — runtime 가드(start_polling의 `if eff <= 0`)와 정합. 5~60 같은 UX 정책
-        # 범위는 상위 options/manager-kwarg 계층(options._validate_option)의 몫이다.
-        # 여기서 5~60을 강제하면 poll_interval_s=2(빠른 로컬 폴링) 같은 정당한
-        # 저수준 사용을 막고, 이전에 통과하던 config를 생성 시점에 죽인다(회귀).
-        # subprocess timeout 3형제도 같이 본다 — query/kill은 manager kwarg가
-        # 없어 LsfConfig로만 주는데(검증 계층이 여기뿐), 0/음수면 subprocess.run이
-        # 매번 TimeoutExpired를 던진다. 특히 query_timeout_s는 증상이 조용하다:
-        # 전 chunk가 '조회 실패'로 귀속되고 monitor는 설계대로 판단을 보류해
-        # (LOST 확정 안 함) 폴링이 영영 상태를 못 올린 채 PEND에 고착된다.
-        for name in ("poll_interval_s", "submit_timeout_s",
-                     "query_timeout_s", "kill_timeout_s"):
-            value = getattr(self, name)
-            if value is None or float(value) <= 0:
-                raise ValueError(f"{name}는 양수 (got {value!r})")
-            setattr(self, name, float(value))
         if (self.job_status_fetcher is not None
                 and not callable(self.job_status_fetcher)):
             raise ValueError("job_status_fetcher는 호출 가능해야 합니다 "
@@ -287,14 +304,6 @@ class LsfConfig:
                 raise ValueError("internal_refresh_min_s는 0 이상 "
                                  f"(got {self.internal_refresh_min_s!r})")
             self.internal_refresh_min_s = float(self.internal_refresh_min_s)
-        if float(self.internal_retention_days) < 0:
-            raise ValueError("internal_retention_days는 0 이상 "
-                             f"(got {self.internal_retention_days!r})")
-        self.internal_retention_days = float(self.internal_retention_days)
-        if float(self.internal_lost_grace_s) < 0:
-            raise ValueError("internal_lost_grace_s는 0 이상 "
-                             f"(got {self.internal_lost_grace_s!r})")
-        self.internal_lost_grace_s = float(self.internal_lost_grace_s)
 
     @property
     def effective_internal_refresh_min_s(self) -> float:

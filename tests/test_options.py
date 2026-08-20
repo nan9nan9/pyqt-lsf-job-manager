@@ -183,3 +183,55 @@ def test_removed_rate_limit_is_rejected_everywhere():
         resolve_options({}, {"rate_limit_per_s": 20})
     with pytest.raises(TypeError):
         LsfConfig(rate_limit_per_s=20)
+
+
+def test_range_rules_agree_between_config_and_options():
+    """같은 필드의 허용 범위를 두 계층이 따로 들고 있으면 어긋난다.
+
+    실제로 어긋났었다: LsfConfig는 조용히 보정(clamp)하고 옵션 계층은 거부해서
+    LsfConfig(chunk_size=0)이 500이 됐다. 이제 범위 규칙의 소유자는
+    config.NUMERIC_RANGES 하나이고, 두 경로가 같은 값을 같게 판정해야 한다.
+    """
+    import pytest
+
+    from lsfmgr.config import NUMERIC_RANGES, LsfConfig
+    from lsfmgr.options import (
+        MANAGER_ONLY_KEYS, SHARED_KEYS, validate_options,
+    )
+
+    # poll_interval_s만 의도적으로 다르다 — 상위 계층은 5~60이라는 **UX 정책**
+    # 범위를 더 좁게 건다(저수준 LsfConfig는 양수만 본다: 빠른 로컬 폴링 허용).
+    POLICY_DIFFERS = {"poll_interval_s"}
+
+    def config_ok(name, value):
+        try:
+            LsfConfig(**{name: value})
+            return True
+        except ValueError:
+            return False
+
+    def options_ok(name, value):
+        allowed = SHARED_KEYS | MANAGER_ONLY_KEYS
+        if name not in allowed:
+            return None                       # 그 계층에 없는 필드
+        try:
+            validate_options({name: value}, allowed=allowed, where="x")
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    mismatches = []
+    for name, (cast, lo, hi, incl) in NUMERIC_RANGES.items():
+        if name in POLICY_DIFFERS:
+            continue
+        probes = [lo if incl else lo + 1, -1, 0]
+        if hi is not None:
+            probes += [hi, hi + 1]
+        for v in probes:
+            v = cast(v)
+            a, b = config_ok(name, v), options_ok(name, v)
+            if b is not None and a != b:
+                mismatches.append(
+                    f"{name}={v}: LsfConfig={'허용' if a else '거부'} / "
+                    f"옵션={'허용' if b else '거부'}")
+    assert not mismatches, "\n".join(mismatches)

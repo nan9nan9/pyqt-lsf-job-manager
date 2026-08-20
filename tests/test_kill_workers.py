@@ -127,11 +127,16 @@ def test_progress_never_goes_backwards(qtbot, fake_lsf):
     assert seen == sorted(seen), f"진행이 되감겼다: {seen}"
 
 
-def test_workers_is_clamped():
-    assert LsfConfig(kill_workers=0).kill_workers == 1
-    assert LsfConfig(kill_workers=999).kill_workers == 32
-    with pytest.raises(ValueError):
-        LsfJobManager(kill_workers=0)          # 옵션 계층은 1~32 강제
+def test_out_of_range_workers_is_rejected_on_both_paths():
+    """예전엔 LsfConfig가 조용히 보정하고 옵션 계층만 거부했다 — 같은 값이
+    경로에 따라 다르게 처리돼 오타가 묻혔다. 이제 둘 다 거부한다."""
+    for bad in (0, 999):
+        with pytest.raises(ValueError):
+            LsfConfig(kill_workers=bad)
+        with pytest.raises(ValueError):
+            LsfJobManager(kill_workers=bad)
+    assert LsfConfig(kill_workers=1).kill_workers == 1
+    assert LsfConfig(kill_workers=32).kill_workers == 32
 
 
 # ----------------------------------------------------------------------
