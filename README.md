@@ -952,6 +952,7 @@ src.invalidate()                       # 다음 조회에서 반드시 콜백 �
 | `post_processing_started` / `post_processing_finished` | — / `object` | 전원 terminal 후처리 시작/완료 |
 | `kill_started` | — | kill 접수 즉시(동기) — 정지 대기로 완료가 늦어져도 UI가 바로 표시 |
 | `kill_progress` | `(done, total)` | chunk kill 진행 (throttled, 마지막 100%) |
+| `kill_error_occurred` | `str` | kill이 **일부라도 확인되지 않은 채** 끝남 — `KillReport.errors` 항목마다 1회, `kill_finished` **직전**. kill 실패는 job 상태를 바꾸지 않으므로(실패했다면 그 job은 LSF에서 여전히 PEND/RUN이다) 이 신호가 유일한 즉시 통지다 |
 | `kill_finished` | `KillReport` | kill 완료 |
 | `handler_finished` | `(name, HandlerResult)` | 등록한 handler 1회 실행 완료마다 |
 | `job_lost` | `JobRecord` | LOST 확정 시 (`mgr.job_lost(jsid, rec)` — 전역 계층에만 있음) |

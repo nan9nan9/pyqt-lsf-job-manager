@@ -295,6 +295,10 @@ class Dashboard(QWidget):
         mgr.job_lost.connect(
             lambda j, rec: self._log(j, f"job_lost {rec.job_key}"))
         mgr.kill_started.connect(lambda j: self._log(j, "kill_started"))
+        # kill 실패는 레코드에 흔적을 안 남긴다(실패했으면 그 job 은 아직
+        # 살아 있으므로 PEND/RUN 이 맞다) — 이 신호가 유일한 즉시 통지다.
+        mgr.kill_error_occurred.connect(
+            lambda j, m: self._log(j, f"KILL 실패 {m}"))
         mgr.kill_finished.connect(
             lambda j, r: self._log(
                 j, f"kill_finished 대상={r.requested} 호출={r.command_calls}회"

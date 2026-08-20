@@ -119,3 +119,57 @@ def test_tight_kill_budget_warns_once(caplog):
     with caplog.at_level("WARNING", logger="lsfmgr.command"):
         LsfCommand(LsfConfig())                          # 기본 120s / 100건
     assert not [r for r in caplog.records if "호출 1회" in r.message]
+
+
+# ----------------------------------------------------------------------
+# kill 실패는 상태를 바꾸지 않는다 — 그래서 전용 신호로 알린다
+# ----------------------------------------------------------------------
+def test_failed_kill_does_not_touch_the_records(qtbot, manager, fake_lsf):
+    """kill이 실패했다면 그 job은 LSF에서 여전히 살아 있다 — EXIT로 찍으면
+    거짓말이다. 상태·killed·fail_reason 어느 것도 건드리지 않는다."""
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        js = submit_cmds(manager, ["mytool a.sp"], auto_poll=False)
+    fake_lsf.fail_next_bkill = 99                 # bkill이 계속 rc=255
+    with qtbot.waitSignal(manager.kill_finished, timeout=20000) as blk:
+        manager.kill(js)
+    assert blk.args[1].unconfirmed == 1
+    rec = js.jobs()[0]
+    assert (rec.state, rec.killed, rec.fail_reason) == (
+        JobState.PEND, False, None)
+
+
+def test_failed_kill_is_reported_on_kill_error_occurred(qtbot, manager,
+                                                        fake_lsf):
+    """상태에 흔적이 없으니 신호로 알려야 한다 — 없으면 사용자가 kill을
+    눌렀는데 표도 그대로, 알림도 없는 완전 무반응이다."""
+    seen, order = [], []
+    manager.kill_error_occurred.connect(
+        lambda j, m: (seen.append((j, m)), order.append("error")))
+    manager.kill_finished.connect(lambda j, r: order.append("finished"))
+
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        js = submit_cmds(manager, ["mytool a.sp"], auto_poll=False)
+    handle_seen = []
+    js.kill_error_occurred.connect(handle_seen.append)
+
+    fake_lsf.fail_next_bkill = 99
+    with qtbot.waitSignal(manager.kill_finished, timeout=20000):
+        manager.kill(js)
+
+    assert len(seen) == 1, seen
+    assert seen[0][0] == js.id and "kill 확인 실패" in seen[0][1]
+    assert handle_seen == [seen[0][1]], handle_seen      # 핸들로도 중계
+    # finished-last — 실패 통지가 완료 통지보다 먼저
+    assert order == ["error", "finished"], order
+
+
+def test_successful_kill_is_silent_on_the_error_signal(qtbot, manager):
+    """정상 kill에서는 안 나와야 한다 (신호 노이즈 금지)."""
+    seen = []
+    manager.kill_error_occurred.connect(lambda j, m: seen.append(m))
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        js = submit_cmds(manager, ["mytool a.sp"], auto_poll=False)
+    with qtbot.waitSignal(manager.kill_finished, timeout=20000):
+        manager.kill(js)
+    assert seen == []
+    assert js.jobs()[0].state is JobState.EXIT

@@ -89,6 +89,7 @@ mgr.submit(js, post_process=post)
 | `job_lost` | `(jobset_id, JobRecord)` | polling · `query_once` · `detect_lost` — 소실 확정 |
 | `kill_started` | `(jobset_id)` | `kill(js)` · `kill_jobs(...)` 접수 즉시(동기) |
 | `kill_progress` | `(jobset_id, done, total)` | chunk kill 진행(throttled) |
+| `kill_error_occurred` | `(jobset_id, message)` | kill 미확인/실패 사유 — `KillReport.errors` 항목마다 1 회, `kill_finished` **직전** |
 | `kill_finished` | `(jobset_id, KillReport)` | `kill(js)` · `kill_jobs(...)` |
 | `handler_finished` | `(jobset_id, handler_name, HandlerResult)` | `add_handler` 로 등록한 handler 1회 실행 완료 시 |
 | `jobset_finished` | `(jobset_id, summary)` | 전 job 이 terminal 도달 — polling · `query_once` · submit 완료(전량 실패 시). **사용자 kill 로 끝난 완료는 발화 안 함** |
@@ -347,8 +348,15 @@ mgr.kill_jobs(js, self.table.selected_job_keys())   # 선택 행만
 - optimistic(기본) 정책이라 확인되는 대로 **즉시 `EXIT`가 `jobs_updated`로** 온다 →
   폴링을 안 기다린다. **`kill_finished`로 상태를 수동 EXIT 처리하지 말 것**(깜빡임 원인).
 - 진행 중 submit이 있으면 kill이 **우선권**을 갖는다(제출을 멈추고 kill).
+- **kill 실패는 상태를 바꾸지 않는다.** 실패했다면 그 job 은 LSF 에서 여전히
+  PEND/RUN 이라 그게 맞는 상태이고, EXIT 로 찍으면 거짓말이 된다. 그래서 표에는
+  아무 변화가 없다 — `kill_error_occurred` 를 반드시 구독해라. 안 그러면
+  사용자가 kill 을 눌렀는데 표도 그대로, 알림도 없는 **완전 무반응**이 된다.
 
 ```python
+js.kill_error_occurred.connect(               # kill_finished 직전에 온다
+    lambda msg: self.statusBar().showMessage(f"kill 실패: {msg}", 10000))
+
 def _on_kill_done(self, jsid, rep):           # KillReport — 통계만
     if rep.unconfirmed:
         self.statusBar().showMessage(
