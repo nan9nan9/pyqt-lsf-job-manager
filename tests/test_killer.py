@@ -45,7 +45,7 @@ def test_whole_kill_survives_chunk_failure_with_retry(qtbot, fake_lsf):
     나머지 chunk를 계속 시도하고, 미확인분은 재시도로 살려낸다 (이전에는
     첫 장애에 kill 전체가 무위였다 — 리뷰 H2 회귀)."""
     from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
-    cfg = LsfConfig(rate_limit_per_s=None, chunk_size=10, kill_retry_delay_s=0.05)
+    cfg = LsfConfig(chunk_size=10, kill_retry_delay_s=0.05)
     mgr = LsfJobManager(store=InMemoryStore(), config=cfg, runner=fake_lsf)
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
@@ -251,7 +251,7 @@ def test_kill_actual_waits_for_lsf(qtbot, fake_lsf, config):
 def test_kill_status_policy_validation(fake_lsf):
     from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
     with pytest.raises(ValueError):
-        LsfConfig(rate_limit_per_s=None, kill_status_policy="bogus")
+        LsfConfig(kill_status_policy="bogus")
     with pytest.raises(ValueError):                  # manager kwarg 경로
         LsfJobManager(store=InMemoryStore(), runner=fake_lsf,
                       kill_status_policy="nope")

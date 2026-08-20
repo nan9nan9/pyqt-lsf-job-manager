@@ -149,7 +149,6 @@ class LsfJobManager(QObject):
             "retry_backoff": (f"fixed:{cfg.retry_delay_s:g}"
                               if cfg.retry_backoff <= 1.0
                               else f"expo:{cfg.retry_delay_s:g}"),
-            "rate_limit_per_s": cfg.rate_limit_per_s,
             "poll_interval_s": cfg.poll_interval_s,
             "submit_timeout_s": cfg.submit_timeout_s,
         }
@@ -324,7 +323,7 @@ class LsfJobManager(QObject):
         전원 terminal이면 실행). 반환값은 post_processing_finished로 전달.
         신호: post_processing_started → post_processing_finished(result).
         ※ pre_submit·post_process 콜백 모두 worker 스레드 실행 — GUI 접근 금지.
-        옵션(kwargs): workers/max_retry/rate_limit_per_s/auto_poll/
+        옵션(kwargs): workers/max_retry/auto_poll/
         poll_interval_s/submit_timeout_s 등 (§1.2)."""
         return self._submit_jobset(js, only=only, pre_submit=pre_submit,
                                    post_process=post_process, **kwargs)

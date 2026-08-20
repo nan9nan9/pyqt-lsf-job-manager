@@ -55,7 +55,7 @@ def test_huge_dwell_is_rejected_not_crashing():
 def test_pacer_survives_a_large_dwell(qtbot, fake_lsf):
     """설정 상한(1시간) 안에서는 재예약이 터지지 않는다."""
     mgr = LsfJobManager(store=InMemoryStore(),
-                        config=LsfConfig(rate_limit_per_s=None,
+                        config=LsfConfig(
                                          min_state_dwell_s=3600.0),
                         runner=fake_lsf)
     try:

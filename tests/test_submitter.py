@@ -191,7 +191,7 @@ def test_cancel_submit(qtbot, manager, fake_lsf):
     # rate limit으로 느리게 만들어 중간 취소 여지를 확보
     jobs = [f"r {i}" for i in range(50)]
     with qtbot.waitSignal(manager.submit_finished, timeout=30000) as blocker:
-        jsid = submit_cmds(manager, jobs, workers=1, rate_limit_per_s=20).id
+        jsid = submit_cmds(manager, jobs, workers=1).id
         manager.cancel_submit(jsid)
     _, report = blocker.args
     assert report.total == 50
@@ -290,13 +290,12 @@ def test_final_progress_survives_the_finish_race(qtbot, manager):
     49/50에서 멈춘 채 완료된다. _finish_if_done이 직접 낸다."""
     from lsfmgr.options import Options
     from lsfmgr.submitter import _SubmitContext
-    from lsfmgr.util import TokenBucketLimiter, WorkerSlots
+    from lsfmgr.util import WorkerSlots
 
     seen = []
     manager.submitter.progress.connect(lambda j, d, t: seen.append((d, t)))
     ctx = _SubmitContext(jobset_id="js1", total=50,
                          slots=WorkerSlots(8),
-                         limiter=TokenBucketLimiter(None),
                          options=Options())
     ctx.done = 50
     # throttle 창을 소진시켜 _emit_progress가 못 내는 상황을 만든다
@@ -312,13 +311,12 @@ def test_forced_finish_does_not_fake_a_complete_progress(qtbot, manager):
     '전부 처리됨'으로 오보된다."""
     from lsfmgr.options import Options
     from lsfmgr.submitter import _SubmitContext
-    from lsfmgr.util import TokenBucketLimiter, WorkerSlots
+    from lsfmgr.util import WorkerSlots
 
     seen = []
     manager.submitter.progress.connect(lambda j, d, t: seen.append((d, t)))
     ctx = _SubmitContext(jobset_id="js2", total=50,
                          slots=WorkerSlots(8),
-                         limiter=TokenBucketLimiter(None),
                          options=Options())
     ctx.done = 3
     manager.submitter._finish_if_done(ctx, force=True)
@@ -344,7 +342,7 @@ def test_store_failure_during_reset_is_reported_as_error(qtbot, fake_lsf):
 
     store = FlakyStore()
     mgr = LsfJobManager(store=store, runner=fake_lsf,
-                        config=LsfConfig(rate_limit_per_s=None,
+                        config=LsfConfig(
                                          retry_delay_s=0.05))
     try:
         errs = []
@@ -363,44 +361,32 @@ def test_store_failure_during_reset_is_reported_as_error(qtbot, fake_lsf):
 # ----------------------------------------------------------------------
 # rate limit — 지속 처리량은 누르되 소량 제출은 통과시킨다
 # ----------------------------------------------------------------------
-def test_burst_lets_small_submits_through():
-    """버킷 용량이 rate와 같으면 30건짜리 소량 제출도 5초씩 걸렸다 —
-    eauth를 두들기는 건 지속 부하이지 짧은 버스트가 아니다."""
-    import time
-    from lsfmgr.util import BURST_FACTOR, TokenBucketLimiter
-
-    lim = TokenBucketLimiter(20.0)
-    assert lim.capacity == 20.0 * BURST_FACTOR
-    t0 = time.monotonic()
-    for _ in range(int(lim.capacity)):          # 용량만큼은 즉시
-        assert lim.acquire()
-    assert time.monotonic() - t0 < 0.5
-
-
-def test_sustained_rate_is_still_capped():
-    """버스트를 키워도 지속 구간은 초당 rate로 눌려야 한다."""
-    import time
-    from lsfmgr.util import TokenBucketLimiter, WorkerSlots
-
-    lim = TokenBucketLimiter(20.0, burst=2)     # 용량을 작게 줘 빠르게 검증
-    t0 = time.monotonic()
-    for _ in range(12):
-        lim.acquire()
-    elapsed = time.monotonic() - t0
-    assert elapsed >= (12 - 2) / 20.0 * 0.8, elapsed
-
-
-def test_rate_limit_wait_is_cancellable():
-    """rate limit 대기 중에도 kill이 즉시 먹혀야 한다 — 대량 제출 도중
-    kill이 초당 rate만큼 밀리면 '멈추라고 눌렀는데 안 멈춘다'가 된다."""
+def test_worker_slots_bound_concurrency():
+    """동시 제출 슬롯 — 상한만큼만 동시에 통과한다."""
     import threading
-    import time
-    from lsfmgr.util import TokenBucketLimiter, WorkerSlots
+    from lsfmgr.util import WorkerSlots
 
-    lim = TokenBucketLimiter(1.0, burst=1)
-    lim.acquire()                                # 토큰 소진
-    ev = threading.Event()
-    threading.Timer(0.05, ev.set).start()
+    slots = WorkerSlots(2)
+    assert slots.acquire() and slots.acquire()
+    got = []
+    t = threading.Thread(target=lambda: got.append(slots.acquire()))
+    t.start()
+    t.join(0.2)
+    assert not got, "상한을 넘겨 통과했다"
+    slots.release()
+    t.join(2.0)
+    assert got == [True]
+    slots.release(); slots.release()
+
+
+def test_worker_slot_wait_is_cancellable():
+    """슬롯 대기 중에도 kill이 즉시 먹혀야 한다 — 대량 제출 도중 kill이
+    앞선 제출이 끝날 때까지 밀리면 '멈추라고 눌렀는데 안 멈춘다'가 된다."""
+    import time
+    from lsfmgr.util import WorkerSlots
+
+    slots = WorkerSlots(1)
+    assert slots.acquire()                       # 슬롯 소진
     t0 = time.monotonic()
-    assert lim.acquire(ev) is False              # 취소로 빠져나온다
+    assert slots.acquire(lambda: True) is False  # 취소로 빠져나온다
     assert time.monotonic() - t0 < 0.5

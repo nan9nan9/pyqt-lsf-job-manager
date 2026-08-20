@@ -44,7 +44,7 @@ def test_timeout_is_confirmed_by_query_not_by_reissuing_bkill(qtbot, fake_lsf):
     runner = _TimeoutOnceBkill(fake_lsf)
     mgr = LsfJobManager(
         store=InMemoryStore(),
-        config=LsfConfig(rate_limit_per_s=None, kill_retry_delay_s=0.01),
+        config=LsfConfig(kill_retry_delay_s=0.01),
         runner=runner)
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
@@ -85,7 +85,7 @@ def test_timeout_with_a_still_alive_job_keeps_retrying(qtbot, fake_lsf):
     runner = _AlwaysTimeout(fake_lsf)
     mgr = LsfJobManager(
         store=InMemoryStore(),
-        config=LsfConfig(rate_limit_per_s=None, kill_retry_delay_s=0.01,
+        config=LsfConfig(kill_retry_delay_s=0.01,
                          kill_max_retry=2),
         runner=runner)
     try:
@@ -195,7 +195,7 @@ def _task(mgr, rows):
 @pytest.fixture
 def bare_mgr(fake_lsf):
     mgr = LsfJobManager(store=InMemoryStore(),
-                        config=LsfConfig(rate_limit_per_s=None),
+                        config=LsfConfig(),
                         runner=fake_lsf)
     yield mgr
     mgr.shutdown()

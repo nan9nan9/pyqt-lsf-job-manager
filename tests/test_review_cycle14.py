@@ -48,7 +48,7 @@ def _mgr_blocking_submit(fake):
         return fake(argv, timeout, cwd)
 
     mgr = LsfJobManager(store=InMemoryStore(),
-                        config=LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05), runner=runner)
+                        config=LsfConfig(retry_delay_s=0.05), runner=runner)
     return mgr, entered, release
 
 

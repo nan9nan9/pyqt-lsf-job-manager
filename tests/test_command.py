@@ -11,7 +11,7 @@ from lsfmgr.states import JobState
 
 @pytest.fixture
 def cmd(fake_lsf):
-    return LsfCommand(LsfConfig(rate_limit_per_s=None, ), fake_lsf)
+    return LsfCommand(LsfConfig(), fake_lsf)
 
 
 # ----------------------------------------------------------------------
@@ -56,7 +56,7 @@ def test_run_submit_timeout():
     def timeout_runner(argv, timeout, cwd=None):
         raise subprocess.TimeoutExpired(argv, timeout)
 
-    cmd = LsfCommand(LsfConfig(rate_limit_per_s=None, ), timeout_runner)
+    cmd = LsfCommand(LsfConfig(), timeout_runner)
     with pytest.raises(SubmitError) as ei:
         cmd.run_submit(["wrap", "echo hi"])
     assert ei.value.fail_reason == "BSUB_TIMEOUT"
@@ -79,7 +79,7 @@ def test_bjobs_uses_noheader_delimiter(cmd, fake_lsf):
 
 
 def test_bjobs_by_ids_chunked(fake_lsf):
-    cfg = LsfConfig(rate_limit_per_s=None, chunk_size=10)
+    cfg = LsfConfig(chunk_size=10)
     cmd = LsfCommand(cfg, fake_lsf)
     ids = [_submit(cmd, f"run {i}") for i in range(25)]
     out, failed = cmd.bjobs_by_ids(ids)
@@ -92,7 +92,7 @@ def test_bjobs_by_ids_chunked(fake_lsf):
 def test_bjobs_by_ids_chunk_failure_isolated(fake_lsf):
     """chunk 하나의 실패는 그 chunk의 id만 실패 집합에 귀속 — 나머지 chunk는
     정상 조회된다 (chunk 격리)."""
-    cmd = LsfCommand(LsfConfig(rate_limit_per_s=None, chunk_size=1), fake_lsf)
+    cmd = LsfCommand(LsfConfig(chunk_size=1), fake_lsf)
     ids = [_submit(cmd, f"run {i}") for i in range(3)]
     fake_lsf.bjobs_fail_ids = {ids[1]}       # 가운데 id의 chunk만 rc=255
 
@@ -136,7 +136,7 @@ def test_bjobs_downgrades_on_unsupported_field():
             return CommandResult(255, "", "bjobs: Unknown field: run_time\n")
         return CommandResult(0, core, "")
 
-    cmd = LsfCommand(LsfConfig(rate_limit_per_s=None, ), runner)
+    cmd = LsfCommand(LsfConfig(), runner)
     assert cmd._bjobs_fmt is cmd._BJOBS_FULL_FMT
     out, failed = cmd.bjobs_by_ids([111, 222])
     assert cmd._bjobs_fmt is cmd._BJOBS_CORE_FMT      # 강등됨
@@ -152,7 +152,7 @@ def test_bjobs_transient_error_no_downgrade():
     def runner(argv, timeout, cwd=None):
         return CommandResult(255, "", "LSF error: cannot reach mbatchd\n")
 
-    cmd = LsfCommand(LsfConfig(rate_limit_per_s=None, ), runner)
+    cmd = LsfCommand(LsfConfig(), runner)
     with pytest.raises(LsfCommandError):
         cmd._bjobs(["111"])
     assert cmd._bjobs_fmt is cmd._BJOBS_FULL_FMT      # 강등 안 됨
@@ -164,7 +164,7 @@ def test_bjobs_transient_error_no_downgrade():
 def test_bkill_targets_chunked(fake_lsf):
     # bkill은 조회(chunk_size)가 아니라 kill_chunk_size로 쪼갠다 — 쓰기라
     # 건당 비용이 훨씬 커서 한 호출이 kill_timeout_s를 넘기기 쉽다.
-    cmd = LsfCommand(LsfConfig(rate_limit_per_s=None, chunk_size=500,
+    cmd = LsfCommand(LsfConfig(chunk_size=500,
                                kill_chunk_size=20), fake_lsf)
     ids = [_submit(cmd, f"r {i}") for i in range(45)]
     resolved, calls, _to = cmd.bkill_targets_confirm([str(i) for i in ids])

@@ -21,7 +21,7 @@ from lsfmgr.options import Options
 def test_retry_ledger_does_not_wait_on_the_busy_context_lock(qtbot, fake_lsf):
     """ctx.lock을 다른 스레드가 쥐고 있어도 재시도 접수는 막히지 않는다."""
     mgr = LsfJobManager(store=InMemoryStore(),
-                        config=LsfConfig(rate_limit_per_s=None),
+                        config=LsfConfig(),
                         runner=fake_lsf)
     sub = mgr.submitter
     try:
@@ -60,7 +60,7 @@ def test_retry_storm_keeps_every_job(qtbot, fake_lsf):
     fake_lsf.fail_next_bsub = n              # 첫 시도 전량 실패
     mgr = LsfJobManager(
         store=InMemoryStore(),
-        config=LsfConfig(rate_limit_per_s=None, retry_delay_s=0.02,
+        config=LsfConfig(retry_delay_s=0.02,
                          retry_backoff=1.0),
         runner=fake_lsf)
     try:

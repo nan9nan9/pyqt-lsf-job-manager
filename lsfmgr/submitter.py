@@ -38,7 +38,7 @@ from .qt import (
 from .reports import SubmitProgress, SubmitReport
 from .states import JobState
 from .store.base import JobSetStore
-from .util import EmitThrottler, TokenBucketLimiter, WorkerSlots
+from .util import EmitThrottler, WorkerSlots
 
 log = logging.getLogger("lsfmgr.submit")
 
@@ -64,7 +64,6 @@ class _SubmitContext:
     #: 이 사이클의 동시 제출 상한 — 호출별 workers가 전역 상한보다 **낮을 때**만
     #: 실제로 조인다(같으면 공용 풀 크기에 이미 걸려 무해한 통과다).
     slots: WorkerSlots
-    limiter: TokenBucketLimiter
     options: Options = field(default_factory=Options)
     throttler: EmitThrottler = field(default_factory=EmitThrottler)
     cancel_event: threading.Event = field(default_factory=threading.Event)
@@ -172,11 +171,11 @@ class _SubmitTask(QRunnable):
             # 리셋 배치가 이미 발행했고, 거기에 또 얹으면 대량 제출에서
             # job 수만큼 중복 레코드가 흐른다.
             sub._note_transition(ctx, starting)
-        if not ctx.limiter.acquire(ctx.cancel_event):   # rate limit
-            sub._task_cancelled(ctx, self.job_key)
-            return
         # 이 사이클의 동시 제출 상한 — 호출별 workers가 전역보다 낮을 때만
         # 실제로 막는다. 취소를 보며 기다려 kill이 슬롯 대기에 갇히지 않는다.
+        # (v11: 초당 상한 rate_limit_per_s는 삭제됐다 — 공용 풀에서 그 대기가
+        #  worker 슬롯을 물고 있어 다른 jobset을 굶겼고, 전역 workers가
+        #  생기면서 실효도 사라졌다. 초당 ≈ workers / bsub 1회 소요.)
         if not ctx.slots.acquire(self._cancelled):
             sub._task_cancelled(ctx, self.job_key)
             return
@@ -195,8 +194,8 @@ class _SubmitTask(QRunnable):
 
     def _submit_once(self, sub, ctx):
         """[worker] 슬롯을 쥔 채 wrapper 1회 실행 — 여기서만 bsub가 돈다."""
-        # rate limit / 슬롯 대기 사이에 kill 대상이 됐을 수 있다 — 대기가
-        # 끝난 지금 다시 확인해, 그 job은 wrapper를 돌리지 않고 CANCELLED로.
+        # 슬롯 대기 사이에 kill 대상이 됐을 수 있다 — 대기가 끝난 지금 다시
+        # 확인해, 그 job은 wrapper를 돌리지 않고 CANCELLED로 확정한다.
         if self._cancelled():
             sub._task_cancelled(ctx, self.job_key)
             return
@@ -490,7 +489,6 @@ class BulkSubmitter(QObject):
             # 호출별 workers는 전역 상한 **아래로 낮추는** 용도다 — 올려도
             # 공용 풀 크기를 못 넘는다.
             slots=WorkerSlots(min(options.workers, self._workers)),
-            limiter=TokenBucketLimiter(options.rate_limit_per_s),
             throttler=self._make_throttler(), options=options)
         with self._ctx_lock:
             self._contexts[jobset_id] = ctx

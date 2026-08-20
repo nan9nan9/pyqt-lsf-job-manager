@@ -18,7 +18,7 @@ from tests.conftest import submit_cmds
 
 
 def _cmd(fake):
-    return LsfCommand(config=LsfConfig(rate_limit_per_s=None, ), runner=fake)
+    return LsfCommand(config=LsfConfig(), runner=fake)
 
 
 def test_no_bjobs_call_uses_all_flag(qtbot, manager, fake_lsf):

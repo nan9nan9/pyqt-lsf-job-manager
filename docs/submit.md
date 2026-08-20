@@ -143,11 +143,15 @@ exec bsub "$@"      # bsub 의 stdout("Job <id> ...")·exit code 를 그대로 �
 
 - lsfmgr 는 **job(커맨드) 하나마다 wrapper 프로세스를 subprocess 로 하나** 띄운다
   (shell 미경유).
-- 동시에 뜨는 프로세스 수 = `workers` 옵션(기본 8, 1~64).
-  `rate_limit_per_s` 로 초당 실행 횟수도 제한한다.
+- 동시에 뜨는 프로세스 수 = `workers` 옵션(기본 8, 1~64). **전역 상한**이라
+  jobset 을 몇 개 동시에 제출하든 총합이 이 값을 넘지 않는다.
+- 초당 제출 수는 별도 노브가 없다 — `workers` 와 bsub 1회 소요로 정해진다
+  (≈ `workers` / bsub_소요). 더 눌러야 하면 `workers` 를 낮춘다.
+  (v11: `rate_limit_per_s` 삭제 — 사이클별이라 동시 제출 수만큼 곱해졌고,
+   공용 풀에서 그 대기가 worker 슬롯을 물고 있어 다른 jobset 을 굶겼다.)
 
 ```python
-mgr.submit(js, workers=8, rate_limit_per_s=20, max_retry=3)
+mgr.submit(js, workers=8, max_retry=3)
 ```
 
 - 대량 제출 시 wrapper 가 수십 개 병렬로 실행된다. wrapper 는 병렬·재진입에

@@ -16,7 +16,7 @@ def fake_lsf():
 @pytest.fixture
 def config(tmp_path):
     # 테스트는 빠르게: retry delay 최소화
-    return LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05, retry_backoff=1.0,
+    return LsfConfig(retry_delay_s=0.05, retry_backoff=1.0,
                      kill_retry_delay_s=0.05)
 
 

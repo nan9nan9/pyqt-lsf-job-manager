@@ -15,7 +15,7 @@ def test_cmd_tokens_str_and_list():
 
 def test_wrapper_argmax_accounts_prefix(fake_lsf):
     """chunk base_len이 wrapper 토큰 총 길이를 반영 (ARG_MAX 안전)."""
-    cfg = LsfConfig(rate_limit_per_s=None, bkill_path=["bkill", "--force"])
+    cfg = LsfConfig(bkill_path=["bkill", "--force"])
     cmd = LsfCommand(cfg, runner=fake_lsf)
     assert cmd._prog_len(cfg.bkill_path) == len("bkill") + 1 \
         + len("--force") + 1

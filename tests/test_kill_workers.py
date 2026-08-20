@@ -46,7 +46,7 @@ class _WatchBkill:
 def _kill_all(qtbot, runner, n, **cfg):
     mgr = LsfJobManager(
         store=InMemoryStore(),
-        config=LsfConfig(rate_limit_per_s=None, **cfg),
+        config=LsfConfig(**cfg),
         runner=runner)
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=60000):
@@ -110,7 +110,7 @@ def test_progress_never_goes_backwards(qtbot, fake_lsf):
     seen = []
     mgr = LsfJobManager(
         store=InMemoryStore(),
-        config=LsfConfig(rate_limit_per_s=None, kill_chunk_size=4,
+        config=LsfConfig(kill_chunk_size=4,
                          kill_workers=4, progress_min_interval_s=0.0,
                          progress_min_step_ratio=0.0),
         runner=_WatchBkill(fake_lsf, delay=0.01))
@@ -156,7 +156,7 @@ def test_qt_signals_are_not_emitted_from_executor_threads(qtbot, fake_lsf):
     killer_mod._KillTask._emit_progress = spy
     mgr = LsfJobManager(
         store=InMemoryStore(),
-        config=LsfConfig(rate_limit_per_s=None, kill_chunk_size=4,
+        config=LsfConfig(kill_chunk_size=4,
                          kill_workers=4, progress_min_interval_s=0.0,
                          progress_min_step_ratio=0.0),
         runner=_WatchBkill(fake_lsf, delay=0.01))
@@ -179,7 +179,7 @@ def test_shutdown_during_a_parallel_kill_leaves_no_threads(qtbot, fake_lsf):
     """chunk가 병렬로 도는 한복판에 shutdown — 좀비 스레드가 남으면 안 된다."""
     mgr = LsfJobManager(
         store=InMemoryStore(),
-        config=LsfConfig(rate_limit_per_s=None, kill_chunk_size=4,
+        config=LsfConfig(kill_chunk_size=4,
                          kill_workers=8),
         runner=_WatchBkill(fake_lsf, delay=0.3))
     with qtbot.waitSignal(mgr.submit_finished, timeout=30000):
@@ -202,7 +202,7 @@ def test_parallel_kill_under_stress_keeps_every_contract(qtbot, fake_lsf):
     progress = []
     mgr = LsfJobManager(
         store=InMemoryStore(),
-        config=LsfConfig(rate_limit_per_s=None, kill_chunk_size=4,
+        config=LsfConfig(kill_chunk_size=4,
                          kill_workers=16, kill_retry_delay_s=0.01,
                          progress_min_interval_s=0.0,
                          progress_min_step_ratio=0.0),

@@ -4,7 +4,7 @@
 (v10.1: basic_example / handler_example / mc_example 을 이 파일 하나로 통합)
 
   - create_jobset → submit: wrapper 커맨드 그대로 실행, `Job <id>` 캡처 관리
-    (진행률 바 / 취소 / rate limit / retry)
+    (진행률 바 / 취소 / retry)
   - 다중 JobSet 트리 + 요약 실시간 갱신 + job 테이블 증분 upsert (README §5)
   - job 추가는 **add_jobs**: 기존 jobset 에 직접 추가
   - 실패 재실행: **replace_jobs** 로 교체 후 `submit(only=…)` 로 그것만 재제출
@@ -124,9 +124,6 @@ class SubmitForm(QGroupBox):
         self.count = QSpinBox(minimum=1, maximum=10000, value=30)
         self.workers = QSpinBox(minimum=1, maximum=32, value=8)
         self.max_retry = QSpinBox(minimum=0, maximum=10, value=3)
-        # 0=무제한. 기본 20 — 동시 제출이 LSF 인증(eauth)을 두들겨 bsub가
-        # 간헐적으로 "User permission denied"로 떨어지는 것을 완화한다.
-        self.rate = QSpinBox(minimum=0, maximum=1000, value=20)
         self.wrapper = QComboBox()
         self.wrapper.addItems(WRAPPERS + ["혼합(mix)"])
         self.queue = QLineEdit("normal")          # wrapper 에 -q 로 전달
@@ -157,7 +154,6 @@ class SubmitForm(QGroupBox):
         form.addRow("job 수", self.count)
         form.addRow("workers", self.workers)
         form.addRow("max_retry", self.max_retry)
-        form.addRow("rate_limit/s", self.rate)
         form.addRow("wrapper", self.wrapper)
         form.addRow("queue", self.queue)
         form.addRow("label", self.label)
@@ -194,8 +190,6 @@ class SubmitForm(QGroupBox):
                   max_retry=self.max_retry.value(),
                   label=self.label.text(),
                   auto_poll=self.auto_poll.isChecked())
-        if self.rate.value() > 0:
-            kw["rate_limit_per_s"] = self.rate.value()
         return kw
 
 

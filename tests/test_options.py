@@ -21,7 +21,6 @@ def test_builtin_defaults_only():
     assert opts.workers == 8
     assert opts.max_retry == 3
     assert opts.retry_backoff == "fixed:2"
-    assert opts.rate_limit_per_s == 20.0    # bsub 초당 호출 제한(기본 켜짐)
     assert opts.poll_interval_s == 10.0
     assert opts.auto_poll is True
     assert opts.verify_kill is False
@@ -35,14 +34,10 @@ def test_manager_layer_overrides_builtin():
 
 
 def test_call_layer_overrides_manager():
-    manager_defaults = {"workers": 32, "max_retry": 5,
-                        "rate_limit_per_s": 5.0}
-    opts = resolve_options(manager_defaults,
-                           {"workers": 8, "max_retry": 0,
-                            "rate_limit_per_s": 2.0})
+    manager_defaults = {"workers": 32, "max_retry": 5}
+    opts = resolve_options(manager_defaults, {"workers": 8, "max_retry": 0})
     assert opts.workers == 8
     assert opts.max_retry == 0                 # 0 == 재시도 없음
-    assert opts.rate_limit_per_s == 2.0
 
 
 def test_frozen_options():
@@ -80,7 +75,6 @@ def test_kill_context_allows_only_verify():
     {"max_retry": -1},
     {"poll_interval_s": 4}, {"poll_interval_s": 61},
     {"retry_backoff": "linear:3"}, {"retry_backoff": "fixed"},
-    {"rate_limit_per_s": 0},
     {"submit_timeout_s": -1},
 ])
 def test_range_violation_valueerror(kwargs):
@@ -92,9 +86,9 @@ def test_progress_throttle_option_validation():
     """progress throttle 옵션 검증 + config 반영."""
     from lsfmgr import LsfConfig
     with pytest.raises(ValueError):
-        LsfConfig(rate_limit_per_s=None, progress_min_step_ratio=2.0)      # 0~1 초과
+        LsfConfig(progress_min_step_ratio=2.0)      # 0~1 초과
     with pytest.raises(ValueError):
-        LsfConfig(rate_limit_per_s=None, progress_min_interval_s=-0.1)      # 음수
+        LsfConfig(progress_min_interval_s=-0.1)      # 음수
 
 
 def test_config_retry_backoff_string_rejected():
@@ -103,11 +97,11 @@ def test_config_retry_backoff_string_rejected():
     생성 시점에 명확한 ValueError."""
     from lsfmgr import LsfConfig
     with pytest.raises(ValueError):
-        LsfConfig(rate_limit_per_s=None, retry_backoff="fixed:2")
+        LsfConfig(retry_backoff="fixed:2")
     # 숫자는 float로 정규화
-    assert LsfConfig(rate_limit_per_s=None, retry_backoff=2).retry_backoff == 2.0
-    assert isinstance(LsfConfig(rate_limit_per_s=None, retry_backoff=1).retry_backoff, float)
-    cfg = LsfConfig(rate_limit_per_s=None, progress_min_interval_s=0.5, progress_min_step_ratio=0.1)
+    assert LsfConfig(retry_backoff=2).retry_backoff == 2.0
+    assert isinstance(LsfConfig(retry_backoff=1).retry_backoff, float)
+    cfg = LsfConfig(progress_min_interval_s=0.5, progress_min_step_ratio=0.1)
     assert cfg.progress_min_interval_s == 0.5
     assert cfg.progress_min_step_ratio == 0.1
 

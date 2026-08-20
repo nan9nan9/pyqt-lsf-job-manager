@@ -17,7 +17,7 @@ DWELL = 0.4          # 테스트는 짧은 dwell로 — 계약은 값과 무관
 
 @pytest.fixture
 def paced_manager(qtbot, fake_lsf):
-    cfg = LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05, retry_backoff=1.0,
+    cfg = LsfConfig(retry_delay_s=0.05, retry_backoff=1.0,
                     kill_retry_delay_s=0.05, min_state_dwell_s=DWELL)
     mgr = LsfJobManager(store=InMemoryStore(), config=cfg, runner=fake_lsf)
     yield mgr
@@ -143,7 +143,7 @@ def test_off_by_default(qtbot, manager):
 
 def test_shutdown_flushes_pending(qtbot, fake_lsf):
     """종료 시 밀린 전이는 유실되지 않고 즉시 발화된다."""
-    cfg = LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05, retry_backoff=1.0,
+    cfg = LsfConfig(retry_delay_s=0.05, retry_backoff=1.0,
                     min_state_dwell_s=30.0)      # 타이머로는 절대 안 빠질 dwell
     mgr = LsfJobManager(store=InMemoryStore(), config=cfg, runner=fake_lsf)
     try:
@@ -180,6 +180,6 @@ def test_removed_job_does_not_resurrect(qtbot, paced_manager):
 
 def test_negative_dwell_rejected():
     with pytest.raises(ValueError):
-        LsfConfig(rate_limit_per_s=None, min_state_dwell_s=-1.0)
+        LsfConfig(min_state_dwell_s=-1.0)
     with pytest.raises(ValueError):
         LsfJobManager(min_state_dwell_s=-1.0)

@@ -32,7 +32,7 @@ def _gated_runner(fake: FakeLsf, gate: threading.Event):
 def test_submit_is_nonblocking_and_snapshot(qtbot, tmp_path):
     fake = FakeLsf()
     gate = threading.Event()
-    cfg = LsfConfig(rate_limit_per_s=None, )
+    cfg = LsfConfig()
     mgr = LsfJobManager(store=InMemoryStore(), config=cfg,
                         runner=_gated_runner(fake, gate))
     try:
@@ -76,7 +76,7 @@ def test_snapshot_counts_progress(qtbot, tmp_path):
     fake.fail_next_bsub = 5           # 앞 5건 실패(재시도 없음)
     gate = threading.Event()
     gate.set()                        # 붙잡지 않음 — 자연 완료
-    cfg = LsfConfig(rate_limit_per_s=None, )
+    cfg = LsfConfig()
     mgr = LsfJobManager(store=InMemoryStore(), config=cfg,
                         runner=_gated_runner(fake, gate))
     try:

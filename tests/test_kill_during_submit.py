@@ -42,7 +42,7 @@ class SlowSubmitLsf(FakeLsf):
 
 def _mgr(fake):
     return LsfJobManager(store=InMemoryStore(),
-                         config=LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05), runner=fake)
+                         config=LsfConfig(retry_delay_s=0.05), runner=fake)
 
 
 def _jobset(mgr, keys):
@@ -112,7 +112,7 @@ def test_selection_kill_aborts_only_target_retries(qtbot):
     """선택 kill은 대상의 재시도 대기만 포기시킨다 — 남은 job은 재시도로 제출."""
     fake = FakeLsf()
     mgr = LsfJobManager(store=InMemoryStore(),
-                        config=LsfConfig(rate_limit_per_s=None, retry_delay_s=0.3), runner=fake)
+                        config=LsfConfig(retry_delay_s=0.3), runner=fake)
     try:
         keys = ["a", "b"]
         js = _jobset(mgr, keys)

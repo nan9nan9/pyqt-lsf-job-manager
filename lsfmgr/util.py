@@ -1,55 +1,8 @@
-"""공용 유틸 — thread-safe rate limiter 등 (Qt 비의존)."""
+"""공용 유틸 — 동시 제출 슬롯 / 발화 스로틀 / 활동 원장 (Qt 비의존)."""
 from __future__ import annotations
 
 import threading
 import time
-from typing import Optional
-
-
-#: 버킷 용량 = rate × 이 배수. eauth를 두들기는 건 **지속 부하**이지 짧은
-#: 버스트가 아니므로, 소량 제출은 제한 없이 통과시키고 대량 제출만 초당
-#: rate로 눌러야 한다. 용량이 rate와 같으면(옛 기본값) 30건짜리 소량 제출도
-#: 5초씩 걸렸다(rate=5 기준 실측).
-BURST_FACTOR = 10
-
-
-class TokenBucketLimiter:
-    """token bucket 방식 rate limiter.
-
-    rate_per_s가 None이면 무제한. acquire()는 토큰 확보까지 짧게 대기하며,
-    cancel_event가 set되면 False를 반환하고 즉시 빠져나온다.
-
-    burst 미지정이면 rate × BURST_FACTOR — "버킷 용량만큼은 즉시, 그 뒤로는
-    초당 rate". ※ limiter는 **제출 사이클 1건당 하나**라 버킷도 사이클마다
-    새로 찬다: 소량 제출을 연달아 하면 매번 용량만큼 즉시 나간다. 동시 실행
-    수는 그와 별개로 workers가 계속 제한한다.
-    """
-
-    def __init__(self, rate_per_s: Optional[float], burst: Optional[int] = None):
-        self.rate = float(rate_per_s) if rate_per_s else 0.0
-        self.capacity = float(burst if burst is not None
-                              else max(1.0, self.rate * BURST_FACTOR))
-        self._tokens = self.capacity
-        self._last = time.monotonic()
-        self._lock = threading.Lock()
-
-    def acquire(self, cancel_event: Optional[threading.Event] = None) -> bool:
-        if self.rate <= 0:
-            return True
-        while True:
-            with self._lock:
-                now = time.monotonic()
-                self._tokens = min(self.capacity,
-                                   self._tokens + (now - self._last) * self.rate)
-                self._last = now
-                if self._tokens >= 1.0:
-                    self._tokens -= 1.0
-                    return True
-                wait = (1.0 - self._tokens) / self.rate
-            if cancel_event is not None and cancel_event.wait(min(wait, 0.05)):
-                return False
-            if cancel_event is None:
-                time.sleep(min(wait, 0.05))
 
 
 class WorkerSlots:

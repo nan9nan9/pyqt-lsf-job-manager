@@ -20,7 +20,7 @@ log = logging.getLogger("lsfmgr.options")   # 모듈 로거 (코드베이스 관
 # ----------------------------------------------------------------------
 #: ②(manager)·③(call) 공통 튜닝 옵션
 SHARED_KEYS = frozenset({
-    "workers", "max_retry", "retry_backoff", "rate_limit_per_s",
+    "workers", "max_retry", "retry_backoff",
     "poll_interval_s", "auto_poll",
     "submit_timeout_s", "verify_kill",
 })
@@ -33,7 +33,12 @@ SHARED_KEYS = frozenset({
 #: label/tags/description: submit이 jobset을 만들던 시절(v9 이전)의 메타
 #: 인자 — jobset 메타는 create_jobset 인자다. 받아서 검증만 하고 아무도
 #: 읽지 않던 함정이라 경고-무시로 강등.
+#: rate_limit_per_s: 초당 제출 상한(v11 삭제). 동시 제출 수만큼 곱해지는
+#: 사이클별 값이었고, workers가 전역 상한이 되면서 실효가 사라졌다. 게다가
+#: 공용 풀에서 rate 대기가 worker 슬롯을 물고 있어 다른 jobset을 굶겼다.
+#: 초당 상한이 필요하면 workers를 낮춘다(초당 ≈ workers / bsub 1회 소요).
 DEPRECATED_KEYS = frozenset({
+    "rate_limit_per_s",
     "script_dir",
     "queue", "resource_req", "output_dir",
     "default_queue", "lsf_group_root", "bsub_path", "bgdel_path",
@@ -67,7 +72,6 @@ class Options:
     workers: int = 8
     max_retry: int = 3
     retry_backoff: str = "fixed:2"
-    rate_limit_per_s: Optional[float] = 20.0
     poll_interval_s: float = 10.0
     auto_poll: bool = True
     submit_timeout_s: float = 30.0
@@ -158,12 +162,6 @@ def _backoff(_key: str, value: Any) -> str:
     return str(value)
 
 
-def _rate_limit(key: str, value: Any) -> Optional[float]:
-    if value is not None and float(value) <= 0:
-        raise ValueError(f"{key}는 양수 또는 None (got {value})")
-    return None if value is None else float(value)
-
-
 def _opt_float_min(lo: float = 0.0):
     """None 허용 float 하한 검증 — None은 '기본값에 맡김'."""
     def check(key: str, value: Any) -> Optional[float]:
@@ -193,7 +191,6 @@ _VALIDATORS: Dict[str, Any] = {
     "workers": _int_in(1, 64),
     "max_retry": _int_in(0),
     "retry_backoff": _backoff,
-    "rate_limit_per_s": _rate_limit,
     "poll_interval_s": _float_in(5.0, 60.0),
     "submit_timeout_s": _float_min(positive=True),
     "auto_poll": _bool,

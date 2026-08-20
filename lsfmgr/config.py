@@ -77,27 +77,14 @@ class LsfConfig:
     #: **전역**이다 — submitter가 공용 QThreadPool 하나를 쓰므로 jobset을 몇 개
     #: 동시에 제출하든 총합이 이 값을 넘지 않는다. 호출별 workers는 이 값
     #: **아래로 낮추는** 용도다(올려도 공용 풀 크기를 못 넘는다).
-    #: ⚠ rate_limit_per_s는 아직 사이클별이다(동시 제출 수만큼 배수).
     #: 크게 잡으면 submit 호스트 CPU/RAM과 LSF master(mbatchd/eauth)를 함께
-    #: 두들겨 bsub가 간헐적으로 "User permission denied"로 떨어진다.
-    #: rate_limit_per_s(초당 호출)와 축이 다르다 — 이건 '동시에 몇 개',
-    #: 저건 '초당 몇 번'이라 둘 다 걸어야 부하가 잡힌다.
+    #: 두들겨 bsub가 간헐적으로 "User permission denied"(exit 255)로 떨어진다.
+    #: **제출 부하를 정하는 유일한 노브**다 (v11: rate_limit_per_s 삭제 —
+    #: 초당 상한은 이 값과 bsub 1회 소요로 이미 결정된다: workers/bsub_소요).
     workers: int = 8
     max_retry: int = 3                   # submit 재시도 횟수
     retry_delay_s: float = 2.0           # 첫 재시도 대기 (v7 기본 "fixed:2")
     retry_backoff: float = 1.0           # >1.0이면 지수 backoff("expo")
-    #: bsub 초당 호출 제한. **제출 사이클 1건당**이다 — jobset 2개를 동시에
-    #: 제출하면 전역 실효 상한이 2배가 된다(실측: 설정 20 → 지속 41/s).
-    #: 기본 20 — 동시 제출이 LSF 인증(eauth)/mbatchd를
-    #: 두들기면 bsub가 간헐적으로 "User permission denied"(exit 255)로 떨어진다.
-    #: 재시도로 결국 성공하긴 하지만 제출이 느려지고 로그가 시끄러워진다.
-    #: workers(동시 실행 수)와 함께 건다 — 부하를 정하는 건 '몇 개가 동시에
-    #: 붙느냐'보다 '초당 몇 번 붙느냐'인 경우가 많다.
-    #: None이면 제한 없음(빠르지만 대량 제출에서 위 증상 위험).
-    #: ⚠ 지속 처리량 상한이 그대로 이 값이다 — 20이면 5000 job에 약 4분,
-    #: 20000 job에 약 17분(실측 기준). 버킷 용량(rate×10)만큼은 즉시 나가므로
-    #: 소량 제출은 영향을 받지 않는다 (lsfmgr/util.py BURST_FACTOR).
-    rate_limit_per_s: Optional[float] = 20.0
 
     #: bkill 1회에 실을 target 수. 조회(chunk_size)와 **따로 두는 이유**:
     #: bjobs는 읽기라 500건도 금방 끝나지만 bkill은 job마다 mbatchd가 실제

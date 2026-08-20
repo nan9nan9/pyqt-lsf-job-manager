@@ -15,7 +15,7 @@ python examples/gui_demo.py   # 통합 GUI 데모
 
 | 영역 | 데모하는 기능 |
 |---|---|
-| Submit 옵션 폼 | `create_jobset`+`submit`, wrapper 선택/혼합, `workers`/`max_retry`/`rate_limit_per_s`, queue |
+| Submit 옵션 폼 | `create_jobset`+`submit`, wrapper 선택/혼합, `workers`/`max_retry`, queue |
 | 진행률 바 / Cancel | progress throttle, `cancel_submit` 안전 중단 |
 | JobSet 트리 | 다중 JobSet 요약 실시간 갱신, `mgr.*` 전역 Signal 스트림 |
 | job 테이블 | 변경분 배치 **증분 upsert**(전체 재그리기 금지), 상태별 색, cluster 열 |

@@ -46,7 +46,7 @@ class _Peak:
 def _submit_many(qtbot, fake_lsf, n_sets, per_set=40, call_workers=None, **kw):
     w = _Peak(fake_lsf)
     mgr = LsfJobManager(store=InMemoryStore(),
-                        config=LsfConfig(rate_limit_per_s=None),
+                        config=LsfConfig(),
                         runner=w, **kw)
     try:
         sets = [mgr.create_jobset(
@@ -92,7 +92,7 @@ def test_kill_quiesce_is_scoped_to_its_own_cycle(qtbot, fake_lsf):
     사이클 카운터(done/total)로 바꿨다."""
     w = _Peak(fake_lsf, cost=0.05)
     mgr = LsfJobManager(store=InMemoryStore(),
-                        config=LsfConfig(rate_limit_per_s=None),
+                        config=LsfConfig(),
                         runner=w, workers=4)
     try:
         long_js = mgr.create_jobset([f"mytool a{i}.sp" for i in range(400)],
@@ -120,7 +120,7 @@ def test_full_kill_still_quiesces_its_own_submit(qtbot, fake_lsf):
     """반대 방향 — 제출 중인 그 jobset을 kill하면 제출이 실제로 멎어야 한다
     (미착수분 CANCELLED, 이미 나간 것만 EXIT)."""
     mgr = LsfJobManager(store=InMemoryStore(),
-                        config=LsfConfig(rate_limit_per_s=None),
+                        config=LsfConfig(),
                         runner=_Peak(fake_lsf, cost=0.02), workers=4)
     try:
         js = mgr.create_jobset([f"mytool {i}.sp" for i in range(200)],
@@ -147,7 +147,7 @@ def test_full_kill_still_quiesces_its_own_submit(qtbot, fake_lsf):
 def test_cancel_is_not_stuck_behind_a_slot_wait(qtbot, fake_lsf):
     """슬롯 대기 중에도 취소가 먹혀야 한다."""
     mgr = LsfJobManager(store=InMemoryStore(),
-                        config=LsfConfig(rate_limit_per_s=None),
+                        config=LsfConfig(),
                         runner=_Peak(fake_lsf, cost=0.1), workers=2)
     try:
         js = mgr.create_jobset([f"mytool {i}.sp" for i in range(300)],
@@ -174,7 +174,7 @@ def test_thread_count_does_not_grow_with_jobsets(qtbot, fake_lsf):
 
     base = os_threads()
     mgr = LsfJobManager(store=InMemoryStore(),
-                        config=LsfConfig(rate_limit_per_s=None),
+                        config=LsfConfig(),
                         runner=_Peak(fake_lsf, cost=0.05), workers=8)
     try:
         sets = [mgr.create_jobset([f"mytool {k}_{i}.sp" for i in range(30)],

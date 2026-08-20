@@ -211,7 +211,7 @@ def test_cancel_marks_cancelled_and_clears_failure_residue(qtbot, manager,
     from lsfmgr.options import Options
     from lsfmgr.states import JobRecord
     from lsfmgr.submitter import _SubmitContext
-    from lsfmgr.util import TokenBucketLimiter, WorkerSlots
+    from lsfmgr.util import WorkerSlots
 
     jsid = mk_jobset(manager, intended_count=1).id
     key = f"{jsid}_0"
@@ -222,7 +222,6 @@ def test_cancel_marks_cancelled_and_clears_failure_residue(qtbot, manager,
         command="echo x")])
     ctx = _SubmitContext(jobset_id=jsid, total=1,
                          slots=WorkerSlots(8),
-                         limiter=TokenBucketLimiter(None),
                          options=Options())
 
     manager.submitter._mark_cancelled(ctx, [key])

@@ -305,9 +305,8 @@ def test_retention_zero_disables_expiry():
 # ----------------------------------------------------------------------
 def test_fetcher_presence_alone_selects_the_callback_source():
     """모드 전환의 스위치는 job_status_fetcher 하나뿐이다."""
-    assert LsfCommand(LsfConfig(rate_limit_per_s=None, )).internal_status is None
-    cmd = LsfCommand(LsfConfig(rate_limit_per_s=None,
-                               job_status_fetcher=lambda: _payload()))
+    assert LsfCommand(LsfConfig()).internal_status is None
+    cmd = LsfCommand(LsfConfig(job_status_fetcher=lambda: _payload()))
     assert cmd.internal_status is not None
 
 
@@ -315,8 +314,7 @@ def test_explicit_bjobs_path_is_warned_as_ignored(caplog):
     """콜백을 주면 bjobs_path는 아무 데도 안 쓰인다 — mock bjobs를 가리켜
     놓고 '왜 안 불리지' 하는 것을 막는다."""
     with caplog.at_level("WARNING", logger="lsfmgr.command"):
-        cmd = LsfCommand(LsfConfig(rate_limit_per_s=None,
-                                   bjobs_path="/opt/mock/bjobs",
+        cmd = LsfCommand(LsfConfig(bjobs_path="/opt/mock/bjobs",
                                    job_status_fetcher=lambda: _payload()))
     assert cmd.internal_status is not None
     warns = [r for r in caplog.records if "무시됩니다" in r.message]
@@ -327,8 +325,7 @@ def test_poll_runtime_updates_reaches_the_source():
     """monitor가 run_time 변화를 버리는 설정(기본)이면 원장도 그 값을
     안 만들어야 한다 — 두 곳이 어긋나면 조회마다 전수 스캔이 그냥 낭비다."""
     def cmd(runtime):
-        return LsfCommand(LsfConfig(rate_limit_per_s=None,
-                                    poll_runtime_updates=runtime,
+        return LsfCommand(LsfConfig(poll_runtime_updates=runtime,
                                     job_status_fetcher=lambda: _payload()))
     assert cmd(False).internal_status._track_runtime is False
     assert cmd(True).internal_status._track_runtime is True
@@ -368,8 +365,7 @@ def test_removed_jobs_are_dropped_from_the_ledger(qtbot, fake_lsf):
 def test_default_bjobs_path_is_not_warned(caplog):
     """안 건드린 기본값까지 경고하면 정상 사용에 잡음만 남는다."""
     with caplog.at_level("WARNING", logger="lsfmgr.command"):
-        LsfCommand(LsfConfig(rate_limit_per_s=None,
-                             job_status_fetcher=lambda: _payload()))
+        LsfCommand(LsfConfig(job_status_fetcher=lambda: _payload()))
     assert not [r for r in caplog.records if "무시됩니다" in r.message]
 
 
@@ -390,8 +386,8 @@ def test_ignore_warning_fires_once_per_manager(qtbot, fake_lsf, caplog):
 
 
 def test_default_refresh_interval_is_half_the_poll_interval():
-    assert LsfConfig(rate_limit_per_s=None, poll_interval_s=10.0).effective_internal_refresh_min_s == 5.0
-    assert LsfConfig(rate_limit_per_s=None, internal_refresh_min_s=0.0
+    assert LsfConfig(poll_interval_s=10.0).effective_internal_refresh_min_s == 5.0
+    assert LsfConfig(internal_refresh_min_s=0.0
                      ).effective_internal_refresh_min_s == 0.0
 
 
@@ -404,7 +400,7 @@ def test_polling_updates_state_without_running_bjobs(qtbot, fake_lsf):
 
     mgr = LsfJobManager(
         store=InMemoryStore(),
-        config=LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05,
+        config=LsfConfig(retry_delay_s=0.05,
                          internal_refresh_min_s=0.0,
                          job_status_fetcher=fetch),
         runner=fake_lsf)
@@ -435,7 +431,7 @@ def test_lost_is_deferred_when_callback_is_down(qtbot, fake_lsf):
 
     mgr = LsfJobManager(
         store=InMemoryStore(),
-        config=LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05,
+        config=LsfConfig(retry_delay_s=0.05,
                          internal_refresh_min_s=0.0,
                          lost_after_missing_polls=1,
                          job_status_fetcher=fetch),
@@ -462,7 +458,7 @@ def _internal_mgr(fake_lsf, fetch, **cfg):
     cfg.setdefault("lost_after_missing_polls", 1)   # 유예가 없으면 즉시 LOST
     return LsfJobManager(
         store=InMemoryStore(),
-        config=LsfConfig(rate_limit_per_s=None, retry_delay_s=0.05,
+        config=LsfConfig(retry_delay_s=0.05,
                          job_status_fetcher=fetch, **cfg),
         runner=fake_lsf)
 
@@ -802,7 +798,7 @@ def test_manager_kwarg_poll_interval_reaches_the_source(qtbot, fake_lsf):
     """poll_interval_s는 MANAGER_ONLY가 아니라 _defaults로 가서 config에
     안 실린다 — 그대로 두면 앱 설정이 갱신 간격에 반영되지 않는다."""
     mgr = LsfJobManager(store=InMemoryStore(),
-                        config=LsfConfig(rate_limit_per_s=None,
+                        config=LsfConfig(
                                           retry_delay_s=0.05,
                                           job_status_fetcher=lambda: _payload()),
                         runner=fake_lsf, poll_interval_s=30.0)
