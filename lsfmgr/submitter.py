@@ -530,41 +530,37 @@ class BulkSubmitter(QObject):
                     timeout_s: float) -> bool:
         """범위 내 제출이 멎을 때까지 대기 — 반환: 시간 내 정지 여부.
 
-        전체(scope=None)는 **이 사이클의 작업 단위가 전부 소진**될 때까지
-        기다린다. 풀이 공용이라 pool.waitForDone은 쓸 수 없다 — 그건 "모든
-        jobset의 제출이 멎었는가"라서, A jobset의 kill이 B jobset의 제출을
-        기다리게 된다(전체 kill의 scope가 통째로 무너진다).
-        cancel_event는 caller(_cancel_scope)가 이미 세웠으므로 큐에 남은
-        task는 _enter_inflight에서 즉시 빠진다 — 따라서 done이 total에
-        도달하는 것이 곧 '이 사이클은 더 이상 bsub를 돌리지 않는다'이다.
+        판정은 **제출 구간(ctx.inflight)이 비었는가** 하나다. caller
+        (KillScope.acquire → begin)가 이미 취소를 걸어 뒀으므로 아직 시작 안 한
+        task는 _enter_inflight에서 그대로 빠진다 — 즉 큐에 남아 있는 것은 이미
+        '제출하지 않을 것'이라 기다릴 이유가 없다. 도는 중인 wrapper만
+        기다리면 되고, 그래야 job_id가 확보돼 killer의 key→id 해석이 그 id를
+        잡는다.
 
-        범위 지정은 그 key가 **제출 구간(inflight)**에서 빠질 때까지만
-        기다린다 — 대상 아닌 job의 제출이 끝나기를 기다릴 이유가 없다(그게
-        선택 kill의 요점). 이미 wrapper가 도는 대상은 여기서 기다려야 job_id가
-        확보돼, killer의 key→id 해석이 그 id를 잡아 확실히 죽인다."""
+        pool.waitForDone으로 판정하면 안 되고(공용 풀이라 남의 jobset까지
+        기다린다), 작업 단위 소진(done==total)으로 판정해서도 안 된다 —
+        공용 큐 뒤에 다른 jobset의 대량 작업이 밀려 있으면 이 사이클의 취소된
+        task가 dequeue되기까지 통째로 기다리게 된다(실측: 3000건 뒤에 선
+        20건짜리 kill이 7.9초, 백로그가 크면 타임아웃).
+
+        범위 지정(선택 kill)은 그 key만 본다 — 대상 아닌 job의 제출이 끝나기를
+        기다릴 이유가 없다(그게 선택 kill의 요점)."""
+        wanted = None if scope is None else set(scope)
+        if wanted is not None and not wanted:
+            return True
         deadline = time.monotonic() + timeout_s
-        if scope is None:
-            with ctx.inflight_cv:
-                while not ctx.finished and ctx.done < ctx.total:
-                    remain = deadline - time.monotonic()
-                    if remain <= 0:
-                        log.warning("제출 정지 대기 초과 %s: %d/%d 소진",
-                                    ctx.jobset_id, ctx.done, ctx.total)
-                        return False
-                    ctx.inflight_cv.wait(remain)
-            return True
-        wanted = set(scope)
-        if not wanted:
-            return True
         with ctx.inflight_cv:
-            while wanted & ctx.inflight:
+            while True:
+                busy = (ctx.inflight if wanted is None
+                        else wanted & ctx.inflight)
+                if not busy:
+                    return True
                 remain = deadline - time.monotonic()
                 if remain <= 0:
                     log.warning("제출 정지 대기 초과 %s: %d건 제출 중",
-                                ctx.jobset_id, len(wanted & ctx.inflight))
+                                ctx.jobset_id, len(busy))
                     return False
                 ctx.inflight_cv.wait(remain)
-        return True
 
     def _enter_inflight(self, ctx: _SubmitContext, job_key: str) -> bool:
         """제출 구간 진입 — 취소(사이클/job 단위) 중이면 False(진입 거부)."""
@@ -874,9 +870,6 @@ class BulkSubmitter(QObject):
             return
         with ctx.lock:
             ctx.done += n
-            # 전체 kill의 quiesce가 done/total로 정지를 판정한다 — 깨우지
-            # 않으면 타임아웃까지 잠들어 kill이 그만큼 밀린다.
-            ctx.inflight_cv.notify_all()
             if succeeded:
                 ctx.succeeded += n
             if failed:

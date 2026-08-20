@@ -192,3 +192,95 @@ def test_thread_count_does_not_grow_with_jobsets(qtbot, fake_lsf):
     # 제출 8 + 조율 8 + 폴링/killer/handler/completion 여유.
     # 사이클마다 풀을 만들면 8 x 8 = 64개라 이 선을 훌쩍 넘는다.
     assert grew <= 40, f"스레드가 {grew}개 늘었다 (풀이 사이클마다 생기는 셈)"
+
+
+# ----------------------------------------------------------------------
+# quiesce 판정 — 공용 풀에서 "제출이 멎었는가"를 무엇으로 보나
+# ----------------------------------------------------------------------
+def test_quiesce_wakes_on_a_gate_rejected_cycle(qtbot, fake_lsf):
+    """게이트 거부는 done을 total까지 올리지 않고 끝난다 — 작업 단위 소진으로
+    정지를 판정하면 그 사이 들어온 kill이 타임아웃(60s)까지 통째로 잠든다."""
+    mgr = LsfJobManager(store=InMemoryStore(), config=LsfConfig(),
+                        runner=fake_lsf)
+    try:
+        js = mgr.create_jobset([f"mytool {i}.sp" for i in range(20)],
+                               job_keys=[f"k{i}" for i in range(20)])
+
+        def slow_reject(cmds):
+            time.sleep(0.4)
+            return False
+
+        mgr.submit(js, auto_poll=False, pre_submit=slow_reject)
+        qtbot.wait(100)                          # 게이트 도는 중
+        t0 = time.perf_counter()
+        with qtbot.waitSignal(mgr.kill_finished, timeout=120000):
+            mgr.kill(js)
+        assert time.perf_counter() - t0 < 5.0
+    finally:
+        mgr.shutdown()
+
+
+def test_quiesce_does_not_wait_for_another_jobsets_backlog(qtbot, fake_lsf):
+    """공용 큐 뒤에 다른 jobset의 대량 작업이 밀려 있어도 kill은 안 밀린다.
+
+    큐에 남은 task는 cancel_event 때문에 _enter_inflight에서 그대로 빠진다 —
+    이미 '제출하지 않을 것'이라 dequeue를 기다릴 이유가 없다. 기다리면
+    3000건 뒤에 선 20건짜리 kill이 7.9초 걸린다(백로그가 크면 타임아웃)."""
+    def slow(argv, timeout, cwd=None):
+        if argv[0].rsplit("/", 1)[-1] not in ("bjobs", "bkill"):
+            time.sleep(0.01)
+        return fake_lsf(argv, timeout, cwd)
+
+    mgr = LsfJobManager(store=InMemoryStore(), config=LsfConfig(),
+                        runner=slow, workers=4)
+    try:
+        big = mgr.create_jobset([f"mytool B{i}.sp" for i in range(3000)],
+                                job_keys=[f"b{i}" for i in range(3000)])
+        small = mgr.create_jobset([f"mytool S{i}.sp" for i in range(20)],
+                                  job_keys=[f"s{i}" for i in range(20)])
+        mgr.submit(big, auto_poll=False)
+        qtbot.wait(300)
+        mgr.submit(small, auto_poll=False)
+        qtbot.wait(100)
+        t0 = time.perf_counter()
+        with qtbot.waitSignal(mgr.kill_finished, timeout=180000) as blk:
+            mgr.kill(small)
+        elapsed = time.perf_counter() - t0
+        assert not blk.args[1].errors, blk.args[1].errors
+        assert elapsed < 5.0, f"quiesce가 {elapsed:.1f}초 밀렸다"
+        mgr.cancel_submit(big)
+        qtbot.wait(1200)
+    finally:
+        mgr.shutdown()
+
+
+def test_quiesce_still_waits_for_a_running_wrapper(qtbot, fake_lsf):
+    """반대 방향 — 이미 도는 wrapper는 반드시 기다려야 한다. 안 기다리면
+    job_id가 확보되기 전에 kill이 끝나 그 job이 LSF에 살아남는다."""
+    started, release = threading.Event(), threading.Event()
+
+    def gated(argv, timeout, cwd=None):
+        if argv[0].rsplit("/", 1)[-1] in ("bjobs", "bkill"):
+            return fake_lsf(argv, timeout, cwd)
+        started.set()
+        release.wait(10.0)                       # wrapper가 도는 중
+        return fake_lsf(argv, timeout, cwd)
+
+    mgr = LsfJobManager(store=InMemoryStore(), config=LsfConfig(),
+                        runner=gated, workers=1)
+    try:
+        js = mgr.create_jobset(["mytool a.sp"], job_keys=["a"])
+        mgr.submit(js, auto_poll=False)
+        assert started.wait(10.0)
+        done = []
+        mgr.kill_finished.connect(lambda j, r: done.append(r))
+        mgr.kill(js)
+        qtbot.wait(400)
+        assert not done, "도는 wrapper를 안 기다리고 kill이 끝났다"
+        release.set()
+        qtbot.waitUntil(lambda: bool(done), timeout=30000)
+        qtbot.wait(300)
+        assert not fake_lsf.alive_jobs(), "제출된 job이 kill을 빠져나갔다"
+    finally:
+        release.set()
+        mgr.shutdown()
