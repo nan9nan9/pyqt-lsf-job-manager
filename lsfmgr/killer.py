@@ -529,34 +529,45 @@ class _KillTask(QRunnable):
         """생사 재조회로 '해소'를 판정한다 — bkill이 시간 내 반환하지 않은
         target 전용. 반환: (죽은 것으로 확인된 target 집합, LSF 호출 수).
 
-        조회가 실패한 job은 **해소로 치지 않는다** — 판단 근거가 없으므로
-        재시도 대상으로 남긴다("조회 장애 ≠ job 없음"과 같은 규칙).
-        판정은 잔존 술어(_alive_in)를 그대로 쓴다: 살아있지 않으면(부재·종료·
-        ZOMBI) 더 kill할 필요가 없다."""
-        whole, exact, ranges = classify_targets(targets)
-        pids = sorted(whole | {p for p, _ in exact}
-                      | {p for p, _, _ in ranges})
+        **모호하면 해소로 치지 않는다** — 여기서 잘못 "죽었다"고 접으면 그
+        target은 재시도 대상에서 빠져 살아있는 job이 kill을 빠져나간다.
+        보류하는 경우는 둘이다:
+          ① 조회 자체가 실패한 job ("조회 장애 ≠ job 없음"과 같은 규칙)
+          ② element/범위 target인데 조회가 **접힌 행**(array_index=None)만 준
+             경우 — 그 행은 여러 element의 합이라 특정 element의 생사를
+             판정할 수 없다(_alive_in이 element target에 접힌 행을 안 거는
+             것과 같은 이유).
+        그 외에는 잔존 술어(_alive_in)를 그대로 쓴다: 살아있지 않으면
+        (부재·종료·ZOMBI) 더 kill할 필요가 없다."""
+        pids = sorted({p for p in map(target_parent_id, targets)
+                       if p is not None})
         if not pids:
             return set(), 0
         try:
             # fresh — 방금 kill을 쏜 job의 생사는 캐시로 답할 수 없다
             sts, failed = self.killer.command.bjobs_by_ids(pids, fresh=True)
-        except LsfmgrError as e:
-            log.warning("kill timeout 후 생사 조회 실패(재시도로 넘김): %s", e)
+        except Exception as e:               # noqa: BLE001 — 부기용 조회다
+            log.warning("kill timeout 후 생사 조회 실패(재시도로 넘김): %r", e)
             return set(), 1
-        alive = {(st.job_id, st.array_index)
-                 for st in self._alive_in(sts, whole, exact, ranges)}
-        alive_pids = {jid for jid, _idx in alive}
+        rows: Dict[int, List] = {}
+        for st in sts:
+            rows.setdefault(st.job_id, []).append(st)
         gone = set()
         for t in targets:
             pid = target_parent_id(t)
             if pid is None or pid in failed:
-                continue                     # 판단 불가 — 재시도로 남긴다
-            if "[" in t:
-                idx = int(t.split("[", 1)[1].rstrip("]").split("-", 1)[0])
-                if (pid, idx) not in alive:
-                    gone.add(t)
-            elif pid not in alive_pids:
+                continue                     # ① 판단 불가 — 재시도로 남긴다
+            mine = rows.get(pid)
+            if not mine:
+                gone.add(t)                  # LSF가 그 id를 모른다 = 끝났다
+                continue
+            # target 하나씩 분류한다 — 범위("id[m-n]")도 규칙 소유자
+            # (classify_targets)가 그대로 해석하게 한다.
+            whole, exact, ranges = classify_targets([t])
+            if (exact or ranges) and any(st.array_index is None
+                                         for st in mine):
+                continue                     # ② 접힌 행 — element 판정 불가
+            if not self._alive_in(mine, whole, exact, ranges):
                 gone.add(t)
         if gone:
             log.info("bkill 중단분 %d건은 조회 결과 이미 죽었습니다 — "

@@ -76,3 +76,51 @@ def test_snapshot_queries_do_not_call_lsf(qtbot, manager, fake_lsf):
     _ = js.jobs(states={JobState.PEND})
     _ = js.id
     assert fake_lsf.calls == []                       # LSF 호출 없음
+
+
+# ----------------------------------------------------------------------
+# 신호 카탈로그 드리프트 — 문서에 없는 신호 / 신호 없는 문서 금지
+# ----------------------------------------------------------------------
+def _signal_names(cls):
+    from lsfmgr.manager import LsfJobManager as _M
+    sig_t = type(vars(_M)["submit_started"])
+    return {k for k, v in vars(cls).items()
+            if isinstance(v, sig_t) and not k.startswith("_")}
+
+
+def _doc_text(*names):
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent
+    return "\n".join((root / n).read_text(encoding="utf-8") for n in names)
+
+
+def test_every_signal_is_documented():
+    """신호를 추가하고 문서를 빼먹으면 앱은 그 신호의 존재를 모른다.
+    (반대 방향 — 문서에만 있고 코드엔 없는 신호 — 은 실제로 있었다:
+     js.submit_started가 문서에만 있어 구독하면 AttributeError였다.)"""
+    from lsfmgr.handle import JobSet
+    from lsfmgr.manager import LsfJobManager
+
+    docs = _doc_text("README.md", "docs/gui.md")
+    missing = sorted(n for n in _signal_names(LsfJobManager) | _signal_names(JobSet)
+                     if f"`{n}`" not in docs)
+    assert not missing, f"문서에 없는 신호: {missing}"
+
+
+def test_documented_signals_exist():
+    """README 신호표에 적힌 이름이 실제로 신호로 존재하는가."""
+    import re
+
+    from lsfmgr.handle import JobSet
+    from lsfmgr.manager import LsfJobManager
+
+    have = _signal_names(LsfJobManager) | _signal_names(JobSet)
+    text = _doc_text("README.md")
+    # 신호표 행: | `이름` | ... — 표 안의 백틱 이름만 후보로 본다
+    rows = re.findall(r"^\|\s*`([a-z_]+)`\s*\|", text, re.M)
+    # 신호처럼 생긴 것만(옵션/메서드 표와 섞이지 않게) — 코드에 있는 이름 기준
+    suspects = {r for r in rows
+                if r.endswith(("_started", "_finished", "_updated",
+                               "_progress", "_occurred", "_failed", "_lost"))}
+    ghosts = sorted(suspects - have)
+    assert not ghosts, f"문서에만 있고 코드엔 없는 신호: {ghosts}"

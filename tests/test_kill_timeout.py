@@ -180,3 +180,82 @@ def test_successful_kill_is_silent_on_the_error_signal(qtbot, manager):
         manager.kill(js)
     assert seen == []
     assert js.jobs()[0].state is JobState.EXIT
+
+
+# ----------------------------------------------------------------------
+# timeout 후 생사 판정 — 모호하면 '죽었다'로 접지 않는다
+# ----------------------------------------------------------------------
+def _task(mgr, rows):
+    """조회 결과를 고정한 _KillTask — _confirm_by_query 단위 검증용."""
+    from lsfmgr.killer import _KillTask
+    mgr.command.bjobs_by_ids = lambda ids, fresh=False: (rows, set())
+    return _KillTask(mgr.killer, jobset_id="")
+
+
+@pytest.fixture
+def bare_mgr(fake_lsf):
+    mgr = LsfJobManager(store=InMemoryStore(),
+                        config=LsfConfig(rate_limit_per_s=None),
+                        runner=fake_lsf)
+    yield mgr
+    mgr.shutdown()
+
+
+def _status(job_id, idx, state):
+    from lsfmgr.command import JobStatus
+    return JobStatus(job_id=job_id, array_index=idx, state=state,
+                     exit_code=None)
+
+
+def test_folded_row_cannot_judge_an_element_target(bare_mgr):
+    """조회가 접힌 행(array_index=None)만 주면 element 생사는 알 수 없다 —
+    '죽었다'로 접으면 살아있는 job이 재시도에서 빠져 kill을 빠져나간다."""
+    task = _task(bare_mgr, [_status(1000, None, JobState.RUN)])
+    gone, _calls = task._confirm_by_query({"1000[3]"})
+    assert gone == set(), f"판정 불가를 해소로 접었다: {gone}"
+
+
+def test_absent_id_counts_as_gone(bare_mgr):
+    """LSF가 그 id를 아예 모른다 = 이미 끝났다 — 재시도할 이유가 없다."""
+    task = _task(bare_mgr, [])
+    assert task._confirm_by_query({"1000", "1000[3]"}) [0] == {"1000",
+                                                               "1000[3]"}
+
+
+def test_live_bare_target_keeps_pending(bare_mgr):
+    task = _task(bare_mgr, [_status(1000, None, JobState.RUN)])
+    assert task._confirm_by_query({"1000"})[0] == set()
+
+
+def test_terminal_row_counts_as_gone(bare_mgr):
+    task = _task(bare_mgr, [_status(1000, None, JobState.EXIT)])
+    assert task._confirm_by_query({"1000"})[0] == {"1000"}
+
+
+def test_element_target_is_judged_per_element(bare_mgr):
+    """element 행이 제대로 오면 element 단위로 판정한다 — 형제가 살아 있어도
+    내 element가 끝났으면 해소."""
+    task = _task(bare_mgr, [_status(1000, 3, JobState.EXIT),
+                            _status(1000, 4, JobState.RUN)])
+    gone, _c = task._confirm_by_query({"1000[3]", "1000[4]"})
+    assert gone == {"1000[3]"}, gone
+
+
+def test_range_target_uses_the_syntax_owner(bare_mgr):
+    """범위 target("id[m-n]")도 첫 element만 보고 접지 않는다."""
+    task = _task(bare_mgr, [_status(1000, 2, JobState.EXIT),
+                            _status(1000, 5, JobState.RUN)])
+    assert task._confirm_by_query({"1000[2-5]"})[0] == set()   # 5가 살아있다
+    task2 = _task(bare_mgr, [_status(1000, 2, JobState.EXIT),
+                             _status(1000, 5, JobState.DONE)])
+    assert task2._confirm_by_query({"1000[2-5]"})[0] == {"1000[2-5]"}
+
+
+def test_query_failure_keeps_pending(bare_mgr):
+    """조회가 터져도 '죽었다'로 접지 않는다 (조회 장애 ≠ job 없음)."""
+    def boom(ids, fresh=False):
+        raise RuntimeError("mbatchd unreachable")
+    bare_mgr.command.bjobs_by_ids = boom
+    from lsfmgr.killer import _KillTask
+    task = _KillTask(bare_mgr.killer, jobset_id="")
+    assert task._confirm_by_query({"1000"}) == (set(), 1)
