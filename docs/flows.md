@@ -105,7 +105,8 @@ mgr.kill(js)
 - kill 경로는 **job_id chunk 단일**이다 — group/array/name 기반 일괄 kill은 쓰지
   않는다(제출이 wrapper 단일 경로라 LSF 부착물이 없다). ARG_MAX 안전은
   `kill_chunk_size`/`arg_max`가 담당한다.
-- 한 kill 안의 chunk 는 `kill_workers`(기본 4) 개까지 **동시에** 돈다 —
+- chunk 는 `kill_workers`(기본 4) 개까지 **동시에** 돈다 — 실행 풀이 공용이라
+  kill 명령이 몇 건이든 bkill 총수가 이 값을 넘지 않는다.
   직렬(=1)이면 소요가 `ceil(N/kill_chunk_size) x bkill 1회`로 늘어선다.
   동시 요청은 `kill_workers x kill_chunk_size`건. 서로 다른 jobset 의 kill 은
   이와 별개로 Killer 풀(4개)까지 병행된다.

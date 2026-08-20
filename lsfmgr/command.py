@@ -312,6 +312,18 @@ class LsfCommand:
         # 동시에 시도할 수 있다 — 무락 증가면 같은 필드 오류에 이중 강등돼
         # FULL을 건너뛰고 CORE로 떨어진다. 사용한 인덱스 기준 CAS로 1단만.
         self._bjobs_fmt_lock = threading.Lock()
+        # bkill 실행 풀 — **manager당 하나**를 재사용한다. kill 호출마다 새로
+        # 만들면 kill_workers가 kill 1건의 상한일 뿐이라, 동시에 kill이 여러 건
+        # 돌면 그 배수만큼 bkill이 뜬다(실측: Killer 풀 4인데 동시 6개 —
+        # quiesce 중 releaseThread로 슬롯을 반납해 4보다 많은 kill이 chunk
+        # 단계에 겹친다). workers를 전역으로 만든 것과 같은 이유다.
+        # ThreadPoolExecutor는 생성 시 스레드를 만들지 않는다(첫 submit에 생성)
+        # — kill을 안 쓰는 앱은 비용이 0이다.
+        self._bkill_pool: Optional[ThreadPoolExecutor] = None
+        if self.config.kill_workers > 1:
+            self._bkill_pool = ThreadPoolExecutor(
+                max_workers=self.config.kill_workers,
+                thread_name_prefix="lsfmgr-bkill")
         self._warn_if_kill_budget_is_tight()
         # --- 조회원 선택: 앱 콜백 / bjobs subprocess ---
         # 갈림은 **job_status_fetcher 하나뿐**이다 — 주면 콜백, 안 주면 bjobs.
@@ -386,6 +398,13 @@ class LsfCommand:
         bjobs 경로면 no-op(누적 원장이 없다)."""
         if self._internal is not None:
             self._internal.forget(job_ids)
+
+    def shutdown_bkill_pool(self) -> None:
+        """bkill 실행 풀 종료 — **killer를 join한 뒤에** 부른다(멱등).
+        먼저 닫으면 진행 중 kill이 RuntimeError로 무산된다."""
+        pool, self._bkill_pool = self._bkill_pool, None
+        if pool is not None:
+            pool.shutdown(wait=True)
 
     def shutdown_status_source(self) -> None:
         """콜백 조회원 종료 — 대기 중인 폴링/verify 스레드를 즉시 풀어 준다.
@@ -771,8 +790,8 @@ class LsfCommand:
         resolved: Set[str] = set()
         timed_out: Set[str] = set()
         processed = 0
-        workers = max(1, min(int(self.config.kill_workers), len(chunks)))
-        if workers == 1:
+        pool = self._bkill_pool
+        if pool is None or len(chunks) == 1:
             done_iter = ((run_chunk(c), len(c)) for c in chunks)
             for (got, late), n in done_iter:
                 resolved |= got
@@ -787,14 +806,15 @@ class LsfCommand:
             #    QThread(Pool) 위다. 여기만 예외를 만들 이유가 없다.
             # ② 집계가 단일 스레드라 공유 집합용 lock이 아예 필요 없고,
             #    진행 누적이 자연히 단조증가한다(진행바 되감김 불가).
-            with ThreadPoolExecutor(max_workers=workers,
-                                    thread_name_prefix="lsfmgr-bkill") as ex:
-                pending = {ex.submit(run_chunk, c): len(c) for c in chunks}
-                for fut in as_completed(pending):
-                    got, late = fut.result()
-                    resolved |= got
-                    timed_out |= late
-                    processed += pending[fut]
-                    if on_progress:
-                        on_progress(processed)
+            # 풀은 **공용**이라 동시에 도는 kill이 몇 건이든 bkill 총수가
+            # kill_workers를 넘지 않는다(자기 future만 기다리므로 남의 kill을
+            # 기다리지는 않는다).
+            pending = {pool.submit(run_chunk, c): len(c) for c in chunks}
+            for fut in as_completed(pending):
+                got, late = fut.result()
+                resolved |= got
+                timed_out |= late
+                processed += pending[fut]
+                if on_progress:
+                    on_progress(processed)
         return resolved, len(chunks), timed_out

@@ -242,3 +242,65 @@ def test_parallel_kill_under_stress_keeps_every_contract(qtbot, fake_lsf):
     finally:
         mgr.shutdown()
     assert not problems, "\n".join(problems[:10])
+
+
+# ----------------------------------------------------------------------
+# kill_workers는 **전역** 상한 — kill 명령이 몇 건 동시에 돌든
+# ----------------------------------------------------------------------
+def test_kill_workers_is_a_global_cap(qtbot, fake_lsf):
+    """bkill 실행 풀을 kill 호출마다 새로 만들면 kill_workers가 kill 1건의
+    상한일 뿐이라, 동시에 kill이 여러 건 돌면 그 배수만큼 bkill이 뜬다.
+    (Killer 풀은 4인데 quiesce 중 releaseThread로 슬롯을 반납하므로 4보다
+     많은 kill이 chunk 단계에 겹친다 — 실측 동시 16개.)
+    workers를 전역으로 만든 것과 같은 이유로 여기도 공용 풀 하나를 쓴다."""
+    w = _WatchBkill(fake_lsf, delay=0.05)
+    mgr = LsfJobManager(
+        store=InMemoryStore(),
+        config=LsfConfig(kill_chunk_size=4, kill_workers=4),
+        runner=w)
+    try:
+        sets = []
+        for k in range(6):                   # kill 명령 6건을 동시에
+            with qtbot.waitSignal(mgr.submit_finished, timeout=60000):
+                sets.append(submit_cmds(
+                    mgr, [f"mytool {k}_{i}.sp" for i in range(60)],
+                    auto_poll=False, workers=8))
+        for js in sets:
+            mgr.kill(js)
+        qtbot.waitUntil(lambda: all(not mgr.is_killing(js.id) for js in sets),
+                        timeout=120000)
+        assert w.peak <= 4, (
+            f"동시 bkill {w.peak}개 — 전역 상한 4를 넘었다")
+        assert w.peak > 1, "병렬로 안 돌았다(테스트가 무의미)"
+        for js in sets:
+            assert all(r.state is JobState.EXIT for r in js.jobs())
+    finally:
+        mgr.shutdown()
+
+
+def test_bkill_pool_is_closed_after_the_killer(qtbot, fake_lsf):
+    """풀을 killer보다 먼저 닫으면 진행 중 kill이 RuntimeError로 무산된다."""
+    mgr = LsfJobManager(store=InMemoryStore(),
+                        config=LsfConfig(kill_chunk_size=4, kill_workers=4),
+                        runner=_WatchBkill(fake_lsf, delay=0.05))
+    with qtbot.waitSignal(mgr.submit_finished, timeout=60000):
+        js = submit_cmds(mgr, [f"mytool {i}.sp" for i in range(200)],
+                         auto_poll=False, workers=8)
+    errors = []
+    mgr.error_occurred.connect(lambda j, m: errors.append(m))
+    mgr.kill(js)
+    qtbot.wait(80)                           # chunk가 도는 한복판
+    mgr.shutdown()                           # killer → bkill 풀 순서
+    qtbot.wait(200)
+    assert not errors, errors
+    assert mgr.command._bkill_pool is None
+    left = [t.name for t in threading.enumerate()
+            if t.name.startswith("lsfmgr-bkill")]
+    assert not left, left
+
+
+def test_serial_mode_creates_no_pool():
+    """kill_workers=1이면 스레드를 아예 안 만든다."""
+    from lsfmgr.command import LsfCommand
+    assert LsfCommand(LsfConfig(kill_workers=1))._bkill_pool is None
+    assert LsfCommand(LsfConfig(kill_workers=4))._bkill_pool is not None

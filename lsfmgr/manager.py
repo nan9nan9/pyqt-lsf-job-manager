@@ -1310,6 +1310,9 @@ class LsfJobManager(QObject):
                  ("status", self.command.shutdown_status_source),
                  ("polling", self.polling.shutdown),
                  ("killer", self.killer.shutdown),
+                 # bkill 실행 풀은 killer를 join한 **뒤에** 닫는다 —
+                 # 먼저 닫으면 진행 중 kill이 RuntimeError로 무산된다.
+                 ("bkill", self.command.shutdown_bkill_pool),
                  ("store", self.store.store_dispose)]
         if self._pacer is not None:
             steps.insert(0, ("pacer", self._pacer.stop))
