@@ -45,10 +45,6 @@ DEPRECATED_KEYS = frozenset({
 MANAGER_ONLY_KEYS = frozenset({
     "chunk_size",
     "arg_max",
-    # 조회/kill timeout — submit_timeout_s만 kwarg로 받고 이 둘은 LsfConfig
-    # 전용이던 것은 비대칭이었다. kill_timeout_s는 실환경에서 실제로 튜닝이
-    # 필요했던 값이다(bkill 호출 1회의 상한).
-    "query_timeout_s", "kill_timeout_s",
     "bjobs_path", "bkill_path",
     "kill_status_policy", "kill_chunk_size", "kill_workers",
     "kill_max_retry", "kill_retry_delay_s",
@@ -192,8 +188,6 @@ _VALIDATORS: Dict[str, Any] = {
     "retry_backoff": _backoff,
     "poll_interval_s": _float_in(5.0, 60.0),
     "submit_timeout_s": _float_min(positive=True),
-    "query_timeout_s": _float_min(positive=True),
-    "kill_timeout_s": _float_min(positive=True),
     "auto_poll": _bool,
     "verify_kill": _bool,
     "chunk_size": _int_in(1, 5000),
