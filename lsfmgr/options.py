@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from .config import validate_cmd_path
+from .config import MAX_STATE_DWELL_S, validate_cmd_path
 from dataclasses import dataclass, fields
 from typing import Any, Dict, Optional, Tuple
 
@@ -215,7 +215,7 @@ _VALIDATORS: Dict[str, Any] = {
     "internal_retention_days": _float_min(0.0),
     "internal_lost_grace_s": _float_min(0.0),
     "collect_clusters": _bool,
-    "min_state_dwell_s": _float_min(0.0),
+    "min_state_dwell_s": _float_in(0.0, MAX_STATE_DWELL_S),
 }
 
 

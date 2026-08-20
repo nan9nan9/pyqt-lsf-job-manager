@@ -32,7 +32,9 @@ from .errors import SubmitError
 from .errors import RECORD_GONE as _RECORD_GONE
 from .lifecycle import SubmitGate
 from .options import Options
-from .qt import CallTask, QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
+from .qt import (
+    CallTask, QObject, QRunnable, QThreadPool, QTimer, Signal, Slot, timer_ms,
+)
 from .reports import SubmitProgress, SubmitReport
 from .states import JobState
 from .store.base import JobSetStore
@@ -764,7 +766,7 @@ class BulkSubmitter(QObject):
         with ctx.retry_lock:
             entry = ctx.pending_retries.get(entry_key)
         if entry is not None:
-            QTimer.singleShot(int(entry.delay_s * 1000), fire)
+            QTimer.singleShot(timer_ms(entry.delay_s), fire)
 
     def _finalize_retry(self, ctx: _SubmitContext, entry: _PendingRetry,
                         default_reason: str) -> None:

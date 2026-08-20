@@ -16,6 +16,9 @@ CmdPath = Union[str, Sequence[str]]
 #: (job_status_fetcher와 함께 주면 무시된다는 경고를 낼지 결정).
 DEFAULT_BJOBS_PATH = "bjobs"
 
+#: min_state_dwell_s 상한(초) = 1시간. 표시 지연이 그보다 길 이유가 없다.
+MAX_STATE_DWELL_S = 3600.0
+
 
 @dataclass
 class LsfConfig:
@@ -225,8 +228,13 @@ class LsfConfig:
             raise ValueError("progress_min_interval_s는 0 이상")
         if not (0.0 <= self.progress_min_step_ratio <= 1.0):
             raise ValueError("progress_min_step_ratio는 0~1")
-        if self.min_state_dwell_s < 0:
-            raise ValueError("min_state_dwell_s는 0 이상")
+        # 상한도 본다 — 표시 지연이 1시간을 넘을 이유가 없고, 방치하면
+        # QTimer의 int32 ms를 넘겨 pacer의 재예약 slot에서 OverflowError가
+        # 난다(그 순간 전이 표시가 통째로 멎는다).
+        if not (0 <= self.min_state_dwell_s <= MAX_STATE_DWELL_S):
+            raise ValueError(
+                f"min_state_dwell_s는 0~{MAX_STATE_DWELL_S:g} "
+                f"(got {self.min_state_dwell_s!r})")
         # 형식 검증은 여기 한 곳 — 잘못된 값이 제출 worker 안에서야 터지면
         # 그 job만 SUBMIT_FAILED로 조용히 실패해 원인을 찾기 어렵다.
         if self.test_submit_wrapper_pattern_cmd is not None:

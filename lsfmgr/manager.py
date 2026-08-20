@@ -55,6 +55,10 @@ log = logging.getLogger("lsfmgr.manager")
 #: 타입 체커·IDE가 문서대로 쓴 코드에 오류를 낸다 — 실제 계약을 적는다.
 JobSetRef = Union["JobSet", str]
 
+#: start_polling 직접 호출의 구조적 상한(초) = 1일. 이보다 긴 주기는 실수이고,
+#: 방치하면 QTimer의 int32 ms를 넘겨 폴링 스레드 slot에서 터진다.
+MAX_POLL_INTERVAL_S = 86400.0
+
 
 class LsfJobManager(QObject):
     """Facade — 컴포넌트 조립 + Facade Signal + JobSet 핸들 발급."""
@@ -397,11 +401,16 @@ class LsfJobManager(QObject):
         jobset_id = self._jsid(jobset_id)
         eff = float(interval_s if interval_s is not None
                     else self._defaults["poll_interval_s"])
-        if eff <= 0:
+        if not (0 < eff <= MAX_POLL_INTERVAL_S):
             # 0이면 QTimer가 매 이벤트 루프마다 발화 — bjobs 핫루프로
-            # LSF master를 두들긴다 (옵션 경로의 5~60초 검증과 달리
-            # 직접 호출은 무검증이었음)
-            raise ValueError(f"interval_s는 양수여야 합니다 (got {eff})")
+            # LSF master를 두들긴다. 상한이 없으면 QTimer의 int32 ms를 넘겨
+            # **폴링 스레드 slot 안에서** OverflowError가 나고, 그러면 그
+            # 타이머는 영영 안 걸리는데 호출자는 성공한 줄 안다.
+            # (옵션 경로는 5~60초로 더 좁게 검증한다 — 직접 호출은 2초 로컬
+            #  폴링 같은 정당한 사용이 있어 구조적 상한만 건다.)
+            raise ValueError(
+                f"interval_s는 0보다 크고 {MAX_POLL_INTERVAL_S:g}초 이하여야 "
+                f"합니다 (got {eff})")
         self._poll_intervals[jobset_id] = eff    # 편집/재제출 재개용 기억
         # 실제 주기를 조회원에 알린다 — 캐시가 폴링보다 느려 갱신이 밀리는
         # 것을 막는다(콜백 조회원이 아니면 no-op).
@@ -1053,6 +1062,13 @@ class LsfJobManager(QObject):
         공유하므로 전부 넣으면 마지막 element가 parent를 덮어, job_id로 지정한
         parent가 엉뚱하게 element로 해석된다. element를 콕 집으려면 그
         element의 job_key를 쓴다."""
+        if isinstance(refs, str):
+            # 문자열은 시퀀스라 글자 단위로 분해된다 — only="ab"가 key "a"와
+            # "b"를 가리키게 되어, 그런 key가 실제로 있으면 **엉뚱한 job이
+            # 조용히 제출/삭제된다**. kill_jobs와 같은 규칙으로 막는다.
+            raise TypeError(
+                f"job 지정은 문자열이 아니라 목록이어야 합니다 — "
+                f"하나면 [{refs!r}] (got {refs!r})")
         jobs = self.get_jobs(jobset_id)
         by_key = {r.job_key: r for r in jobs}
         by_jid = {r.job_id: r for r in jobs
@@ -1093,6 +1109,10 @@ class LsfJobManager(QObject):
             raise SubmitNotAllowedError(
                 f"{jobset_id}: shutdown 이후에는 submit할 수 없습니다",
                 jobset_id=jobset_id)
+        # 옵션 검증을 **상태 가드보다 먼저** 한다. 오타(workers→worker)는
+        # jobset 상태와 무관한 프로그래밍 오류인데, 뒤에 두면 활성 jobset에서
+        # "활성 job이 있어 submit 불가"가 먼저 나와 엉뚱한 것을 고치게 된다.
+        opts = self.resolve_options(kwargs, context="submit")
         self.store.get_jobset(jobset_id)     # 존재 검증 (삭제분이면 예외)
         if self._is_busy(jobset_id):
             raise SubmitNotAllowedError(
@@ -1113,7 +1133,6 @@ class LsfJobManager(QObject):
                 f"{jobset_id}: 활성(진행 중) job이 있어 submit 불가 — "
                 f"{busy[:5]} (먼저 kill 하거나 완료를 기다리세요)",
                 jobset_id=jobset_id, job_keys=busy)
-        opts = self.resolve_options(kwargs, context="submit")
         keyed = [(r.job_key, self._record_to_item(r)) for r in jobs]
         keys = [k for k, _ in keyed]
         # rearm/post_process 무장/자동 폴링은 **레코드 리셋 완료**

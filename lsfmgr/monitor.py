@@ -18,6 +18,7 @@ from .command import JobStatus, LsfCommand
 from .errors import JobSetNotFoundError, LsfmgrError
 from .qt import (
     DEFERRED_DELETE, QCoreApplication, QObject, QThread, QTimer, Signal, Slot,
+    timer_ms,
 )
 from .states import _ON_LSF, JobRecord, JobState
 from .store.base import JobSetStore
@@ -387,7 +388,7 @@ class _PollWorker(QObject):
 
     @Slot(str, float)
     def start_polling(self, jobset_id: str, interval_s: float) -> None:
-        ms = int(interval_s * 1000)
+        ms = timer_ms(interval_s)        # int32 clamp — 근거는 qt.timer_ms
         cur = self._timers.get(jobset_id)
         if cur is not None and cur.interval() == ms:
             # 같은 주기로 이미 돌고 있다 — 재시작하지 않는다.

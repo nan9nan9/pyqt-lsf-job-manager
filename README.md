@@ -165,7 +165,7 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)     # 이번 submit만
 | `kill_retry_delay_s` | 3.0 | kill 재확인 간격(초) — `bkill`이 비동기라 확인까지 여유를 둠 |
 | `progress_min_interval_s` | 0.5 | progress/`jobs_updated` 최소 발화 간격(초). 키우면 부하↓·반응성↓ |
 | `progress_min_step_ratio` | 0.01 | progress 최소 진행 비율(0~1). 키우면 발화↓ |
-| `min_state_dwell_s` | 0 (끔) | 상태 전이 **표시** 최소 간격(초) — 순식간에 지나가는 전이를 눈에 보이게 함(§6.5) |
+| `min_state_dwell_s` | 0 (끔) | 상태 전이 **표시** 최소 간격(초, 0~3600) — 순식간에 지나가는 전이를 눈에 보이게 함(§6.5) |
 | `submit_finished_on_gate_reject` | True | `pre_submit` 게이트가 False면 `submit_finished`(cancelled=N)도 발화. False면 종료 통지는 `pre_submit_finished(False)`만 |
 | `test_submit_wrapper_pattern_cmd` | 없음 | wrapper 실행 프로그램 치환 — `("*_sub", "/path/to/mock_sub")` (§4.3) |
 

@@ -57,6 +57,11 @@ class JobSetManager:
     def local_create_jobset(self, intended_count: int, *, label: str = "",
                             tags: Sequence[str] = (),
                             jobset_id: Optional[str] = None) -> JobSetRecord:
+        if intended_count < 0:
+            # 음수면 summary의 total이 음수가 되어 "상태 합계 == total"
+            # 불변식이 성립할 수 없다(합계는 0 이상이다).
+            raise ValueError(
+                f"intended_count는 0 이상이어야 합니다 (got {intended_count})")
         jsid = jobset_id or generate_jobset_id()
         record = JobSetRecord(
             jobset_id=jsid, intended_count=intended_count,

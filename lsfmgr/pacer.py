@@ -33,7 +33,7 @@ import logging
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 
-from .qt import QObject, QTimer
+from .qt import QObject, QTimer, timer_ms
 from .states import JobRecord, JobState
 
 log = logging.getLogger("lsfmgr.pacer")
@@ -164,7 +164,7 @@ class StatePacer(QObject):
         if due_at is None:
             self._timer.stop()
             return
-        self._timer.start(max(0, int((due_at - now) * 1000.0 + 0.5)))
+        self._timer.start(timer_ms(due_at - now))   # int32 clamp
 
     def _prune(self, now: float) -> None:
         """dwell이 지나 더는 판단에 쓰이지 않는 _shown 항목 청소. 진행 중
