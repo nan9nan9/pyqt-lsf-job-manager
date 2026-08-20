@@ -12,6 +12,7 @@ import logging
 import re
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -731,17 +732,27 @@ class LsfCommand:
         그때까지 mbatchd에 접수된 요청은 그대로 처리된다(대량 chunk면 앞쪽
         id는 이미 죽고 뒤쪽만 안 나간 상태로 잘린다). 호출자는 이 집합을
         무턱대고 재-bkill하지 말고 조회로 생사를 확인해야 한다.
-        on_progress(누적_처리_target수)는 chunk 완료마다 호출된다(진행 통지)."""
-        resolved: Set[str] = set()
+        on_progress(누적_처리_target수)는 chunk 완료마다 호출된다(진행 통지).
+
+        chunk는 kill_workers개까지 **동시에** 실행한다(기본 1=직렬). bkill은
+        MC 사이트에서 원격 왕복을 기다리는 지연 지배적 작업이라 병렬이 크게
+        먹히지만, 동시에 mbatchd에 붙는 요청이 kill_workers x kill_chunk_size
+        건이 되므로 사이트가 실측하고 켜는 값이다."""
+        chunks = list(chunk_args(list(targets), self.config.kill_chunk_size,
+                                 self.config.arg_max, self._bkill_base_len()))
+        if not chunks:
+            return set(), 0, set()
         timed_out: Set[str] = set()
-        calls = 0
-        processed = 0
-        base = self._bkill_base_len()
-        for chunk in chunk_args(list(targets), self.config.kill_chunk_size,
-                                self.config.arg_max, base):
+        state = {"processed": 0}
+        lock = threading.Lock()
+
+        def run_chunk(chunk: List[str]) -> Set[str]:
+            """chunk 1건 실행 → 해소된 target 집합. timeout은 timed_out으로."""
             argv = self._bkill_argv(chunk)
             try:
                 res = self._run(argv, self.config.kill_timeout_s)
+                got = _parse_bkill_resolved(
+                    res.stdout + "\n" + res.stderr, set(chunk))
             except subprocess.TimeoutExpired:
                 # 죽었는지 **모르는** 상태다 (위 docstring). 재조회로 판정한다.
                 log.warning(
@@ -750,16 +761,26 @@ class LsfCommand:
                     "자주 나오면 kill_chunk_size를 줄이거나 "
                     "kill_timeout_s를 늘리세요: %s",
                     self.config.kill_timeout_s, len(chunk), chunk[:20])
-                timed_out.update(chunk)
-                calls += 1
-                processed += len(chunk)
+                got = set()
+                with lock:
+                    timed_out.update(chunk)
+            # 진행 통지는 lock 안에서 — 병렬 chunk가 섞여도 누적치가
+            # 뒤로 가지 않게(진행바가 되감기면 안 된다).
+            with lock:
+                state["processed"] += len(chunk)
+                done = state["processed"]
                 if on_progress:
-                    on_progress(processed)
-                continue
-            calls += 1
-            processed += len(chunk)
-            resolved |= _parse_bkill_resolved(
-                res.stdout + "\n" + res.stderr, set(chunk))
-            if on_progress:
-                on_progress(processed)
-        return resolved, calls, timed_out
+                    on_progress(done)
+            return got
+
+        workers = max(1, min(int(self.config.kill_workers), len(chunks)))
+        if workers == 1:
+            results = [run_chunk(c) for c in chunks]
+        else:
+            with ThreadPoolExecutor(max_workers=workers,
+                                    thread_name_prefix="lsfmgr-bkill") as ex:
+                results = list(ex.map(run_chunk, chunks))
+        resolved: Set[str] = set()
+        for got in results:
+            resolved |= got
+        return resolved, len(chunks), timed_out

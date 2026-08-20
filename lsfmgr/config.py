@@ -106,6 +106,16 @@ class LsfConfig:
     #: 대량 kill에서 bkill 호출 횟수가 늘지만(1000건 → 63회) 각 호출이 확실히
     #: 완주하는 편이 잘려서 재시도하는 것보다 총 소요가 짧다.
     kill_chunk_size: int = 16
+    #: 한 kill 안에서 **동시에 띄울 bkill 프로세스 수** (1~32). 기본 1 = 직렬.
+    #: kill_chunk_size가 "한 호출에 몇 건"이라면 이건 "그 호출을 몇 개 동시에".
+    #: MC(job forwarding) 사이트에서 bkill은 원격 클러스터 왕복을 기다리는
+    #: **지연 지배적** 작업이라, 병렬로 돌리면 대량 kill이 그만큼 빨라진다
+    #: (직렬이면 ceil(N/chunk)회를 한 줄로 세워 기다린다).
+    #: ⚠ 동시에 mbatchd에 붙는 요청이 kill_workers x kill_chunk_size건이 된다 —
+    #: submit의 workers를 8로 낮춘 것과 같은 이유로 무작정 키우지 말 것.
+    #: 기본을 1로 두는 이유: 부하 특성을 바꾸는 값이라 사이트가 실측하고
+    #: 켜야 한다(bkill 1회 소요는 DEBUG 로그의 `exec bkill … → rc=0 (N.NNNs)`).
+    kill_workers: int = 1
     kill_max_retry: int = 2              # kill 확인 실패 시 재시도
     kill_retry_delay_s: float = 3.0      # kill 재시도 간격 — bkill은 비동기라
                                          # 확인('is being terminated')까지 여유
@@ -207,6 +217,7 @@ class LsfConfig:
             self.chunk_size = 500            # 필드 기본값과 동일한 폴백
         if self.kill_chunk_size < 1:
             self.kill_chunk_size = 16        # 필드 기본값과 동일한 폴백
+        self.kill_workers = max(1, min(32, int(self.kill_workers)))
         # retry_backoff는 여기선 숫자다(>1.0이면 지수 backoff). 같은 이름의
         # submit()/LsfJobManager() kwarg는 'fixed:N'/'expo:N' 문자열이라 헷갈려
         # LsfConfig에 문자열을 넘기면, 예전엔 조용히 통과하다 manager 생성 시
