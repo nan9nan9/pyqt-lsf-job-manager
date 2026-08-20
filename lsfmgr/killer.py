@@ -493,13 +493,23 @@ class _KillTask(QRunnable):
         attempt = 0
         while True:
             base = len(resolved_all)         # 이번 라운드 시작 시 확인분
-            resolved, c = k.command.bkill_targets_confirm(
+            resolved, c, timed_out = k.command.bkill_targets_confirm(
                 sorted(pending),
                 on_progress=lambda done: self._emit_progress(
                     base + done, total))
             calls += c
             resolved_all |= resolved
             pending -= resolved
+            # 시간 내 반환하지 않은 chunk는 '안 죽었다'가 아니라 '모른다'다 —
+            # bkill 클라이언트만 죽었을 뿐 접수된 요청은 처리된다. 그대로
+            # 재-bkill하면 이미 죽은 job에 kill을 두 번 더 쏘면서 매 라운드
+            # 같은 timeout 경고가 반복된다. 조회로 먼저 걸러낸다.
+            unknown = timed_out & pending
+            if unknown:
+                gone, qc = self._confirm_by_query(unknown)
+                calls += qc
+                resolved_all |= gone
+                pending -= gone
             if not pending or attempt >= cfg.kill_max_retry:
                 break
             attempt += 1
@@ -514,6 +524,44 @@ class _KillTask(QRunnable):
             errors.append(msg)
         return calls, len(pending), attempt, resolved_all
 
+
+    def _confirm_by_query(self, targets: set) -> Tuple[set, int]:
+        """생사 재조회로 '해소'를 판정한다 — bkill이 시간 내 반환하지 않은
+        target 전용. 반환: (죽은 것으로 확인된 target 집합, LSF 호출 수).
+
+        조회가 실패한 job은 **해소로 치지 않는다** — 판단 근거가 없으므로
+        재시도 대상으로 남긴다("조회 장애 ≠ job 없음"과 같은 규칙).
+        판정은 잔존 술어(_alive_in)를 그대로 쓴다: 살아있지 않으면(부재·종료·
+        ZOMBI) 더 kill할 필요가 없다."""
+        whole, exact, ranges = classify_targets(targets)
+        pids = sorted(whole | {p for p, _ in exact}
+                      | {p for p, _, _ in ranges})
+        if not pids:
+            return set(), 0
+        try:
+            # fresh — 방금 kill을 쏜 job의 생사는 캐시로 답할 수 없다
+            sts, failed = self.killer.command.bjobs_by_ids(pids, fresh=True)
+        except LsfmgrError as e:
+            log.warning("kill timeout 후 생사 조회 실패(재시도로 넘김): %s", e)
+            return set(), 1
+        alive = {(st.job_id, st.array_index)
+                 for st in self._alive_in(sts, whole, exact, ranges)}
+        alive_pids = {jid for jid, _idx in alive}
+        gone = set()
+        for t in targets:
+            pid = target_parent_id(t)
+            if pid is None or pid in failed:
+                continue                     # 판단 불가 — 재시도로 남긴다
+            if "[" in t:
+                idx = int(t.split("[", 1)[1].rstrip("]").split("-", 1)[0])
+                if (pid, idx) not in alive:
+                    gone.add(t)
+            elif pid not in alive_pids:
+                gone.add(t)
+        if gone:
+            log.info("bkill 중단분 %d건은 조회 결과 이미 죽었습니다 — "
+                     "재시도하지 않습니다", len(gone))
+        return gone, 1
 
     def _verify(self, targets: set) -> Tuple[Optional[int], set, List]:
         """재조회로 실제 종료 확인 — 잔존을 센다.

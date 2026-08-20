@@ -104,7 +104,13 @@ mgr.kill(js)
 
 - kill 경로는 **job_id chunk 단일**이다 — group/array/name 기반 일괄 kill은 쓰지
   않는다(제출이 wrapper 단일 경로라 LSF 부착물이 없다). ARG_MAX 안전은
-  `chunk_size`/`arg_max`가 담당한다.
+  `kill_chunk_size`/`arg_max`가 담당한다.
+- **`kill_timeout_s`는 bkill 호출 1회(= chunk 전체)의 상한이다** — job 1건이
+  아니다. 못 끝내면 subprocess timeout이 bkill **클라이언트**를 중간에 죽여
+  앞쪽 id만 죽고 뒤쪽은 요청조차 안 나간 채 잘린다. 그래서 timeout난 chunk는
+  '안 죽었다'가 아니라 **'모른다'**로 다루고, 다시 bkill을 쏘기 전에 조회로
+  생사를 확인한다(이미 죽었으면 재시도하지 않는다). 예산이 target당 100ms
+  미만이면 생성 시 경고가 나온다.
 - `kill_status_policy="actual"`이면 EXIT 전이는 다음 폴링에서(최대 `poll_interval_s`
   지연) — GUI는 기본(optimistic) 유지 권장.
 - 정지 대기 초과는 `KillReport.errors`에 남고 optimistic 표시도 억제된다.

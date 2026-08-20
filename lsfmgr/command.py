@@ -308,6 +308,7 @@ class LsfCommand:
         # 동시에 시도할 수 있다 — 무락 증가면 같은 필드 오류에 이중 강등돼
         # FULL을 건너뛰고 CORE로 떨어진다. 사용한 인덱스 기준 CAS로 1단만.
         self._bjobs_fmt_lock = threading.Lock()
+        self._warn_if_kill_budget_is_tight()
         # --- 조회원 선택: 앱 콜백 / bjobs subprocess ---
         # 갈림은 **job_status_fetcher 하나뿐**이다 — 주면 콜백, 안 주면 bjobs.
         # 위쪽(monitor/killer)은 bjobs_by_ids 계약만 보므로 어느 쪽이든 flow가
@@ -336,6 +337,34 @@ class LsfCommand:
                     "bjobs_path=%r는 무시됩니다 — job_status_fetcher가 "
                     "지정되어 상태 조회는 콜백으로 합니다",
                     self.config.bjobs_path)
+
+    #: bkill target 1건당 이 정도 예산도 없으면 경고한다. 근거: bkill은 job마다
+    #: mbatchd 왕복이고 MC면 원격 클러스터 왕복까지 더해진다 — 로컬 단일
+    #: 클러스터도 job당 수~수십 ms, MC면 수백 ms까지 간다. 기본 설정
+    #: (120s / 100건 = 1.2s)은 넉넉히 통과한다.
+    _KILL_BUDGET_WARN_S = 0.1
+
+    def _warn_if_kill_budget_is_tight(self) -> None:
+        """kill_timeout_s가 **호출 1회**(= chunk 전체)의 상한이라는 점을
+        생성 시 1회 알린다.
+
+        이 값을 'job 하나를 죽이는 데 걸리는 시간'으로 읽으면 8초 같은 값을
+        주게 되는데, 실제로는 그 8초 안에 chunk(기본 100건)를 **전부** 끝내야
+        한다. 못 끝내면 subprocess timeout이 bkill 클라이언트를 중간에 죽여
+        앞쪽 id만 죽고 뒤쪽은 요청조차 안 나간 채 잘리고, 그 상태가 매 kill마다
+        반복된다. 조용히 두면 "bkill timeout" 경고만 계속 보이고 원인이
+        설정이라는 것을 알 길이 없다."""
+        budget = self.config.kill_timeout_s / max(1, self.config.kill_chunk_size)
+        if budget >= self._KILL_BUDGET_WARN_S:
+            return
+        log.warning(
+            "kill_timeout_s=%.0fs는 bkill **호출 1회**(target %d건 전체)의 "
+            "상한입니다 — target당 %.0fms 예산이라 시간 내 못 끝내고 중간에 "
+            "잘릴 가능성이 큽니다. kill_chunk_size를 줄이거나(예: %d) "
+            "kill_timeout_s를 늘리세요.",
+            self.config.kill_timeout_s, self.config.kill_chunk_size,
+            budget * 1000.0,
+            max(1, int(self.config.kill_timeout_s / self._KILL_BUDGET_WARN_S)))
 
     @property
     def internal_status(self) -> Optional[InternalStatusSource]:
@@ -688,26 +717,40 @@ class LsfCommand:
 
     def bkill_targets_confirm(self, targets: Sequence[str],
                               on_progress: Optional[Callable[[int], None]] = None
-                              ) -> Tuple[Set[str], int]:
+                              ) -> Tuple[Set[str], int, Set[str]]:
         """chunked bkill + 출력 확인 파싱.
 
-        반환: (해소된 target 집합, LSF 호출 횟수).
+        반환: (해소된 target 집합, LSF 호출 횟수, **시간 내 반환하지 않은**
+        chunk의 target 집합).
         '해소'는 더 이상 kill이 필요 없다고 확인된 것 — 'Job <id> is being
         terminated'(신호 수락) 또는 already-finished/no-matching(이미 없음).
         해소 안 된 target(일시 장애 등)은 호출자가 재시도한다.
+
+        timeout은 **따로 돌려준다**. 그 chunk는 '안 죽었다'가 아니라 '모른다'
+        이기 때문이다 — subprocess timeout은 bkill **클라이언트**를 죽일 뿐,
+        그때까지 mbatchd에 접수된 요청은 그대로 처리된다(대량 chunk면 앞쪽
+        id는 이미 죽고 뒤쪽만 안 나간 상태로 잘린다). 호출자는 이 집합을
+        무턱대고 재-bkill하지 말고 조회로 생사를 확인해야 한다.
         on_progress(누적_처리_target수)는 chunk 완료마다 호출된다(진행 통지)."""
         resolved: Set[str] = set()
+        timed_out: Set[str] = set()
         calls = 0
         processed = 0
         base = self._bkill_base_len()
-        for chunk in chunk_args(list(targets), self.config.chunk_size,
+        for chunk in chunk_args(list(targets), self.config.kill_chunk_size,
                                 self.config.arg_max, base):
             argv = self._bkill_argv(chunk)
             try:
                 res = self._run(argv, self.config.kill_timeout_s)
             except subprocess.TimeoutExpired:
-                # 이 chunk 전부 미확인 — 재시도 대상으로 남긴다
-                log.warning("bkill timeout — 재시도 대상: %s", chunk)
+                # 죽었는지 **모르는** 상태다 (위 docstring). 재조회로 판정한다.
+                log.warning(
+                    "bkill이 %.0fs 안에 반환하지 않아 중단했습니다 (%d건) — "
+                    "접수된 요청은 살아 있을 수 있어 조회로 확인합니다. "
+                    "자주 나오면 kill_chunk_size를 줄이거나 "
+                    "kill_timeout_s를 늘리세요: %s",
+                    self.config.kill_timeout_s, len(chunk), chunk[:20])
+                timed_out.update(chunk)
                 calls += 1
                 processed += len(chunk)
                 if on_progress:
@@ -719,4 +762,4 @@ class LsfCommand:
                 res.stdout + "\n" + res.stderr, set(chunk))
             if on_progress:
                 on_progress(processed)
-        return resolved, calls
+        return resolved, calls, timed_out

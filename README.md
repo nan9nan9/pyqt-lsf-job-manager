@@ -146,7 +146,7 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)     # 이번 submit만
 |---|---|---|
 | `bjobs_path` / `bkill_path` | PATH 탐색 | 조회/kill 명령 경로. 토큰 목록이면 고정 인자가 앞에 붙음. `job_status_fetcher`를 주면 `bjobs_path`는 안 쓰임(§5.8) |
 | `job_status_fetcher` | 없음 | 상태 조회 콜백. **주면 bjobs 대신 이 콜백으로 조회** — `LsfConfig` 필드다(§5.8) |
-| `chunk_size` | 500 | bjobs/bkill 한 번에 넘길 job 수 |
+| `chunk_size` | 500 | **bjobs** 한 번에 넘길 job 수 (조회 전용) |
 | `arg_max` | 131072 | 명령줄 인자 총 길이 상한 (초과 시 `ArgMaxExceededError`) |
 | `lost_after_missing_polls` | 3 | bjobs에서 안 보이는 job을 **LOST로 확정하기까지** 필요한 연속 미발견 횟수. 1이면 즉시. 제출 직후 등록 지연으로 한두 사이클 안 보이는 job을 죽은 것으로 만들지 않기 위한 유예 |
 | `internal_refresh_min_s` | `poll_interval_s`/2 | internal 조회원의 최소 갱신 간격(초). 이 안에 겹쳐 들어온 조회는 콜백을 다시 돌리지 않음. 0이면 캐시 없음 (§5.8) |
@@ -155,6 +155,7 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)     # 이번 submit만
 | `poll_runtime_updates` | False | RUN 중 `run_time_s`(경과시간) 변화도 `jobs_updated`로 live 발행. 켜면 **RUN 전원이 매 폴링 재전이**된다(5000건 기준 사이클당 5000 transition + 5000레코드 배치). 끄면 경과시간은 상태 전이 시점에만 갱신 — 표에 실시간 경과시간 열이 꼭 필요할 때만 켤 것 |
 | `collect_clusters` | False | MultiCluster forwarding 정보 수집 — `JobRecord.source_cluster`/`forward_cluster`를 폴링으로 채움 |
 | `kill_status_policy` | `"optimistic"` | `"optimistic"`=kill 수락 확인 시 즉시 EXIT / `"actual"`=실제 LSF 상태(폴링)로만 |
+| `kill_chunk_size` | 100 | **bkill** 한 번에 넘길 target 수. 조회와 따로 두는 이유: bjobs는 읽기라 500건도 금방이지만 bkill은 job마다 mbatchd가 실제 처리(+MC면 원격 클러스터 전달)를 하는 쓰기라 훨씬 느리다. `kill_timeout_s`는 **이 chunk 전체**의 상한이므로 둘을 같이 봐야 한다 |
 | `kill_max_retry` | 2 | kill 확인 실패 시 재시도 횟수 |
 | `kill_retry_delay_s` | 3.0 | kill 재확인 간격(초) — `bkill`이 비동기라 확인까지 여유를 둠 |
 | `progress_min_interval_s` | 0.5 | progress/`jobs_updated` 최소 발화 간격(초). 키우면 부하↓·반응성↓ |

@@ -90,6 +90,14 @@ class LsfConfig:
     #: 소량 제출은 영향을 받지 않는다 (lsfmgr/util.py BURST_FACTOR).
     rate_limit_per_s: Optional[float] = 20.0
 
+    #: bkill 1회에 실을 target 수. 조회(chunk_size)와 **따로 두는 이유**:
+    #: bjobs는 읽기라 500건도 금방 끝나지만 bkill은 job마다 mbatchd가 실제
+    #: 처리(+MC면 원격 클러스터로 전달)를 하는 쓰기라 훨씬 느리다. 한 chunk가
+    #: kill_timeout_s를 넘기면 subprocess timeout이 bkill **클라이언트**를
+    #: 중간에 죽여, 앞쪽 id만 죽고 뒤쪽은 요청조차 안 나간 채 잘린다 —
+    #: 그 상태로 재시도하면 "bkill timeout" 경고가 반복된다.
+    #: 100이면 kill_timeout_s(기본 120s) 기준 job당 1.2초 여유다.
+    kill_chunk_size: int = 100
     kill_max_retry: int = 2              # kill 확인 실패 시 재시도
     kill_retry_delay_s: float = 3.0      # kill 재시도 간격 — bkill은 비동기라
                                          # 확인('is being terminated')까지 여유
@@ -189,6 +197,8 @@ class LsfConfig:
         self.workers = max(1, min(64, int(self.workers)))
         if self.chunk_size < 1:
             self.chunk_size = 500            # 필드 기본값과 동일한 폴백
+        if self.kill_chunk_size < 1:
+            self.kill_chunk_size = 100
         # retry_backoff는 여기선 숫자다(>1.0이면 지수 backoff). 같은 이름의
         # submit()/LsfJobManager() kwarg는 'fixed:N'/'expo:N' 문자열이라 헷갈려
         # LsfConfig에 문자열을 넘기면, 예전엔 조용히 통과하다 manager 생성 시

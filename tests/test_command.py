@@ -162,9 +162,12 @@ def test_bjobs_transient_error_no_downgrade():
 # bkill
 # ----------------------------------------------------------------------
 def test_bkill_targets_chunked(fake_lsf):
-    cmd = LsfCommand(LsfConfig(rate_limit_per_s=None, chunk_size=20), fake_lsf)
+    # bkill은 조회(chunk_size)가 아니라 kill_chunk_size로 쪼갠다 — 쓰기라
+    # 건당 비용이 훨씬 커서 한 호출이 kill_timeout_s를 넘기기 쉽다.
+    cmd = LsfCommand(LsfConfig(rate_limit_per_s=None, chunk_size=500,
+                               kill_chunk_size=20), fake_lsf)
     ids = [_submit(cmd, f"r {i}") for i in range(45)]
-    resolved, calls = cmd.bkill_targets_confirm([str(i) for i in ids])
+    resolved, calls, _to = cmd.bkill_targets_confirm([str(i) for i in ids])
     assert calls == 3
     assert resolved == {str(i) for i in ids}
     assert fake_lsf.alive_jobs() == []
@@ -172,13 +175,13 @@ def test_bkill_targets_chunked(fake_lsf):
 
 def test_bkill_no_matching_job_is_ok(cmd):
     # 이미 없는 job kill — no-match는 '해소'로 분류 (재시도 불필요)
-    resolved, calls = cmd.bkill_targets_confirm(["999999"])
+    resolved, calls, _to = cmd.bkill_targets_confirm(["999999"])
     assert "999999" in resolved and calls == 1
 
 
 def test_bkill_confirm_parses_terminating(cmd, fake_lsf):
     ids = [_submit(cmd, f"r {i}") for i in range(3)]
-    resolved, calls = cmd.bkill_targets_confirm([str(i) for i in ids])
+    resolved, calls, _to = cmd.bkill_targets_confirm([str(i) for i in ids])
     assert calls == 1
     assert resolved == {str(i) for i in ids}        # 전부 'is being terminated'
 
@@ -215,7 +218,7 @@ def test_bkill_confirm_array_parent_id(cmd, fake_lsf):
     """bare 부모 id로 array kill 시 element 확인 행이 부모 pending과 매칭돼
     한 라운드에 해소된다 (불필요 재시도 없음)."""
     jid = _submit(cmd, "run.sh", name="arr[1-4]")   # array 부모 id
-    resolved, calls = cmd.bkill_targets_confirm([str(jid)])
+    resolved, calls, _to = cmd.bkill_targets_confirm([str(jid)])
     assert calls == 1
     assert str(jid) in resolved                     # 부모 id 해소됨
 
