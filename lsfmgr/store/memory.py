@@ -131,14 +131,17 @@ class InMemoryStore(JobSetStore):
             recs = [r for r in recs if r.state in states]
         return recs
 
-    def transition(self, jobset_id: str, job_key: str, new_state: JobState,
+    def transition(self, jobset_id: str, job_key: str,
+                   new_state: Optional[JobState],
                    guard=None, **fields: Any) -> Optional[JobRecord]:
         self._reject_key_fields(fields)
         with self._lock:                        # read-modify-write 원자성
             old = self.get_job(jobset_id, job_key)
             if guard is not None and not guard(old):
                 return None                     # CAS 불일치 — 전이 건너뜀
-            new = replace(old, state=new_state, updated_at=datetime.now(),
+            # new_state=None = 상태 유지(부분 갱신) — 계약은 base.transition
+            new = replace(old, updated_at=datetime.now(),
+                          state=old.state if new_state is None else new_state,
                           **fields)
             self._jobs[jobset_id][job_key] = new
             return new
@@ -156,7 +159,9 @@ class InMemoryStore(JobSetStore):
                     continue                     # 사이클 도중 remove_jobs 등
                 if guard is not None and not guard(old):
                     continue
-                new = replace(old, state=new_state, updated_at=now, **fields)
+                new = replace(
+                    old, updated_at=now, **fields,
+                    state=old.state if new_state is None else new_state)
                 jobs[job_key] = new
                 out.append(new)
         return out

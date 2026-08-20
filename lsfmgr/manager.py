@@ -744,10 +744,19 @@ class LsfJobManager(QObject):
     def set_user_data(self, jobset_id: str, ref, user_data: Optional[dict]
                     ) -> JobRecord:
         """[sync] job의 user_data 교체 — ref는 job_key(str) 또는 job_id(int).
-        갱신 레코드를 jobs_updated로 발행한다."""
+        갱신 레코드를 jobs_updated로 발행한다.
+
+        **제출/폴링이 도는 중에 불러도 안전하다.** 스냅샷을 통째로 되쓰지
+        않고 store의 원자적 부분 갱신(transition(new_state=None))으로
+        user_data만 바꾼다 — 예전처럼 update_job으로 되쓰면 읽고-쓰는 사이에
+        submit worker가 기록한 job_id/PEND가 지워져, LSF에서 도는 job이
+        추적 불가가 되고 레코드는 SUBMITTING에 고착됐다."""
         jobset_id = self._jsid(jobset_id)
         rec = self._find_job(jobset_id, ref)
-        new = self.store.update_job(dc_replace(rec, user_data=user_data))
+        # 상태는 건드리지 않으므로 CAS 가드도 필요 없다 — transition이 lock
+        # 안에서 **현재** 레코드를 읽어 user_data만 얹는다.
+        new = self.store.transition(jobset_id, rec.job_key, None,
+                                    user_data=user_data)
         self._relay_jobs_changed(jobset_id, [new])
         return new
 

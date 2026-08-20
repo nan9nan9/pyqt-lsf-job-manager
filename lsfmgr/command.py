@@ -178,9 +178,12 @@ _BKILL_RESOLVED_MSGS = (
 )
 
 
-def _parse_bkill_resolved(text: str) -> "set[str]":
+def _parse_bkill_resolved(text: str, requested: "set[str]") -> "set[str]":
     """bkill stdout/stderr에서 '해소된'(재시도 불필요) job id/target을 뽑는다.
-    미해소(일시 장애 등)는 여기 안 들어가 호출자가 재시도한다."""
+    미해소(일시 장애 등)는 여기 안 들어가 호출자가 재시도한다.
+
+    requested는 이번 chunk에 **실제로 넘긴** target 집합이다 — element 응답
+    행에서 bare 부모 id를 유도할지 말지가 여기에 달렸다(아래)."""
     resolved = set()
     for line in text.splitlines():
         m = _BKILL_LINE_RE.search(line)
@@ -192,8 +195,17 @@ def _parse_bkill_resolved(text: str) -> "set[str]":
             # bare 부모 id로 array를 kill하면 LSF는 element별("1000[0]")로
             # 확인 행을 낸다 — 부모 pending("1000")과 매칭되게 부모도 해소 처리
             # (kill 요청이 그 job에 수락됐다는 의미). 안 하면 불필요 재시도.
+            #
+            # **부모를 실제로 요청했을 때만** 유도한다. 안 그러면 element
+            # 하나만 겨냥한 kill("1000[3]")의 응답이 bare "1000"까지 해소로
+            # 만들고, JobRecord는 array_index가 늘 None이라(집계 레코드)
+            # 그 레코드가 target "1000"으로 매칭돼 job 전체가 EXIT로 찍힌다
+            # — LSF에선 나머지 element가 멀쩡히 도는데 앱에는 죽은 것으로
+            # 보인다(폴링 대상에서도 빠져 영영 안 고쳐진다).
             if "[" in jid:
-                resolved.add(jid.split("[", 1)[0])
+                parent = jid.split("[", 1)[0]
+                if parent in requested:
+                    resolved.add(parent)
     return resolved
 
 
@@ -703,7 +715,8 @@ class LsfCommand:
                 continue
             calls += 1
             processed += len(chunk)
-            resolved |= _parse_bkill_resolved(res.stdout + "\n" + res.stderr)
+            resolved |= _parse_bkill_resolved(
+                res.stdout + "\n" + res.stderr, set(chunk))
             if on_progress:
                 on_progress(processed)
         return resolved, calls

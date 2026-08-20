@@ -192,10 +192,23 @@ def test_bkill_resolved_parser_variants():
         "Job <104>: LSF error: cannot reach mbatchd\n"   # 미해소 → 재시도 대상
         "Job <105[2]> is being terminated\n"
     )
-    resolved = _parse_bkill_resolved(text)
-    # 105[2]는 element + 부모 105 둘 다 해소 (bare 부모 id kill 매칭용)
+    # bare 부모 105를 **요청했을 때만** element 응답에서 부모를 유도한다
+    resolved = _parse_bkill_resolved(
+        text, {"101", "102", "103", "104", "105"})
     assert resolved == {"101", "102", "103", "105[2]", "105"}
     assert "104" not in resolved
+
+
+def test_element_kill_does_not_resolve_the_bare_parent():
+    """element 하나만 겨냥한 kill의 응답이 bare 부모까지 해소로 만들면,
+    JobRecord는 array_index가 늘 None(집계 레코드)이라 그 레코드가 target
+    "1000"으로 매칭돼 job 전체가 EXIT로 찍힌다 — LSF에선 나머지 element가
+    도는데 앱에는 죽은 것으로 보이고, terminal이라 폴링에서도 빠진다."""
+    from lsfmgr.command import _parse_bkill_resolved
+    text = ("Job <1000[3]> is being terminated\n"
+            "Job <1000[9]>: No matching job found\n")
+    assert _parse_bkill_resolved(text, {"1000[3]", "1000[9]"}) == {
+        "1000[3]", "1000[9]"}
 
 
 def test_bkill_confirm_array_parent_id(cmd, fake_lsf):

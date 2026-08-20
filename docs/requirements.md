@@ -280,7 +280,8 @@ Exception
 JobSetStore(ABC) ── InMemoryStore
 ```
 
-- 공통 API: JobSet/JobRecord CRUD, `transition()`(원자적), `add_jobs`(배치), summary,
+- 공통 API: JobSet/JobRecord CRUD, `transition()`(원자적 — `new_state=None`이면
+  상태 유지·필드만 갱신하는 부분 갱신), `add_jobs`(배치), summary,
   search. InMemory는 파일을 만들지 않는다 — 앱이 죽어도 LSF의 job은 LSF에 잔존하므로
   수동 확인·정리가 가능하다.
 - 영속 저장소·세션 복원·이력 통계는 제공하지 않는다(앱이 필요하면 `user_data`와

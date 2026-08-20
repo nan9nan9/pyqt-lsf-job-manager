@@ -536,6 +536,8 @@ mgr.remove_jobs(js, ["m1"], force=True)  # 활성이면 force 필요 (레코드�
 mgr.clear_jobs(js)                     # job만 전부 삭제 — jobset은 남아 재사용 가능
 mgr.remove_jobset(js)                  # jobset 자체 삭제 — 목록에서도 사라짐
 mgr.set_user_data(js, "m1", {"note": "..."})  # 사용자 데이터 교체
+                                       # (제출/폴링 중에 불러도 안전 — 상태를
+                                       #  건드리지 않는 원자적 부분 갱신)
 mgr.shutdown()                         # 스레드 정리 (멱등 — 앱 종료 시 자동 호출)
 ```
 

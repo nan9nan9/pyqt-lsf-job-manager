@@ -560,4 +560,4 @@ def test_mc_bkill_error_msg_not_lsfmgr_resolved():
     from lsfmgr.command import _parse_bkill_resolved
     msg = ("Job <1001>: forwarded to cluster <cluster_b> — "
            "source its cluster env to kill")
-    assert _parse_bkill_resolved(msg) == set()
+    assert _parse_bkill_resolved(msg, {"1001"}) == set()

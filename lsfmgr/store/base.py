@@ -14,9 +14,11 @@ from typing import (
 from ..errors import JobNotFoundError, JobSetNotFoundError
 from ..states import JobRecord, JobSetRecord, JobState
 
-#: transition_many 입력 1건 — (job_key, new_state, guard, fields)
+#: transition_many 입력 1건 — (job_key, new_state, guard, fields).
+#: new_state=None은 '상태 유지, fields만 갱신' (transition과 같은 규약).
 TransitionSpec = Tuple[
-    str, JobState, Optional[Callable[[JobRecord], bool]], Dict[str, Any]]
+    str, Optional[JobState], Optional[Callable[[JobRecord], bool]],
+    Dict[str, Any]]
 
 
 class JobSetStore(ABC):
@@ -107,7 +109,8 @@ class JobSetStore(ABC):
         return out
 
     @abstractmethod
-    def transition(self, jobset_id: str, job_key: str, new_state: JobState,
+    def transition(self, jobset_id: str, job_key: str,
+                   new_state: Optional[JobState],
                    guard: Optional[Callable[[JobRecord], bool]] = None,
                    **fields: Any) -> Optional[JobRecord]:
         """원자적 상태 전이 (read-modify-write).
@@ -116,6 +119,11 @@ class JobSetStore(ABC):
         guard가 주어지면 lock 안에서 현재 레코드로 평가해 False면 전이를
         건너뛰고 None 반환 (CAS) — 스냅샷 기반 갱신(polling)이 그 사이
         바뀐 레코드(재제출 등)를 덮어쓰는 것을 막는다.
+
+        new_state=None이면 **현재 상태를 유지**하고 fields만 갱신한다
+        (원자적 부분 갱신). 스냅샷을 통째로 되쓰는 update_job과 다르다:
+        읽고-고쳐-쓰는 사이에 worker가 쓴 값(제출 성공의 job_id/PEND 등)을
+        덮지 않는다. 상태와 무관한 필드 하나만 바꿀 때는 이 형태를 쓸 것.
 """
 
     def transition_many(self, jobset_id: str,
