@@ -202,27 +202,9 @@ class JobsetQuerier:
             if st is None:
                 missing.append(rec)
                 continue
-            # 확장 필드는 **유효값(eff) 기준**으로 비교·기록한다 — st가
-            # None(포맷 강등/판정 불가)이면 저장값 보존(_keep, 리뷰 M6).
-            # 그대로 쓰면 저장값이 None으로 소실되고 None!=저장값 비교가 매
-            # 사이클 참이 되어 전 job이 재전이(jobs_updated 스팸)된다.
-            # set-once 계약과 정합 — 재제출 리셋이 이 필드들을 지운다.
-            # 클러스터 2필드는 collect_clusters일 때만(꺼짐: 무접촉).
-            # run_time_s는 RUN 중 매 폴링 증가하므로 poll_runtime_updates
-            # 일 때만 변경 감지에 포함(끄면 상태 전이 시점에만 반영).
-            eff = {f: _keep(getattr(st, f), getattr(rec, f))
-                   for f in _PRESERVE_ON_NONE}
-            if collect_clusters:
-                for f in ("source_cluster", "forward_cluster"):
-                    eff[f] = _keep(getattr(st, f), getattr(rec, f))
-            if (st.state is not rec.state or st.exit_code != rec.exit_code
-                    or any(eff[f] != getattr(rec, f) for f in eff
-                           if f != "run_time_s")
-                    or (runtime_updates
-                        and eff["run_time_s"] != rec.run_time_s)):
-                fields = {"exit_code": st.exit_code, **eff,
-                          "job_id": rec.job_id if rec.job_id is not None
-                          else st.job_id}
+            fields = merge_fields(rec, st, runtime_updates=runtime_updates,
+                                  collect_clusters=collect_clusters)
+            if fields is not None:
                 update_specs.append(
                     (rec.job_key, st.state, unchanged(rec), fields))
 
@@ -333,6 +315,42 @@ def _within_submit_grace(rec: JobRecord, now: datetime,
     if marker is None:
         return False
     return (now - marker).total_seconds() < grace_s
+
+
+def merge_fields(rec: JobRecord, st: JobStatus, *, runtime_updates: bool,
+                 collect_clusters: bool) -> Optional[dict]:
+    """레코드 1건 x 조회결과 1건 → 전이에 실을 fields (바뀐 게 없으면 None).
+
+    폴링 사이클의 **유일한 변경 판정 지점**이다. 규칙이 셋 얽혀 있어 따로 뺐다
+    (여기만 단위 테스트로 직접 찌를 수 있게):
+
+    ① 확장 필드는 **유효값(eff) 기준**으로 비교·기록한다 — st가 None(포맷
+       강등/판정 불가)이면 저장값을 보존한다(_keep). 그대로 쓰면 저장값이
+       None으로 소실되고 `None != 저장값` 비교가 매 사이클 참이 되어 전 job이
+       재전이한다(jobs_updated 스팸). set-once 계약과도 정합 — 재제출 리셋이
+       이 필드들을 지운다.
+    ② 클러스터 2필드는 collect_clusters일 때만 본다(꺼짐: 무접촉).
+    ③ run_time_s는 RUN 중 매 폴링 증가하므로 poll_runtime_updates일 때만
+       **변경 감지에 포함**한다. 끄더라도 다른 이유로 전이할 때는 실어 보낸다
+       (상태 전이 시점에는 최신 경과시간이 반영된다).
+
+    job_id는 이미 있으면 유지한다 — 조회가 접힌 array를 대표값으로 줄 때
+    레코드의 id를 덮지 않기 위해서다.
+    """
+    eff = {f: _keep(getattr(st, f), getattr(rec, f))
+           for f in _PRESERVE_ON_NONE}
+    if collect_clusters:
+        for f in ("source_cluster", "forward_cluster"):
+            eff[f] = _keep(getattr(st, f), getattr(rec, f))
+    changed = (st.state is not rec.state
+               or st.exit_code != rec.exit_code
+               or any(eff[f] != getattr(rec, f) for f in eff
+                      if f != "run_time_s")
+               or (runtime_updates and eff["run_time_s"] != rec.run_time_s))
+    if not changed:
+        return None
+    return {"exit_code": st.exit_code, **eff,
+            "job_id": rec.job_id if rec.job_id is not None else st.job_id}
 
 
 def _aggregate_elements(rec: JobRecord,
