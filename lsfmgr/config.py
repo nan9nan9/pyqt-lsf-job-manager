@@ -2,15 +2,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
-from .internal_status import JobStatusFetcher
 
 #: LSF 명령 경로. 단일 프로그램은 str, bsub를 호출하는 wrapper처럼 고정 인자가
 #: 붙는 명령은 토큰 목록으로 지정한다 (예: ["customwrapper_sub", "--proj", "X"]).
 #: wrapper는 표준 bsub 옵션(-q/-J/-g/...)을 받아 bsub로 넘기고, bsub의 출력
 #: ("Job <id> ...")을 그대로 뱉으면 된다 — 파싱/추적은 bsub와 동일하다.
 CmdPath = Union[str, Sequence[str]]
+
+#: 상태 조회 콜백의 시그니처 — 인자 없이 호출되고, REST 응답 JSON을 그대로
+#: 돌려준다. 반환: {"jobs": [...], "count": N, ...} dict 또는 job dict 목록.
+#: 예외를 던지면 그 사이클은 '조회 장애'로 취급된다(대상 전원 판단 보류).
+#: (설정 필드의 타입이라 config가 소유한다 — internal_status에 두면
+#:  config→internal_status 순환이 생긴다.)
+JobStatusFetcher = Callable[[], Any]
 
 #: bjobs_path 기본값 — "앱이 명시로 지정했나"를 이 값과의 비교로 판정한다
 #: (job_status_fetcher와 함께 주면 무시된다는 경고를 낼지 결정).

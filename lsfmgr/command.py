@@ -23,7 +23,9 @@ from typing import (
 from .config import DEFAULT_BJOBS_PATH, LsfConfig, cmd_tokens
 from .errors import ArgMaxExceededError, LsfCommandError, SubmitError
 from .internal_status import InternalStatusSource
-from .states import LSF_STAT_MAP, JobState
+from .states import LSF_STAT_MAP, JobState, JobStatus  # noqa: F401
+# JobStatus는 states로 옮겼다(순환 제거) — 기존 import 경로
+# `from lsfmgr.command import JobStatus`는 그대로 쓸 수 있게 재수출한다.
 
 log = logging.getLogger("lsfmgr.command")
 
@@ -73,23 +75,6 @@ def _adapt_runner(runner: Runner) -> Runner:
     if positional >= 3 or flexible:
         return runner            # cwd 수용 가능
     return lambda argv, timeout, cwd=None: runner(argv, timeout)
-
-
-@dataclass(frozen=True)
-class JobStatus:
-    """bjobs 1행 파싱 결과."""
-    job_id: int
-    array_index: Optional[int]
-    state: JobState
-    exit_code: Optional[int]
-    run_time_s: Optional[int] = None       # LSF run_time(초)
-    start_time: Optional[datetime] = None  # LSF start_time
-    finish_time: Optional[datetime] = None # LSF finish_time
-    # 작업 디렉토리는 조회하지 않는다 — JobRecord.submit_cwd(제출 요청값)가
-    # 같은 경로를 가리켰고, exec_cwd는 RUN 이후에야 채워지면서 조회 포맷만
-    # 무겁게 했다. submit_cwd가 None이면 부모 프로세스 cwd라는 뜻이다.
-    source_cluster: Optional[str] = None   # MC: 제출(로컬) 클러스터
-    forward_cluster: Optional[str] = None  # MC: 포워딩된 실행(원격) 클러스터
 
 
 _JOB_ID_RE = re.compile(r"Job <(\d+)>")

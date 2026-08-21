@@ -45,17 +45,13 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import (
-    Any, Callable, Dict, List, Optional, Sequence, Set, Tuple,
+    Any, Dict, List, Optional, Sequence, Set, Tuple,
 )
 
-from .states import LSF_STAT_MAP, JobState
+from .config import JobStatusFetcher  # noqa: F401 (재수출)
+from .states import LSF_STAT_MAP, JobState, JobStatus
 
 log = logging.getLogger("lsfmgr.internal_status")
-
-#: 콜백 시그니처 — 인자 없이 호출되고, REST 응답 JSON을 그대로 돌려준다.
-#: 반환: {"jobs": [...], "count": N, ...} dict 또는 job dict 목록.
-#: 예외를 던지면 그 사이클은 '조회 장애'로 취급된다(대상 전원 판단 보류).
-JobStatusFetcher = Callable[[], Any]
 
 #: dataId 표기 — "1432342.cluster1" / "1432342[3].cluster1" / "1432342".
 _DATA_ID_RE = re.compile(r"^(\d+)(?:\[(\d+)\])?(?:\.(.+))?$")
@@ -92,20 +88,6 @@ _KEYS_START = ("startTime", "start_time")
 _KEYS_FINISH = ("finishTime", "finish_time", "endTime", "end_time")
 _KEYS_EXIT = ("exitStatus", "exitCode", "exit_code", "exit_status")
 _KEYS_CLUSTER = ("cluster", "clusterName", "cluster_name")
-
-
-#: JobStatus는 command.py 소유인데 command.py가 이 모듈을 import한다(순환).
-#: 매 job마다 import 문을 도는 대신 첫 호출에 한 번만 해석해 캐시한다 —
-#: payload가 수만 건일 때 파싱 루프의 군더더기를 없앤다.
-_JOB_STATUS_CLS = None
-
-
-def _job_status_cls():
-    global _JOB_STATUS_CLS
-    if _JOB_STATUS_CLS is None:
-        from .command import JobStatus
-        _JOB_STATUS_CLS = JobStatus
-    return _JOB_STATUS_CLS
 
 
 def _pick(job: dict, keys: Sequence[str]):
@@ -251,7 +233,7 @@ def job_status_from_dict(job: dict, now: datetime):
     # 'forward 우선, 없으면 source' 규칙이 그대로 이 값을 쓴다.
     cluster = _clean(_pick(job, _KEYS_CLUSTER)) or _clean(m.group(3))
 
-    return _job_status_cls()(
+    return JobStatus(
         job_id=int(m.group(1)),
         array_index=int(m.group(2)) if m.group(2) else None,
         state=state, exit_code=_exit_code(job),

@@ -79,6 +79,31 @@ LSF_STAT_MAP["EXIT"] = JobState.EXIT
 
 
 @dataclass(frozen=True)
+class JobStatus:
+    """LSF **관측값** 1건 — bjobs 1행 또는 콜백 payload 1건의 파싱 결과.
+
+    JobRecord(라이브러리가 소유하는 상태)와 짝이다: 이쪽은 "LSF가 지금
+    뭐라고 하는가"이고 저쪽은 "우리가 아는 상태"다. 둘을 합쳐 전이를
+    결정하는 것이 monitor.merge_fields다.
+    (command.py에 있던 것을 옮겼다 — 조회원 두 곳(bjobs/콜백)이 다 쓰는
+     데이터 타입이라 command 소유일 이유가 없었고, 그 배치가
+     config→internal_status→command→config 순환을 만들었다.)
+    """
+    job_id: int
+    array_index: Optional[int]
+    state: JobState
+    exit_code: Optional[int]
+    run_time_s: Optional[int] = None       # LSF run_time(초)
+    start_time: Optional[datetime] = None  # LSF start_time
+    finish_time: Optional[datetime] = None # LSF finish_time
+    # 작업 디렉토리는 조회하지 않는다 — JobRecord.submit_cwd(제출 요청값)가
+    # 같은 경로를 가리켰고, exec_cwd는 RUN 이후에야 채워지면서 조회 포맷만
+    # 무겁게 했다. submit_cwd가 None이면 부모 프로세스 cwd라는 뜻이다.
+    source_cluster: Optional[str] = None   # MC: 제출(로컬) 클러스터
+    forward_cluster: Optional[str] = None  # MC: 포워딩된 실행(원격) 클러스터
+
+
+@dataclass(frozen=True)
 class JobRecord:
     """job 1개의 추적 레코드. jobset 내에서 job_key가 유일 키."""
     job_id: Optional[int]            # SUBMIT_FAILED 등 미확보 시 None
