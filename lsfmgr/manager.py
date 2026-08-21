@@ -237,9 +237,8 @@ class LsfJobManager(QObject):
         # 유지된다 (submit 경로는 submitter가 emit 순서로 보장).
         self.kill_finished.connect(self._emit_updates_after_kill)
         # 동명 Signal 일괄 중계 — 목록에 이름만 추가하면 배선은 이 루프가
-        # 한다. submit_finished/jobs_updated는 파생 신호(jobs_failed 등)가
-        # 있어 아래 전용 slot으로 중계한다.
-        for name in ("submit_started", "submit_progress",
+        # 한다. jobs_updated만 파생 신호(jobs_failed)가 있어 전용 slot이다.
+        for name in ("submit_started", "submit_progress", "submit_finished",
                      "jobset_updated", "kill_started",
                      "kill_finished", "kill_progress",
                      "kill_failed", "error_occurred",
@@ -247,7 +246,6 @@ class LsfJobManager(QObject):
                      "pre_submit_finished", "jobset_finished",
                      "post_processing_started", "post_processing_finished"):
             getattr(self, name).connect(self._handle_relay(name))
-        self.submit_finished.connect(self._h_finished)
         self.submit_finished.connect(self._emit_summary_after_submit)
         self.jobs_updated.connect(self._h_jobs_updated)
 
@@ -1442,15 +1440,10 @@ class LsfJobManager(QObject):
                 getattr(h, signal_name).emit(*args)
         return slot
 
-    def _h_finished(self, jsid: str, report) -> None:
-        h = self._handle_of(jsid)
-        if h is None:
-            return
-        h.submit_finished.emit(report)
-        # js.jobs_failed는 submit 완료 시 발화되는 jobs_updated →
-        # _h_jobs_updated가 담당한다 (SUBMIT_FAILED 포함) — 여기서 또 쏘면 이중.
-
     def _h_jobs_updated(self, jsid: str, changed: list) -> None:
+        """jobs_updated만 전용 slot인 이유: 여기서 js.jobs_failed가 파생된다.
+        제출 실패(SUBMIT_FAILED)도 이 경로로 나가므로 submit_finished 쪽에서
+        또 쏘면 이중 발화가 된다."""
         h = self._handle_of(jsid)
         if h is None:
             return

@@ -74,6 +74,23 @@ class JobSet(QObject):
         return self._jobset_id
 
     @property
+    def is_removed(self) -> bool:
+        """[sync, snapshot] 이 핸들이 가리키던 jobset이 삭제됐는가.
+
+        **예외를 던지지 않는 유일한 상태 질의**다. 나머지 property/명령은
+        삭제된 핸들에 닿으면 JobSetRemovedError를 던지는데, Qt는 slot에서
+        빠져나온 예외를 프로세스 abort로 처리한다. 지연 콜백(QTimer,
+        queued signal, 후처리)이 삭제 뒤에 도착하는 일은 흔하므로, 그런
+        자리에서는 먼저 이걸 본다.
+
+            def on_timeout(self):
+                if self.js.is_removed:
+                    return
+                self.table.setModel(self.js.jobs())
+        """
+        return self._removed
+
+    @property
     def summary(self) -> dict:
         """[sync, snapshot] 상태별 카운트 (합계 == intended_count)."""
         self._check_open()

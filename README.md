@@ -570,6 +570,18 @@ mgr.shutdown()                         # 스레드 정리 (멱등 — 앱 종료
 > 삭제 직전의 `JobSetRecord`입니다. 삭제된 jobset의 핸들을 만지면
 > `JobSetRemovedError`, id로 접근하면 `JobSetNotFoundError`입니다.
 >
+> 지연 콜백(`QTimer`, queued signal, 후처리)이 **삭제 뒤에 도착**하는 일은
+> 흔합니다. Qt는 slot을 빠져나온 예외를 프로세스 abort로 처리하므로, 그런
+> 자리에서는 예외를 던지지 않는 `js.is_removed`로 먼저 확인하세요 —
+> 다른 property/명령은 전부 `JobSetRemovedError`를 던집니다.
+>
+> ```python
+> def on_timeout(self):
+>     if self.js.is_removed:
+>         return
+>     self.table.set_rows(self.js.jobs())
+> ```
+>
 > ⚠️ **`force=True`로 살아있는 job을 지우면 그 `job_id`는 조회로 못 찾습니다.**
 > 계약상 LSF job 정리는 앱 책임인데 레코드가 사라져 조회할 방법이 없으므로,
 > 삭제 직전에 `lsfmgr.jobset` 로거가 해당 `job_id`들을 WARNING으로 남깁니다 —
