@@ -521,6 +521,7 @@ mgr.jobset(jobset_id)      # ID로 핸들 재획득
 > - **SUBMIT_FAILED / RETRY_WAIT**: `rec.fail_message`에 wrapper/bsub 실행의
 >   stderr/stdout(터미널에서 봤을 메시지)이 자동 저장됩니다. 재시도 성공이나
 >   재제출 시 자동으로 지워집니다. `rec.fail_reason`은 분류 코드
+>   ([전체 목록](docs/submit.md#fail_reason-전체-목록))
 >   (`BSUB_EXIT_<rc>` / `NO_JOBID_PARSED` / `BSUB_TIMEOUT` / `BSUB_OSERROR`).
 >   **재시도 중인 job은 `RETRY_WAIT`로 표에 나타납니다** — 매 시도마다
 >   `RETRY_WAIT → SUBMITTING`이 `jobs_updated`로 발행되고 `rec.retry_count`가

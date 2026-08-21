@@ -126,6 +126,30 @@ exec bsub "$@"      # bsub 의 stdout("Job <id> ...")·exit code 를 그대로 �
 | `BSUB_TIMEOUT` (timeout) | X | 마찬가지로 중복 제출 위험 |
 | `BSUB_OSERROR` (실행 자체 실패) | X | 경로·권한·cwd 문제라 재시도해도 같음 |
 
+### `fail_reason` 전체 목록
+
+`JobRecord.fail_reason` 은 GUI 표에 그대로 뜨는 분류 코드다. 제출 실패(위 표)
+말고도 아래가 들어올 수 있다 — 앱이 이 값으로 분기한다면 목록은 여기가 전부다.
+
+| 값 | 언제 | 함께 오는 state |
+|---|---|---|
+| `BSUB_EXIT_<rc>` | wrapper 가 non-zero 종료 (`<rc>` 는 실제 코드) | `RETRY_WAIT` → `SUBMIT_FAILED` |
+| `NO_JOBID_PARSED` | stdout 에 `Job <id>` 가 없음 | `SUBMIT_FAILED` |
+| `BSUB_TIMEOUT` | wrapper 가 `submit_timeout_s` 초과 | `SUBMIT_FAILED` |
+| `BSUB_OSERROR` | wrapper 실행 자체 실패(경로·권한·cwd) | `SUBMIT_FAILED` |
+| `PRE_SUBMIT_FAILED` | `pre_submit` 게이트가 예외를 던짐 | `SUBMIT_FAILED` |
+| `LAUNCH_FAILED` | 착수 도중 실패해 리셋만 된 레코드를 되돌림 | `SUBMIT_FAILED` |
+| `INTERNAL_ERROR` | 분류 못 한 worker 예외 (`error_occurred` 도 발화) | `SUBMIT_FAILED` |
+| `CANCELLED` | 제출 도중 kill/취소로 착수 포기 | `CANCELLED` |
+| `KILLED` | `bkill` 이 수락돼 EXIT 로 표시 (optimistic) | `EXIT` |
+| `NOT_FOUND_IN_LSF` | 연속 미발견으로 LOST 확정 | `LOST` |
+| `SHUTDOWN` | shutdown 시점에 재시도 대기 중이던 job | `CANCELLED` |
+
+> 재시도 대기 중이던 job 을 kill/shutdown 으로 접으면 **직전 시도의 원인이
+> 남는다** — 왜 재시도 중이었는지가 더 쓸모 있어서다. 그래서 `CANCELLED`
+> 상태인데 `fail_reason` 이 `BSUB_EXIT_255` 일 수 있다. 직전 원인이 없을 때만
+> `KILLED`/`SHUTDOWN`/`CANCELLED` 가 들어간다.
+
 즉 **비정상 종료만 재시도**한다. 재시도 대기는 `retry_backoff`(`"fixed:N"` /
 `"expo:N"`)를 따르며 QTimer 로 스케줄된다(스레드 sleep 없음). 대기 중 job 은
 `RETRY_WAIT` 상태로 보이고, 실패 원문은 `JobRecord.fail_message` 에 남는다.

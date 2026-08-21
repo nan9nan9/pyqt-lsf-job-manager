@@ -501,6 +501,10 @@ class InternalStatusSource:
         반환: True=원장을 믿고 읽어도 됨, False=조회 장애(판단 보류).
         min_at 기준으로 판정한다 — 일반 조회는 "간격 안이면 재사용", fresh
         조회는 "이 호출 시각 이후에 받은 것만".
+
+        루프 한 바퀴 = "최신인가? → 아니면 누군가 조회 중이게 만든다 →
+        한 번 기다린다 → 결과를 판정한다". 세 관심사를 이름으로 갈라 뒀다
+        (예전엔 한 루프에 엉켜 있었다).
         """
         started = time.monotonic()
         min_at = started if fresh else started - self._refresh_min_s
@@ -511,45 +515,65 @@ class InternalStatusSource:
                     return False
                 if self._last_fetch_at >= min_at:
                     return True
-                if not self._fetching:
-                    self._start_fetch_locked()
-                elif time.monotonic() >= self._fetch_deadline:
-                    # 진행 중 조회가 상한을 넘겼다 = 콜백이 안 돌아온다.
-                    # 인계하지 않으면 아무도 리더가 못 돼 서버가 회복돼도
-                    # 영원히 '조회 장애'로 남는다.
-                    if self._inflight >= self.MAX_INFLIGHT:
-                        log.error(
-                            "미회수 status 조회가 %d건 — 새 조회를 띄우지 "
-                            "않습니다. job_status_fetcher가 반환하지 않고 "
-                            "있습니다(콜백에 timeout을 주세요)", self._inflight)
-                        return False
-                    log.warning(
-                        "진행 중 status 조회가 %.0fs를 넘겨 새로 시작합니다 — "
-                        "job_status_fetcher가 반환하지 않고 있습니다"
-                        "(콜백에 timeout을 주세요)", self._wait_timeout_s)
-                    self._start_fetch_locked()
+                if not self._start_or_takeover_locked():
+                    return False             # 미회수 조회 상한 — 판단 보류
                 before, gen = self._last_fetch_at, self._gen
-                remaining = deadline - time.monotonic()
-                if remaining <= 0 or not self._cv.wait(timeout=remaining):
-                    log.warning("internal status 조회 대기 시간 초과(%.0fs) — "
-                                "이번 사이클은 판단 보류", self._wait_timeout_s)
-                    return False
-                if self._closed:
-                    return False
-                if self._gen == gen:
-                    continue                     # 아직 안 끝남 — 다시 대기
+                done = self._wait_once_locked(deadline, gen)
+                if done is None:
+                    continue                 # 아직 안 끝남 — 다시 판정
+                if not done:
+                    return False             # 시간 초과 / 종료
                 if self._last_fetch_at <= before:
                     # 조회가 실패했다. 여기서 **내가 다시 띄우지 않는다** —
                     # 콜백이 죽어 있을 때 대기자마다 재시도하면 연타가 된다.
                     return False
-                if self._last_fetch_at >= min_at:
+                if self._last_fetch_at >= min_at or not fresh:
+                    # 기준을 채웠거나, 일반 조회라면 방금 받은 것이 최신이다.
                     return True
-                if fresh:
-                    # 그 조회는 내 호출보다 **먼저** 시작됐다 — kill verify가
-                    # 요구하는 '방금'을 만족하지 못하므로 다시 받는다.
-                    continue
-                # 갱신 간격 기준에는 못 미쳐도 방금 받은 것이 가장 최신이다.
-                return True
+                # fresh인데 그 조회는 내 호출보다 **먼저** 시작됐다 —
+                # kill verify가 요구하는 '방금'이 아니므로 다시 받는다.
+
+    def _start_or_takeover_locked(self) -> bool:
+        """[lock 보유] 조회가 **진행 중인 상태로 만든다**.
+
+        아무도 안 돌고 있으면 시작하고, 진행 중 조회가 상한을 넘겼으면 인계해
+        새로 띄운다 — 인계하지 않으면 아무도 리더가 못 돼 서버가 회복돼도
+        영원히 '조회 장애'로 남는다. 인계는 동시 미회수 조회 수를 상한으로
+        묶는다(안 그러면 안 돌아오는 콜백마다 daemon 스레드가 쌓인다).
+
+        반환: 조회가 진행 중이 되었는가 (False = 미회수 상한이라 포기)."""
+        if not self._fetching:
+            self._start_fetch_locked()
+            return True
+        if time.monotonic() < self._fetch_deadline:
+            return True                      # 아직 기다릴 만하다
+        if self._inflight >= self.MAX_INFLIGHT:
+            log.error("미회수 status 조회가 %d건 — 새 조회를 띄우지 않습니다. "
+                      "job_status_fetcher가 반환하지 않고 있습니다"
+                      "(콜백에 timeout을 주세요)", self._inflight)
+            return False
+        log.warning("진행 중 status 조회가 %.0fs를 넘겨 새로 시작합니다 — "
+                    "job_status_fetcher가 반환하지 않고 있습니다"
+                    "(콜백에 timeout을 주세요)", self._wait_timeout_s)
+        self._start_fetch_locked()
+        return True
+
+    def _wait_once_locked(self, deadline: float,
+                          gen: int) -> Optional[bool]:
+        """[lock 보유] 진행 중 조회를 **한 번** 기다린다.
+
+        반환: True=조회가 하나 끝났다(성공/실패 무관) / False=시간 초과나
+        종료(판단 보류) / None=아직 안 끝났으니 caller가 다시 판정하라.
+        한 번만 기다리는 이유: 깨어날 때마다 caller가 인계 조건을 다시 보게
+        하려는 것이다(콜백이 영영 안 돌아오는 경우의 유일한 탈출구)."""
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not self._cv.wait(timeout=remaining):
+            log.warning("internal status 조회 대기 시간 초과(%.0fs) — "
+                        "이번 사이클은 판단 보류", self._wait_timeout_s)
+            return False
+        if self._closed:
+            return False
+        return True if self._gen != gen else None
 
     def _start_fetch_locked(self) -> None:
         """콜백을 전용 daemon 스레드로 띄운다 (lock 보유 상태에서 호출)."""
