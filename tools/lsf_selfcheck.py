@@ -10,6 +10,11 @@
     python tools/lsf_selfcheck.py --job 12345           # 그 job으로 조회 점검
     python tools/lsf_selfcheck.py --job 12345 --kill    # kill 점검까지(죽인다!)
     python tools/lsf_selfcheck.py --bench 12345,12346   # bkill 소요 실측
+    python tools/lsf_selfcheck.py --payload resp.json   # REST 응답 해석 점검
+
+조회를 job_status_fetcher(REST 콜백)로 하는 앱이면 bjobs 점검은 해당 없다 —
+대신 실제 응답을 파일로 저장해 --payload 로 넣는다. 라이브러리가 그 JSON을
+어떻게 읽는지 그대로 보여 준다.
 
 아무것도 제출하지 않는다. --kill을 주지 않으면 job을 죽이지도 않는다.
 """
@@ -176,6 +181,68 @@ def bench_bkill(ids):
            f"출력: {(out + err).strip()[:200]}")
 
 
+def check_payload(path):
+    """REST 응답 파일 하나를 라이브러리 파서에 그대로 넣어 본다.
+
+    조회를 job_status_fetcher로 하는 앱에는 이게 유일한 실환경 점검이다 —
+    bjobs 출력 가정은 애초에 타지 않는다. 흔한 어긋남 셋을 잡는다:
+    ① id 필드를 못 찾음 → 응답 전체가 "job 0건"이 되어 전 job이 LOST
+    ② 상태 표기 불일치 → 전부 UNKWN, terminal이 아니라 폴링이 안 멈춤
+    ③ 시각 표기 불일치 → 경과시간/종료시각이 비고 원장 만료가 안 걸림
+    """
+    import json
+
+    from lsfmgr.internal_status import parse_internal_jobs
+    from lsfmgr.states import JobState
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception as e:                                   # noqa: BLE001
+        report(BAD, f"응답 파일을 읽지 못함: {path}", repr(e))
+        return
+    try:
+        statuses = parse_internal_jobs(payload)
+    except ValueError as e:
+        report(BAD, "id 필드를 못 찾음 — 응답이 통째로 '0건'이 된다", 
+               f"{e}\n→ 이 상태면 폴링마다 전 job이 미발견으로 세어져 LOST로 확정된다.")
+        return
+    except Exception as e:                                   # noqa: BLE001
+        report(BAD, "응답 해석 중 예외", repr(e))
+        return
+
+    if not statuses:
+        report(WARN, "해석된 job 0건 — 빈 응답인지 확인",
+               "정상적으로 비어 있는 응답이면 문제 없다.")
+        return
+    report(OK, f"job {len(statuses)}건 해석됨",
+           "첫 건: " + repr(statuses[0]))
+
+    unkwn = [s for s in statuses if s.state is JobState.UNKWN]
+    if unkwn:
+        report(BAD, f"상태를 못 알아본 job {len(unkwn)}/{len(statuses)}건",
+               "UNKWN은 종료 상태가 아니라 폴링이 안 멈추고 완료 신호"
+               "(jobset_finished/post_process)도 안 온다.\n"
+               f"예: job {unkwn[0].job_id} — 응답의 상태 필드 값을 확인하라.")
+    else:
+        report(OK, "상태 표기 전건 인식")
+
+    terminal = [s for s in statuses if s.state.is_terminal]
+    if terminal:
+        no_fin = [s for s in terminal if s.finish_time is None]
+        if no_fin:
+            report(WARN,
+                   f"종료 job {len(no_fin)}/{len(terminal)}건에 종료시각이 없음",
+                   "원장 만료가 마지막으로 본 시각을 대신 쓴다(동작은 한다). "
+                   "시각 필드 이름/표기를 확인하면 더 정확해진다.")
+        else:
+            report(OK, "종료 job의 종료시각 파싱 정상")
+    running = [s for s in statuses if s.state is JobState.RUN]
+    if running and all(s.run_time_s is None for s in running):
+        report(WARN, "RUN job의 경과시간이 전부 비어 있음",
+               "표의 경과시간 열이 안 찬다. 시각/경과 필드 표기를 확인하라.")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -183,6 +250,9 @@ def main():
     ap.add_argument("--kill", action="store_true",
                     help="--job 을 실제로 kill 해서 메시지를 확인한다")
     ap.add_argument("--bench", help="bkill 소요 실측용 id 목록 (쉼표 구분)")
+    ap.add_argument("--payload", metavar="FILE",
+                    help="job_status_fetcher가 돌려줄 REST 응답 JSON 파일 — "
+                         "라이브러리가 이걸 어떻게 해석하는지 점검한다")
     a = ap.parse_args()
 
     print("=" * 72)
@@ -190,9 +260,13 @@ def main():
     print("=" * 72)
     cmd = None
     check_env()
-    check_bjobs_formats(cmd, a.job)
-    check_mixed_missing_id(cmd, a.job)
-    check_finished_job_visible(cmd, a.job)
+    if a.payload:
+        # 조회를 콜백으로 하는 앱 — bjobs 점검은 해당 없다
+        check_payload(a.payload)
+    else:
+        check_bjobs_formats(cmd, a.job)
+        check_mixed_missing_id(cmd, a.job)
+        check_finished_job_visible(cmd, a.job)
     check_bkill_messages(cmd, a.job, a.kill)
     if a.bench:
         bench_bkill(a.bench)

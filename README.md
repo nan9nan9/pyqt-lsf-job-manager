@@ -709,8 +709,21 @@ mgr = LsfJobManager(config=LsfConfig(job_status_fetcher=fetch_status))
 > `state`가 전부 `UNKWN`으로 나오면 상태 필드 이름/값이 안 맞는 것이고,
 > id 필드(`dataId` 등)를 못 찾으면 **본 키 목록을 담은 `ValueError`**가 납니다
 > (한 건도 해석 못 한 응답을 "job 0건"으로 조용히 넘기지 않습니다 — 그러면
-> 전 job이 LOST로 갑니다). 아래 "받아들이는 JSON"의 키 후보와 대조해 보세요. `tools/lsf_selfcheck.py`는
-> 이 확인을 실환경에서 한 번에 돌려 줍니다.
+> 전 job이 LOST로 갑니다). 아래 "받아들이는 JSON"의 키 후보와 대조해 보세요.
+>
+> 응답을 파일로 떠 뒀다면 점검 도구가 같은 일을 한 번에 해 줍니다 — id·상태·
+> 시각 세 가지 어긋남을 각각 짚어 줍니다.
+>
+> ```
+> $ python tools/lsf_selfcheck.py --payload resp.json
+> [  OK ] job 2건 해석됨
+> [ FAIL] 상태를 못 알아본 job 1/2건
+>         UNKWN은 종료 상태가 아니라 폴링이 안 멈추고 완료 신호도 안 온다.
+> [ WARN] RUN job의 경과시간이 전부 비어 있음
+> ```
+>
+> (`--payload` 없이 돌리면 `bjobs`/`bkill` 출력 가정을 점검합니다 — 콜백
+> 조회원을 쓰면 그쪽은 해당 없습니다.)
 
 #### 받아들이는 JSON
 
