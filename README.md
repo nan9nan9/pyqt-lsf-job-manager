@@ -185,6 +185,11 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)     # 이번 submit만
 - **queue·자원 요구·출력 경로 같은 제출 옵션은 wrapper 커맨드 문자열에 직접
   씁니다.** 라이브러리는 `bsub` 인자를 조립하지 않으므로 그런 이름의
   키워드(`queue`/`bsub_path` 등)를 주면 경고 로그와 함께 무시됩니다.
+- 레코드 저장소는 **기본값(`InMemoryStore`)을 그대로 쓰세요.** 프로세스 메모리에만
+  남고 종료 시 사라집니다 — 결과를 남기려면 `jobset_finished`/`post_process`에서
+  앱이 직접 저장합니다. `LsfJobManager(store=...)`로 다른 구현을 끼울 수는
+  있지만(`JobSetStore`), 커스텀 store의 계약은 아직 문서화·보증 대상이
+  아닙니다(라이브러리 내부와 테스트용).
 
 ---
 
@@ -418,6 +423,12 @@ mgr.submit(js, only=[r.job_key for r in js.failed_jobs])   # 실패분만
 > (전부 `JobSetStateError` → `LsfmgrError` 하위라 `except LsfmgrError`로도 잡힘).
 > 예외 객체의 `.jobset_id` · `.job_keys`(막은 job들)로 메시지 파싱 없이 원인을
 > 알 수 있습니다. 사전 확인은 `mgr.can_submit(js)`.
+>
+> 그 밖에 앱이 잡을 만한 것: `SubmitError`(제출 1건 실패 — `.fail_reason` /
+> `.diagnostic()`), `LsfCommandError`(외부 명령 실행 실패), `JobSetNotFoundError`
+> / `JobNotFoundError`, `JobSetRemovedError`(삭제된 핸들 접근 — `js.is_removed`로
+> 미리 확인), `ArgMaxExceededError`. **전부 `LsfmgrError` 하위**라 한 줄로 묶어
+> 잡을 수 있습니다.
 
 ### 5.3 제어 (비동기 — 즉시 반환, 결과는 Signal)
 
@@ -608,7 +619,7 @@ JobSet에 **이름 있는 handler**를 붙이면, 각 job이 지정한 state 구
 
 ```python
 def collect(ctx):                          # worker 스레드 — GUI 안 막음
-    # ctx.job_id / ctx.submit_cwd(작업 디렉토리) / ctx.record / ctx.final
+    # ctx는 HandlerContext — job_id / submit_cwd(작업 디렉토리) / record / final
     cwd = ctx.submit_cwd or os.getcwd()    # 미지정 job은 None → 부모 프로세스 cwd
     return parse_outputs(cwd)              # 반환값이 Signal로 전달됨
 
@@ -684,6 +695,22 @@ mgr = LsfJobManager(config=LsfConfig(job_status_fetcher=fetch_status))
 - **예외를 던지면 "조회 장애"** 로 처리됩니다. 실패를 빈 결과로 감추지 마세요.
 - GUI 스레드가 아닌 **백그라운드 스레드에서** 실행됩니다. 콜백 안에서 Qt 위젯을
   건드리면 안 됩니다.
+
+> **페이로드가 맞는지 미리 확인하기** — 실환경에 붙이기 전에 응답 한 건을
+> 파서에 그대로 넣어 보세요. 라이브러리가 실제로 쓰는 바로 그 함수입니다.
+>
+> ```python
+> from lsfmgr import parse_internal_jobs
+>
+> for st in parse_internal_jobs(my_rest_response):
+>     print(st.job_id, st.array_index, st.state, st.exit_code, st.finish_time)
+> ```
+>
+> `state`가 전부 `UNKWN`으로 나오면 상태 필드 이름/값이 안 맞는 것이고,
+> id 필드(`dataId` 등)를 못 찾으면 **본 키 목록을 담은 `ValueError`**가 납니다
+> (한 건도 해석 못 한 응답을 "job 0건"으로 조용히 넘기지 않습니다 — 그러면
+> 전 job이 LOST로 갑니다). 아래 "받아들이는 JSON"의 키 후보와 대조해 보세요. `tools/lsf_selfcheck.py`는
+> 이 확인을 실환경에서 한 번에 돌려 줍니다.
 
 #### 받아들이는 JSON
 

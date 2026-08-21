@@ -117,3 +117,27 @@ def test_aware_payload_does_not_break_pruning():
         assert src.stats()["entries"] == 0
     finally:
         src.shutdown()
+
+
+def test_documented_payload_diagnostic_works():
+    """README §5.8이 안내하는 '페이로드 미리 확인' 흐름이 실제로 동작한다.
+
+    앱이 REST 콜백을 붙이기 전에 응답 한 건을 넣어 보는 용도라, 이 함수가
+    수출돼 있고 문서대로 쓰이는지가 실환경 첫 연결의 성패를 가른다.
+    """
+    from lsfmgr import parse_internal_jobs
+
+    ok = parse_internal_jobs({"jobs": [
+        {"dataId": "12345.c1", "stat": "RUN"},
+        {"dataId": "12346.c1", "stat": "DONE", "endTime": "2026-08-20T10:00:00Z"},
+    ]})
+    assert [s.job_id for s in ok] == [12345, 12346]
+    assert ok[1].finish_time is not None and ok[1].finish_time.tzinfo is None
+
+    # 상태 필드가 안 맞으면 UNKWN — 문서가 말하는 진단 신호
+    bad_stat = parse_internal_jobs({"jobs": [{"dataId": "1.c1", "stat": "???"}]})
+    assert bad_stat[0].state.value == "UNKWN"
+    # id 필드를 못 찾으면 본 키를 담은 ValueError — 빈 결과로 넘기지 않는다
+    # (넘기면 "job 0건"으로 읽혀 전 job이 LOST로 간다)
+    with pytest.raises(ValueError, match="nope"):
+        parse_internal_jobs({"jobs": [{"nope": 1, "stat": "RUN"}]})

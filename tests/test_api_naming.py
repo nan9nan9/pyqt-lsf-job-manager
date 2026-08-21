@@ -114,3 +114,23 @@ def test_every_config_field_is_read():
     unread = [f.name for f in fields(LsfConfig)
               if not re.search(rf"\b(?:config|cfg|self)\.{f.name}\b", src)]
     assert not unread, f"LsfConfig에 있으나 아무도 읽지 않는 필드: {unread}"
+
+
+def test_every_export_is_documented():
+    """공개 export도 README에 있어야 한다 — 없으면 문서 누락이거나
+    실은 내부용이다. parse_internal_jobs가 전자였다(REST 콜백을 쓰는 앱이
+    페이로드를 미리 확인하는 도구인데 어디에도 안 적혀 있었다)."""
+    import pathlib
+    import re
+
+    import lsfmgr
+
+    # 의도적으로 문서화하지 않는 것 — 이유와 함께
+    INTERNAL = {
+        "Options": "해석 결과 dataclass — 앱이 만들지 않는다(타이핑용 export)",
+    }
+    readme = pathlib.Path("README.md").read_text()
+    missing = [n for n in lsfmgr.__all__
+               if n not in INTERNAL and not re.search(rf"\b{n}\b", readme)]
+    assert not missing, f"README에 없는 공개 export: {sorted(missing)}"
+    assert set(INTERNAL) <= set(lsfmgr.__all__), "예외 표가 낡았다"
