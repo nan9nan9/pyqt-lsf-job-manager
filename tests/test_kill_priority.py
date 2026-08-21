@@ -114,7 +114,7 @@ def test_overlapping_kills_keep_snapshot_registered(qtbot, manager, fake_lsf):
 
         # B가 끝나도 A의 등록은 남아야 한다 (기존 버그: 무조건 pop → False)
         assert manager.killer.is_active(jsid) is True
-        assert manager.kill_snapshot(jsid) is not None
+        assert manager.kill_state(jsid) is not None
     finally:
         gate.set()
     with qtbot.waitSignal(manager.kill_finished, timeout=10000):

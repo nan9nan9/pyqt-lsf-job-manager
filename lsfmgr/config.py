@@ -182,6 +182,11 @@ class LsfConfig:
     #: (상태 전이 시점과 무관 — "이 EXIT은 내가 죽인 것"의 근거).
     kill_status_policy: str = "optimistic"
 
+    #: kill 후 실제 종료를 bjobs로 확인할지 (kill(verify=…)가 호출별로 덮는다).
+    #: 앱 전역 정책이라 submit() 옵션이 아니다 — 예전엔 SHARED_KEYS에 있어
+    #: submit(verify_kill=True)가 받아들여진 뒤 아무도 안 읽는 함정이었다.
+    verify_kill: bool = False
+
     poll_interval_s: float = 10.0        # 기본 polling 주기
     #: bjobs에서 안 보이는 job을 LOST로 확정하기까지 필요한 **연속** 미발견
     #: 폴링 횟수. 1이면 즉시 확정. 제출 직후 등록 지연이나, 앱 환경이 가리키는

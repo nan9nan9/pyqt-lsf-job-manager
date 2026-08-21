@@ -267,10 +267,9 @@ class LsfJobManager(QObject):
     # ------------------------------------------------------------------
     # 옵션 해석
     # ------------------------------------------------------------------
-    def resolve_options(self, call_kwargs: Dict[str, Any],
-                        context: str = "submit") -> Options:
+    def _resolve_options(self, call_kwargs: Dict[str, Any]) -> Options:
         """③call kwargs를 defaults(①+②) 위에 merge — 단일 해석 지점."""
-        return resolve_options(self._defaults, call_kwargs, context=context)
+        return resolve_options(self._defaults, call_kwargs)
 
     # ------------------------------------------------------------------
     # High-level submit (v7 §1.1) — JobSet 핸들 반환
@@ -373,7 +372,7 @@ class LsfJobManager(QObject):
         jobset_id = self._jsid(jobset_id)
         return self.submitter.is_active(jobset_id)
 
-    def submit_snapshot(self, jobset_id: JobSetRef) -> "Optional[SubmitProgress]":
+    def submit_state(self, jobset_id: JobSetRef) -> "Optional[SubmitProgress]":
         """[sync] 진행 중 submit의 실시간 스냅샷 (done/total/성공/실패/취소) —
         없거나 이미 끝났으면 None. submit_progress Signal을 놓친 시점에도 현재
         진행을 pull로 조회한다(백그라운드 제출 상태 패널 재구성용).
@@ -388,7 +387,7 @@ class LsfJobManager(QObject):
         jobset_id = self._jsid(jobset_id)
         return self.killer.is_active(jobset_id)
 
-    def kill_snapshot(self, jobset_id: JobSetRef) -> "Optional[KillProgress]":
+    def kill_state(self, jobset_id: JobSetRef) -> "Optional[KillProgress]":
         """[sync] 진행 중 kill의 실시간 스냅샷(done/total) — 없으면 None.
         kill_progress Signal을 놓친 시점에도 현재 진행을 pull로 조회한다."""
         jobset_id = self._jsid(jobset_id)
@@ -496,7 +495,7 @@ class LsfJobManager(QObject):
             log.warning("shutdown 후 kill 요청 무시: %s", jobset_id)
             return
         if verify is None:
-            verify = bool(self._defaults.get("verify_kill", False))
+            verify = self.config.verify_kill
         # kill 우선권(SubmitGate barrier) — 범위는 **겨냥한 job**이다:
         #   전체 kill        → None (= 이 jobset 전 job)
         #   부분 kill        → 지금 그 상태인 job의 key
@@ -535,7 +534,7 @@ class LsfJobManager(QObject):
 
         반환: 실제 큐잉 여부. True일 때만 caller가 kill_started를 발화한다 —
         killer 등록(동기) **이후** 발행이라 kill_started slot에서
-        is_killing()/kill_snapshot()을 pull해도 True/값이 나오고(신호-pull
+        is_killing()/kill_state()을 pull해도 True/값이 나오고(신호-pull
         일치), shutdown 경합 no-op이면 kill_finished도 안 오므로 started를
         내지 않아 UI의 영구 'killing' 고착을 막는다(started/finished 짝)."""
         if scope is not None:
@@ -580,7 +579,7 @@ class LsfJobManager(QObject):
             log.warning("shutdown 후 kill_jobs 요청 무시")
             return
         if verify is None:
-            verify = bool(self._defaults.get("verify_kill", False))
+            verify = self.config.verify_kill
         # 문자열은 시퀀스라 list()가 **글자 단위로 분해**된다 — jobset_id나
         # key 하나를 실수로 넘기면 "js_2026..." 이 한 글자짜리 target이 되어
         # 무관한 job id에 bkill이 나간다. 조용히 통과시키지 않는다.
@@ -1126,7 +1125,7 @@ class LsfJobManager(QObject):
         # 옵션 검증을 **상태 가드보다 먼저** 한다. 오타(workers→worker)는
         # jobset 상태와 무관한 프로그래밍 오류인데, 뒤에 두면 활성 jobset에서
         # "활성 job이 있어 submit 불가"가 먼저 나와 엉뚱한 것을 고치게 된다.
-        opts = self.resolve_options(kwargs, context="submit")
+        opts = self._resolve_options(kwargs)
         self.store.get_jobset(jobset_id)     # 존재 검증 (삭제분이면 예외)
         if self._is_busy(jobset_id):
             raise SubmitNotAllowedError(

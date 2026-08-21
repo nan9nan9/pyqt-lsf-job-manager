@@ -140,7 +140,7 @@ class JobSet(QObject):
         돌려놓고 dialog를 닫은 뒤) 상태 패널을 다시 그릴 때 pull로 조회한다.
         완료 후 최종 결과는 summary / submit_finished(SubmitReport)로 본다."""
         self._check_open()
-        return self._manager.submit_snapshot(self._jobset_id)
+        return self._manager.submit_state(self._jobset_id)
 
     @property
     def is_killing(self) -> bool:
@@ -156,7 +156,7 @@ class JobSet(QObject):
         None. kill_progress Signal을 놓친 뒤 상태 패널을 다시 그릴 때 pull로
         조회한다. 완료 후 최종 결과는 kill_finished(KillReport)로 본다."""
         self._check_open()
-        return self._manager.kill_snapshot(self._jobset_id)
+        return self._manager.kill_state(self._jobset_id)
 
     @property
     def failed_jobs(self) -> List[JobRecord]:

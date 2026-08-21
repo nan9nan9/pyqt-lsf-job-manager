@@ -143,7 +143,6 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)     # 이번 submit만
 | `submit_timeout_s` | 30 | 제출 1건 timeout(초) — wrapper 프로세스 하나의 상한 |
 | `poll_interval_s` | 10 | polling 주기 (5~60) |
 | `auto_poll` | True | submit 후 polling 자동 시작 |
-| `verify_kill` | False | kill 후 실제 종료 확인 (`kill()` 인자로도 지정 가능) |
 
 > JobSet 메타(`label`/`tags`)는 옵션이 아니라 **`create_jobset` 인자**다 —
 > `submit()`에 넘기면 경고 후 무시된다(v9 잔재 하위 호환).
@@ -165,6 +164,7 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)     # 이번 submit만
 | `internal_lost_grace_s` | 60 | 콜백 조회원에서 **제출 후 이 시간 안**의 미발견은 LOST로 세지 않음 — 상태 원본(REST) 집계 지연 유예. 0이면 유예 없음 (§5.8) |
 | `poll_runtime_updates` | False | RUN 중 `run_time_s`(경과시간) 변화도 `jobs_updated`로 live 발행. 켜면 **RUN 전원이 매 폴링 재전이**된다(5000건 기준 사이클당 5000 transition + 5000레코드 배치). 끄면 경과시간은 상태 전이 시점에만 갱신 — 표에 실시간 경과시간 열이 꼭 필요할 때만 켤 것 |
 | `collect_clusters` | False | MultiCluster forwarding 정보 수집 — `JobRecord.source_cluster`/`forward_cluster`를 폴링으로 채움 |
+| `verify_kill` | False | kill 후 `bjobs`로 **실제 종료를 확인**할지. 확인하면 `KillReport.still_alive`에 잔존 job이 담깁니다(안 하면 `None`). `mgr.kill(js, verify=True/False)`가 호출별로 덮습니다 — `submit()` 옵션이 아닙니다 |
 | `kill_status_policy` | `"optimistic"` | `"optimistic"`=kill 수락 확인 시 즉시 EXIT / `"actual"`=실제 LSF 상태(폴링)로만 |
 | `query_timeout_s` | 120 | **`LsfConfig` 전용.** `bjobs` 호출 1회 timeout(초). 콜백 조회원이면 콜백 1회를 기다리는 상한 |
 | `kill_timeout_s` | 120 | **`LsfConfig` 전용.** **`bkill` 호출 1회**(= `kill_chunk_size` 전체)의 timeout(초). job 1건이 아니다 — 못 끝내면 bkill 클라이언트가 중간에 잘려 앞쪽 id만 죽는다. target당 예산이 100ms 미만이면 생성 시 경고 |
@@ -516,6 +516,11 @@ mgr.jobset(jobset_id)      # ID로 핸들 재획득
 > 진행 중이 아니면 `None`이고, 완료 후 최종 결과는 `submit_finished(SubmitReport)` /
 > `kill_finished(KillReport)` 또는 `js.summary`로 봅니다. pull은 throttle과 무관하게
 > 항상 최신값입니다.
+>
+> 핸들 없이 id만 들고 있어도 같습니다 — `mgr.is_submitting(jsid)` /
+> `mgr.submit_state(jsid)` / `mgr.is_killing(jsid)` / `mgr.kill_state(jsid)`.
+> **두 계층의 이름은 항상 같습니다**(`summary`, `is_submitting`, …) — 핸들에서
+> id 기반으로 옮길 때 이름을 새로 찾을 일이 없습니다.
 
 > **실패 원인 표시** — 두 경로로 확인합니다.
 > - **SUBMIT_FAILED / RETRY_WAIT**: `rec.fail_message`에 wrapper/bsub 실행의

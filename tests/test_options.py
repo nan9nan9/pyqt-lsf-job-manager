@@ -23,7 +23,6 @@ def test_builtin_defaults_only():
     assert opts.retry_backoff == "fixed:2"
     assert opts.poll_interval_s == 10.0
     assert opts.auto_poll is True
-    assert opts.verify_kill is False
 
 
 def test_manager_layer_overrides_builtin():
@@ -60,11 +59,24 @@ def test_manager_only_key_rejected_at_call():
         resolve_options({}, {"chunk_size": 100})   # ②전용을 ③에서 사용
 
 
-def test_kill_context_allows_only_verify():
-    opts = resolve_options({}, {"verify_kill": True}, context="kill")
-    assert opts.verify_kill is True
-    with pytest.raises(TypeError):
-        resolve_options({}, {"workers": 8}, context="kill")
+def test_kill_does_not_go_through_option_resolution():
+    """kill의 옵션 경로는 kwargs가 아니라 verify 인자 하나다.
+
+    예전엔 resolve_options에 "kill" context가 있었지만 라이브러리 안에서
+    아무도 부르지 않는 죽은 분기였다(이 테스트만 살려두고 있었다).
+    실제 규칙: ②LsfConfig(verify_kill=…)가 기본이고, kill(verify=…)가 덮는다.
+    """
+    import inspect
+
+    from lsfmgr import LsfConfig, LsfJobManager
+
+    # kill은 **kwargs를 받지 않는다 — 옵션 3단 계층의 ③이 아예 없다
+    params = inspect.signature(LsfJobManager.kill).parameters
+    assert not any(p.kind is inspect.Parameter.VAR_KEYWORD
+                   for p in params.values())
+    assert "verify" in params
+    # ②는 LsfConfig로 들어온다
+    assert LsfConfig(verify_kill=True).verify_kill is True
 
 
 # ----------------------------------------------------------------------
@@ -235,3 +247,50 @@ def test_range_rules_agree_between_config_and_options():
                     f"{name}={v}: LsfConfig={'허용' if a else '거부'} / "
                     f"옵션={'허용' if b else '거부'}")
     assert not mismatches, "\n".join(mismatches)
+
+
+def test_verify_kill_is_a_config_not_a_submit_option():
+    """verify_kill은 앱 전역 정책 — LsfConfig/생성자로만 준다.
+
+    예전엔 SHARED_KEYS에 있어 세 경로가 제각각이었다:
+      submit(verify_kill=True)     → 통과 후 **조용히 무시**(kill만 읽는데
+                                     그건 manager 레벨 값이라 닿지 않음)
+      LsfJobManager(verify_kill=T) → 동작
+      LsfConfig(verify_kill=True)  → TypeError (필드 자체가 없었다)
+    이제 LsfConfig 필드 하나가 소유하고, kill(verify=…)가 호출별로 덮는다.
+    """
+    import pytest
+
+    from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
+    from tests.fake_lsf import FakeLsf
+
+    assert LsfConfig(verify_kill=True).verify_kill is True
+    mgr = LsfJobManager(store=InMemoryStore(), runner=FakeLsf(), verify_kill=True)
+    try:
+        assert mgr.config.verify_kill is True          # 생성자 경로도 config로
+    finally:
+        mgr.shutdown()
+    with pytest.raises(TypeError):                     # 무시가 아니라 거부
+        resolve_options({}, {"verify_kill": True})
+
+
+def test_config_verify_kill_actually_verifies(qtbot, fake_lsf):
+    """설정이 실제로 kill 동작을 바꾸는지 — 읽히지 않으면 위 테스트가
+    통과해도 무의미하다. still_alive는 검증했을 때만 값이 있다(안 하면 None)."""
+    from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
+
+    def run(**cfg):
+        mgr = LsfJobManager(store=InMemoryStore(),
+                            config=LsfConfig(**cfg), runner=fake_lsf)
+        try:
+            js = mgr.create_jobset(["mytool a.sp"], job_keys=["k"])
+            with qtbot.waitSignal(mgr.submit_finished, timeout=20000):
+                mgr.submit(js, auto_poll=False)
+            with qtbot.waitSignal(mgr.kill_finished, timeout=20000) as blk:
+                mgr.kill(js)
+            return blk.args[1]
+        finally:
+            mgr.shutdown()
+
+    assert run().still_alive is None                       # 기본 = 미검증
+    assert run(verify_kill=True).still_alive is not None    # 설정이 먹는다

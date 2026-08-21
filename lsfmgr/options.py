@@ -22,7 +22,7 @@ log = logging.getLogger("lsfmgr.options")   # 모듈 로거 (코드베이스 관
 SHARED_KEYS = frozenset({
     "workers", "max_retry", "retry_backoff",
     "poll_interval_s", "auto_poll",
-    "submit_timeout_s", "verify_kill",
+    "submit_timeout_s",
 })
 #: 제거된 옵션 — 받으면 TypeError 대신 경고 후 무시 (기존 앱 하위 호환).
 #: script_dir: array dispatch 제거(v9)로 무용.
@@ -44,6 +44,7 @@ DEPRECATED_KEYS = frozenset({
 #: ②(manager) 전용 — Options에 포함되지 않고 config/store 구성에 쓰이는 키
 MANAGER_ONLY_KEYS = frozenset({
     "chunk_size",
+    "verify_kill",
     "arg_max",
     "bjobs_path", "bkill_path",
     "kill_status_policy", "kill_chunk_size", "kill_workers",
@@ -70,7 +71,6 @@ class Options:
     poll_interval_s: float = 10.0
     auto_poll: bool = True
     submit_timeout_s: float = 30.0
-    verify_kill: bool = False
 
     def retry_delay_s(self, attempt: int) -> float:
         """attempt번째(0부터) 실패 후 재시도 대기 시간.
@@ -218,21 +218,15 @@ def validate_options(kwargs: Dict[str, Any], *, allowed: frozenset,
     return out
 
 
-def resolve_options(defaults: Dict[str, Any], call_kwargs: Dict[str, Any], *,
-                    context: str = "submit") -> Options:
-    """옵션 해석 단일 지점.
+def resolve_options(defaults: Dict[str, Any],
+                    call_kwargs: Dict[str, Any]) -> Options:
+    """옵션 해석 단일 지점 — ③call kwargs를 defaults(①내장+②manager) 위에.
 
-    defaults(①내장+②manager가 이미 merge된 값) 위에 ③call kwargs를 덮어
-    frozen Options를 만든다. context에 따라 허용 키가 다르다:
-    - "submit": 공통(SHARED_KEYS)
-    - "kill":   verify_kill만
+    kwargs로 옵션을 받는 호출 지점은 submit 하나뿐이다. kill은 kwargs를
+    받지 않고 `verify` 인자 하나로 ②를 덮으므로 이 경로를 타지 않는다.
     """
-    if context == "kill":
-        allowed = frozenset({"verify_kill"})
-    else:
-        allowed = SHARED_KEYS
-    call = validate_options(call_kwargs, allowed=allowed,
-                            where=f"{context}()")
+    call = validate_options(call_kwargs, allowed=SHARED_KEYS,
+                            where="submit()")
 
     merged = dict(BUILTIN_DEFAULTS)
     merged.update(defaults)

@@ -89,7 +89,7 @@ class Killer(QObject):
     def _reg(self, jobset_id: str) -> List[int]:
         """kill 1건 등록 — 반환 slot으로만 갱신/해제한다.
         전역 kill(jsid="")도 빈 키로 등록한다 — kill_started 직후
-        is_killing()/kill_snapshot()이 True/값을 준다는 pull 계약이 전역
+        is_killing()/kill_state()이 True/값을 준다는 pull 계약이 전역
         경로에서만 깨지지 않게 한다(jobset 가드는 실제 jsid로만 조회하므로
         빈 키 항목의 영향이 없다)."""
         slot = [0, 0]
@@ -145,7 +145,7 @@ class Killer(QObject):
         아래 원자화한다(락 규율이 진입점마다 복사되지 않게).
 
         진행 스냅샷 등록(_reg)은 여기(호출 스레드)에서 한다 — 반환 시점에
-        is_killing()/kill_snapshot()이 즉시 True/값을 주도록 (caller가 직후
+        is_killing()/kill_state()이 즉시 True/값을 주도록 (caller가 직후
         발행하는 kill_started와 pull API가 일치해야 한다)."""
         with self._shutdown_lock:            # 체크+start 원자화 (shutdown 경합)
             if self._shutdown:

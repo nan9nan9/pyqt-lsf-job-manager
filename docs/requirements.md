@@ -86,7 +86,7 @@ if mgr.can_submit(js):
 
 전체 카탈로그는 [README §3.1](../README.md). 계약은 다음 네 가지다:
 
-- **OPT-1** 옵션 해석은 `resolve_options(call_kwargs) -> Options` 한 함수로 일원화
+- **OPT-1** 옵션 해석은 `resolve_options(defaults, call_kwargs) -> Options` 한 함수로 일원화 (호출 지점은 submit 하나 — kill은 verify 인자로만 받는다)
   (defaults → manager → call 순 merge, frozen dataclass 반환).
 - **OPT-2** 알 수 없는 키워드는 즉시 `TypeError` (오타 조기 발견).
 - **OPT-3** 범위 검증 (workers 1~64 등) 위반 시 `ValueError`.
@@ -130,8 +130,8 @@ mgr.remove_handler(js, name)
 mgr.jobset(jobset_id) -> JobSet              # ID로 핸들 재획득
 mgr.summary(js); mgr.total_summary(); mgr.get_jobs(js, states=None)
 mgr.list_jobsets(); mgr.search_jobsets(...); mgr.detect_lost(js)
-mgr.is_submitting(js); mgr.submit_snapshot(js)
-mgr.is_killing(js);  mgr.kill_snapshot(js)
+mgr.is_submitting(js); mgr.submit_state(js)
+mgr.is_killing(js);  mgr.kill_state(js)
 mgr.shutdown()
 ```
 
