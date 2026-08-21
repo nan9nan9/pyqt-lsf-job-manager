@@ -182,3 +182,39 @@ def test_resubmit_forgets_the_old_job_id(qtbot, fake_lsf):
         assert first not in src._ledger, "옛 job_id가 원장에 남았다"
     finally:
         mgr.shutdown()
+
+
+def test_replace_jobs_forgets_the_old_job_id(qtbot, fake_lsf):
+    """교체(replace/upsert)도 같은 key의 옛 job_id를 원장에서 버려야 한다.
+
+    id를 지우는 쪽이 버리는 것도 책임진다 — 삭제는 remove_*, 재제출은
+    submitter, 교체는 _rearm_tracking. 교체만 빠져 있었다(무작위 부하
+    시험에서 job 편집을 섞자 드러났다)."""
+    from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
+
+    live = {}
+    mgr = LsfJobManager(
+        store=InMemoryStore(),
+        config=LsfConfig(job_status_fetcher=lambda: {"jobs": [
+            {"dataId": f"{i}.c1", "stat": "RUN"} for i in live]},
+            internal_refresh_min_s=0.0),
+        runner=fake_lsf)
+    src = mgr.command.internal_status
+    try:
+        js = mgr.create_jobset(["mytool a.sp"], job_keys=["k"])
+        with qtbot.waitSignal(mgr.submit_finished, timeout=20000):
+            mgr.submit(js, auto_poll=False)
+        old = js.jobs()[0].job_id
+        live[old] = 1
+        mgr.query_once(js)
+        qtbot.wait(200)
+        assert old in src._interest
+
+        with qtbot.waitSignal(mgr.kill_finished, timeout=20000):
+            mgr.kill(js)
+        mgr.replace_jobs(js, ["mytool b.sp"], job_keys=["k"])
+        assert js.jobs()[0].job_id is None      # 교체로 id가 사라졌다
+        assert old not in src._interest, "교체된 옛 job_id가 관심 집합에 남았다"
+        assert old not in src._ledger
+    finally:
+        mgr.shutdown()

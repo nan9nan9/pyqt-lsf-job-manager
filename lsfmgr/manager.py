@@ -913,18 +913,25 @@ class LsfJobManager(QObject):
             return []
         records = self._build_job_records(jobset_id, items, job_keys,
                                           user_datas, work_dir, work_dirs)
+        # 교체될 레코드의 job_id를 **편집 전에** 떠 둔다 — 교체 후에는 새
+        # 레코드(job_id=None)라 어느 id가 버려졌는지 알 방법이 없다.
+        before = {r.job_key: r.job_id
+                  for r in self.store.get_jobs(jobset_id)}
         changed = self.jobsets.local_edit_jobs(jobset_id, records,
                                                policy=policy, force=force)
         if changed:
             # 교체분은 job_key가 유지되므로 추적 장부를 리셋해야 새 내용에
             # handler/LOST 판정이 정상 동작한다. 추가분은 장부가 없어 no-op.
-            self._rearm_tracking(jobset_id, [r.job_key for r in changed])
+            keys = [r.job_key for r in changed]
+            self._rearm_tracking(jobset_id, keys,
+                                 [before[k] for k in keys if before.get(k)])
             self._relay_jobs_changed(jobset_id, list(changed))
         self._resume_polling_if_watchable(jobset_id)
         return changed
 
-    def _rearm_tracking(self, jobset_id: str, keys: List[str]) -> None:
-        """재실행/교체될 job의 추적 장부 무효화 — 항상 **쌍으로** 리셋한다.
+    def _rearm_tracking(self, jobset_id: str, keys: List[str],
+                        stale_ids: Optional[List[int]] = None) -> None:
+        """재실행/교체될 job의 추적 장부 무효화 — 항상 **한 벌로** 리셋한다.
 
         - handler 진행 상태(rearm): 옛 _FINISHED가 남으면 같은 key의 새
           실행에 handler가 영영 침묵한다.
@@ -933,9 +940,16 @@ class LsfJobManager(QObject):
           조기 반환해 옛 값이 그대로 남는다 — 재제출 사이가 정확히 그
           상태다(전원 terminal/CREATED). 그대로 두면 새 실행이 옛 실행의
           미발견 횟수를 물려받아, 제출 직후 등록 지연으로 한 번만 안 보여도
-          LOST(되돌릴 수 없는 terminal)가 확정된다."""
+          LOST(되돌릴 수 없는 terminal)가 확정된다.
+        - 콜백 조회원 원장(stale_ids): 교체로 레코드에서 사라진 옛 job_id.
+          안 버리면 아무도 조회하지 않는 id가 관심 집합에 남아, 진행 중으로
+          마지막에 보였던 것은 만료 대상도 아니라 영구히 쌓인다.
+          **id를 지우는 쪽이 버리는 것도 책임진다**(재제출은 submitter가,
+          삭제는 remove_*가, 교체는 여기가)."""
         self.handlers.rearm(jobset_id, keys)
         self.querier.forget(jobset_id, keys)
+        if stale_ids:
+            self.command.forget_status(stale_ids)
 
     def _resume_polling_if_watchable(self, jobset_id: str) -> None:
         """관찰할 job(비terminal)이 생겼으면 폴링을 (재)시작한다.
@@ -1362,9 +1376,7 @@ class LsfJobManager(QObject):
         # remove_jobset 뒤에 도착하는 일은 흔하다. 흘려보내면 job_key로 행을
         # 채우는 표에 지운 행이 되살아나고, pacer에는 치울 주인 없는 항목이
         # 남는다(일회성 forget을 늦은 push가 되살리던 자리 — 카오스에서 걸림).
-        try:
-            self.store.get_jobset(jsid)
-        except LsfmgrError:
+        if not self.store.exists(jsid):
             return
         if self._pacer is None:
             self.jobs_updated.emit(jsid, records)

@@ -42,6 +42,10 @@ class InMemoryStore(JobSetStore):
             self._counts.setdefault(record.jobset_id, {})
             return record
 
+    def exists(self, jobset_id: str) -> bool:
+        with self._lock:
+            return jobset_id in self._jobsets
+
     def get_jobset(self, jobset_id: str) -> JobSetRecord:
         with self._lock:
             try:

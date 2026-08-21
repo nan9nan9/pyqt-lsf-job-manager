@@ -24,6 +24,19 @@ TransitionSpec = Tuple[
 class JobSetStore(ABC):
     """JobSet/JobRecord 저장소 계약."""
 
+    def exists(self, jobset_id: str) -> bool:
+        """jobset이 아직 있는가 — **늦게 도착한 쓰기를 버릴지**의 단일 술어.
+
+        worker가 이미 만들어 둔 결과가 remove_jobset 뒤에 도착하는 일은
+        흔하다. 그대로 흘려보내면 지운 jobset에 매달린 상태가 되살아나
+        치울 주인이 없어진다(표시 pacer 항목·미발견 스트릭이 실제로 그랬다).
+        예외를 잡아 분기하는 대신 이름 있는 질문으로 둔다."""
+        try:
+            self.get_jobset(jobset_id)
+            return True
+        except JobSetNotFoundError:
+            return False
+
 
     # ------------------------------------------------------------------
     # JobSet CRUD

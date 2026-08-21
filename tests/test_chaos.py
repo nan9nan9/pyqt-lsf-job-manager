@@ -23,7 +23,7 @@ from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
 from lsfmgr.errors import LsfmgrError
 from tests.test_jobset_cleanup import _find_traces
 
-STEPS = 400
+STEPS = 500
 
 
 @pytest.mark.parametrize("seed,rest", [(11, False), (12, False), (13, False),
@@ -87,11 +87,34 @@ def test_random_operations_preserve_invariants(seed, rest, qtbot, fake_lsf):
             elif r < 0.65: mgr.query_once(js)
             elif r < 0.72: mgr.start_polling(js, 5.0)
             elif r < 0.78: mgr.stop_polling(js)
-            elif r < 0.84: mgr.add_handler(js, f"h{rnd.randrange(3)}",
+            elif r < 0.82: mgr.add_handler(js, f"h{rnd.randrange(3)}",
                                            lambda c: None)
-            elif r < 0.90: fake_lsf.set_all(
+            elif r < 0.86:                       # job 단위 편집
+                keys = [x.job_key for x in js.jobs()]
+                if keys:
+                    pick = rnd.sample(keys, k=min(len(keys), 2))
+                    e = rnd.random()
+                    if e < 0.3: mgr.remove_jobs(js, pick, force=True)
+                    elif e < 0.5: mgr.clear_jobs(js, force=True)
+                    elif e < 0.7: mgr.replace_jobs(
+                        js, [f"mytool r{i}.sp" for i in range(len(pick))],
+                        job_keys=pick)
+                    elif e < 0.85: mgr.upsert_jobs(
+                        js, ["mytool u0.sp", "mytool u1.sp"],
+                        job_keys=["u0", "u1"])
+                    else: mgr.set_user_data(js, pick[0], {"n": 1})
+            elif r < 0.89: fake_lsf.set_all(
                 rnd.choice(["PEND", "RUN", "DONE", "EXIT"]))
+            elif r < 0.91:
+                mgr.add_jobs(js, [f"mytool a{rnd.randrange(99)}.sp"],
+                             job_keys=[f"a{rnd.randrange(999)}"])
+            elif r < 0.93:
+                ids = [x.job_id for x in js.jobs() if x.job_id]
+                if ids:
+                    mgr.kill_jobs(ids[:3])
+            elif r < 0.945: mgr.detect_lost(js)
             elif r < 0.96:
+                mgr.total_summary(); mgr.search_jobsets(tag="x")
                 mgr.summary(js); js.jobs(); mgr.is_submitting(js)
             else:
                 live.remove(js); removed.add(js.id)

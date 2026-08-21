@@ -86,6 +86,10 @@ class JobsetQuerier:
             return self._missing_streak.pop(jobset_id, {})
 
     def _set_streaks(self, jobset_id: str, streaks: Dict[str, int]) -> None:
+        # 조회는 스트릭을 꺼내(_pop_streaks) 계산하고 여기서 되쓴다. 그 사이에
+        # jobset이 지워졌다면 되쓰기가 forget을 무효로 만든다 — 버린다.
+        if not self.store.exists(jobset_id):
+            return
         with self._streak_lock:
             if streaks:
                 self._missing_streak[jobset_id] = streaks
