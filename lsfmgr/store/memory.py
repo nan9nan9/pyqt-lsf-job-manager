@@ -165,6 +165,26 @@ class InMemoryStore(JobSetStore):
                 raise JobNotFoundError(f"{jobset_id}/{job_key}")
             return self._drop_rec(jobset_id, job_key)
 
+    def store_delete_jobs(self, jobset_id: str, job_keys):
+        """lock을 한 번만 잡는 일괄 삭제 (계약은 base 참고)."""
+        out = []
+        with self._lock:
+            jobs = self._jobs.get(jobset_id)
+            if jobs is None:
+                return out
+            for key in job_keys:
+                if key in jobs:
+                    out.append(self._drop_rec(jobset_id, key))
+        return out
+
+    def get_jobs_by_keys(self, jobset_id: str, job_keys):
+        """lock을 한 번만 잡는 배치 읽기 (계약은 base 참고)."""
+        with self._lock:
+            jobs = self._jobs.get(jobset_id)
+            if jobs is None:
+                return {}
+            return {k: jobs[k] for k in job_keys if k in jobs}
+
     def update_job(self, record: JobRecord) -> JobRecord:
         with self._lock:
             jobs = self._jobs.get(record.jobset_id)

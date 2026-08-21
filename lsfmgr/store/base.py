@@ -76,6 +76,56 @@ class JobSetStore(ABC):
         없으면 JobNotFoundError. LSF의 실제 job은 건드리지 않는다 —
         저장소 추적에서만 제외한다(필요하면 호출 전에 kill할 것)."""
 
+    def store_delete_jobs(self, jobset_id: str,
+                          job_keys: Sequence[str]) -> List[JobRecord]:
+        """여러 job을 한 번에 삭제 — 대량 삭제의 트랜잭션 비용 절감용.
+
+        transition_many와 같은 이유다: 건별 호출은 백엔드 lock을 job 수만큼
+        잡았다 놓는데, clear_jobs/remove_jobs는 GUI 스레드에서 도는 [sync]
+        API라 폴링/제출 worker와 lock을 다투는 동안 화면이 멈춘다
+        (5000건 부하 실측 547ms).
+
+        기본 구현은 건별 반복이라 새 백엔드도 그대로 동작한다 — lock을 쥐는
+        백엔드만 한 번에 처리하도록 오버라이드하면 된다.
+        반환: 실제로 지워진 레코드(없는 키는 조용히 건너뜀, 입력 순서).
+        jobset 자체가 없어도 빈 목록이다 — 삭제 경합으로 jobset이 사라진
+        것과 키가 없는 것은 caller에게 같은 답이다(get_jobs_by_keys와 같은
+        규약). 그래서 두 예외를 **모두** 흡수한다: 백엔드마다 "없는 jobset의
+        job"을 JobNotFound로 볼지 JobSetNotFound로 볼지가 갈리는데, 그 차이가
+        여기 계약까지 새면 정리 경로가 백엔드에 따라 통째로 끊긴다."""
+        out: List[JobRecord] = []
+        for key in job_keys:
+            try:
+                out.append(self.store_delete_job(jobset_id, key))
+            except (JobNotFoundError, JobSetNotFoundError):
+                continue
+        return out
+
+    def get_jobs_by_keys(self, jobset_id: str,
+                         job_keys: Sequence[str]) -> Dict[str, JobRecord]:
+        """지정한 key의 레코드만 한 번에 읽는다 — 배치 읽기.
+
+        store_delete_jobs/transition_many와 같은 자리의 최적화다. 대안 둘이
+        모두 나쁘기 때문에 따로 둔다: 전 job을 훑으면(get_jobs) 읽는 키가
+        몇 개든 store 크기에 비례하고, 건별 get_job 루프는 백엔드 lock을
+        키 수만큼 잡았다 놓는다. 5000건 jobset 실측(키 50개 / 5000개) —
+        스캔 0.27ms / 1.17ms, 건별 0.04ms / 4.52ms, 일괄 0.01ms / 0.89ms.
+
+        기본 구현은 건별 반복이라 새 백엔드도 그대로 동작한다 — lock을 쥐는
+        백엔드만 한 번에 처리하도록 오버라이드하면 된다.
+        반환: {job_key: JobRecord} — **없는 키는 조용히 빠진다**. jobset
+        자체가 없어도 빈 dict다(get_jobs와 달리 예외가 아니다): 이 API는
+        "이 키들 중 있는 것"을 묻는 것이고, 삭제 경합으로 jobset이 사라진
+        것과 키가 없는 것은 caller에게 같은 답이다 — store_delete_jobs와
+        같은 규약."""
+        out: Dict[str, JobRecord] = {}
+        for key in job_keys:
+            try:
+                out[key] = self.get_job(jobset_id, key)
+            except (JobNotFoundError, JobSetNotFoundError):
+                continue
+        return out
+
     @abstractmethod
     def update_job(self, record: JobRecord) -> JobRecord: ...
 

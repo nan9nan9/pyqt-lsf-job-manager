@@ -235,8 +235,8 @@ class JobSetManager:
                 f"{busy[:5]} (force=True로 레코드만 강제 삭제 가능)",
                 jobset_id=jobset_id, job_keys=busy)
         _warn_orphans(jobset_id, targets, what)
-        for r in targets:
-            self.store.store_delete_job(jobset_id, r.job_key)
+        # 건별이 아니라 일괄 — 이유는 store.store_delete_jobs 참고
+        self.store.store_delete_jobs(jobset_id, [r.job_key for r in targets])
         self._sync_intended_count(jobset_id)
         return targets
 
@@ -255,18 +255,21 @@ class JobSetManager:
                       and r.state is JobState.SUBMITTING]
 
         # guard(CAS): 스냅샷 이후 submit 재시도가 job_id를 채웠으면(정상 PEND)
-        # LOST 확정을 건너뛴다 — 살아있는 레코드를 덮어쓰지 않는다
-        lost: List[JobRecord] = []
-        for rec in candidates:
-            still = lambda cur, rec=rec: (cur.job_id is None       # noqa: E731
-                                          and cur.state is rec.state)
-            new = self.store.transition(
-                jobset_id, rec.job_key, JobState.LOST,
-                fail_reason=rec.fail_reason or "NO_JOBID_PARSED",
-                guard=still)
-            if new is not None:
-                lost.append(new)
-        return lost
+        # LOST 확정을 건너뛴다 — 살아있는 레코드를 덮어쓰지 않는다.
+        #
+        # 건별 transition이 아니라 transition_many로 **한 번에** 넘긴다:
+        # 건별이면 store lock을 job 수만큼 잡았다 놓는데, 이 호출은 GUI
+        # 스레드에서 동기로 도는 [sync] API라 폴링/제출 worker와 lock을
+        # 다투는 동안 그대로 화면이 멈춘다(5000건 부하 실측 875ms).
+        if not candidates:
+            return []
+        def _still(rec):
+            return lambda cur: (cur.job_id is None
+                                and cur.state is rec.state)
+        specs = [(rec.job_key, JobState.LOST, _still(rec),
+                  {"fail_reason": rec.fail_reason or "NO_JOBID_PARSED"})
+                 for rec in candidates]
+        return self.store.transition_many(jobset_id, specs)
 
     # ------------------------------------------------------------------
     # 삭제 (jobset 자체)
