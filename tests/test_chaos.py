@@ -1,0 +1,111 @@
+"""여러 jobset을 무작위로 조작해도 불변식이 깨지지 않는다.
+
+순차 시나리오 테스트가 못 잡는 것은 **경합 경로**다 — 실제로 조회 직렬화
+lock 누수가 여기서만 걸렸다(삭제 직후 도착한 조회가 lock을 되살려 영영
+남았다). 확정 seed로 조작 순서를 뽑아 재현 가능하게 유지한다.
+
+검사하는 불변식:
+  ① 상태별 합 == total (요약 불변식)
+  ② 정착 후 진행 중인 submit/kill이 없다
+  ③ 지운 jobset의 흔적이 살아있는 객체 어디에도 없다
+  ④ submit_started 수 ≤ submit_finished 수 (착수/완료 짝)
+  ⑤ 문서화된 거부(LsfmgrError/ValueError) 외의 예외가 없다
+"""
+from __future__ import annotations
+
+import collections
+import random
+
+import pytest
+
+from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
+from lsfmgr.errors import LsfmgrError
+from tests.test_jobset_cleanup import _find_traces
+
+STEPS = 400
+
+
+@pytest.mark.parametrize("seed", [11, 12, 13])
+def test_random_operations_preserve_invariants(seed, qtbot, fake_lsf):
+    rnd = random.Random(seed)
+    mgr = LsfJobManager(
+        store=InMemoryStore(),
+        config=LsfConfig(poll_interval_s=5.0, workers=8,
+                         kill_workers=4, kill_chunk_size=4,
+                         max_retry=1, retry_delay_s=0.02,
+                         min_state_dwell_s=rnd.choice([0.0, 0.15]),
+                         chunk_size=rnd.choice([3, 50])),
+        runner=fake_lsf)
+    live, removed, viol = [], set(), []
+    pair = collections.Counter()
+    mgr.submit_started.connect(lambda j: pair.update([("s", j)]))
+    mgr.submit_finished.connect(lambda j, r: pair.update([("f", j)]))
+
+    def check_summary(*_a):                                    # 불변식 ①
+        for js in list(live):
+            try:
+                s = mgr.summary(js)
+            except LsfmgrError:
+                continue
+            total = s.get("total", 0)
+            parts = sum(v for k, v in s.items() if k != "total")
+            if parts != total:
+                viol.append(f"요약 합 {parts} != total {total} ({js.id})")
+    mgr.jobs_updated.connect(check_summary)
+    mgr.kill_finished.connect(check_summary)
+
+    def step():
+        r = rnd.random()
+        try:
+            if r < 0.14 or not live:
+                n = rnd.randrange(1, 8)
+                live.append(mgr.create_jobset(
+                    [f"mytool {rnd.randrange(999)}.sp" for _ in range(n)],
+                    job_keys=[f"k{i}" for i in range(n)]))
+                return
+            js = rnd.choice(live)
+            if r < 0.40:
+                if mgr.can_submit(js):
+                    mgr.submit(js, auto_poll=rnd.random() < 0.5,
+                               post_process=((lambda rep: None)
+                                             if rnd.random() < 0.3 else None))
+            elif r < 0.55: mgr.kill(js)
+            elif r < 0.65: mgr.query_once(js)
+            elif r < 0.72: mgr.start_polling(js, 5.0)
+            elif r < 0.78: mgr.stop_polling(js)
+            elif r < 0.84: mgr.add_handler(js, f"h{rnd.randrange(3)}",
+                                           lambda c: None)
+            elif r < 0.90: fake_lsf.set_all(
+                rnd.choice(["PEND", "RUN", "DONE", "EXIT"]))
+            elif r < 0.96:
+                mgr.summary(js); js.jobs(); mgr.is_submitting(js)
+            else:
+                live.remove(js); removed.add(js.id)
+                mgr.remove_jobset(js, force=True)
+        except (LsfmgrError, ValueError):
+            pass                                # 문서화된 거부는 정상 경로
+        except Exception as e:                  # noqa: BLE001  불변식 ⑤
+            viol.append(f"예상 밖 예외 {type(e).__name__}: {e}")
+
+    try:
+        for i in range(STEPS):
+            step()
+            if i % 25 == 0:
+                qtbot.wait(1)
+        qtbot.wait(1500)                        # 정착
+
+        for js in live:                                        # 불변식 ②
+            try:
+                if mgr.is_submitting(js) or mgr.is_killing(js):
+                    viol.append(f"정착 후에도 진행 중: {js.id}")
+            except LsfmgrError:
+                pass
+        traces = _find_traces(mgr, removed)                    # 불변식 ③
+        if traces:
+            viol.append(f"삭제 흔적: {sorted(traces)[:3]}")
+        for (kind, j), c in pair.items():                      # 불변식 ④
+            if kind == "s" and pair[("f", j)] < c:
+                viol.append(f"started {c} > finished {pair[('f', j)]} ({j})")
+        assert not viol, "\n  ".join([""] + viol[:10])
+    finally:
+        mgr.shutdown()

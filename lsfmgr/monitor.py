@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -40,6 +41,16 @@ def _keep(new, old):
     return new if new is not None else old
 
 
+class _QLock:
+    """조회 직렬화용 lock + 지금 쓰는 사람 수 (표의 자기 청소 근거)."""
+
+    __slots__ = ("lock", "users")
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.users = 0
+
+
 @dataclass(frozen=True)
 class QueryResult:
     jobset_id: str
@@ -67,8 +78,8 @@ class JobsetQuerier:
         # read-modify-write(_pop_streaks → 계산 → _set_streaks)가 겹쳐
         # 유실/이중 증가한다 — '연속 N회 미발견' 유예(LOST 안전장치 ②)가
         # 흔들린다. 서로 다른 jobset의 병행 조회는 그대로 둔다.
-        # jobset이 사라지면 forget()이 여기서도 지운다(장수 세션 누적 방지).
-        self._query_locks: Dict[str, threading.Lock] = {}
+        # 쓰는 동안만 항목이 산다 — _serialized_query가 스스로 치운다.
+        self._query_locks: Dict[str, "_QLock"] = {}
 
     def _pop_streaks(self, jobset_id: str) -> Dict[str, int]:
         with self._streak_lock:
@@ -92,13 +103,9 @@ class JobsetQuerier:
         with self._streak_lock:
             if job_keys is None:
                 self._missing_streak.pop(jobset_id, None)
-                # 직렬화 lock도 함께 버린다 — jobset이 사라졌으니 다시
-                # query()가 올 일이 없다. 안 지우면 create/remove를 반복하는
-                # 장수 세션에서 jobset 수만큼 무한정 쌓인다(실측 30회 → 30개).
-                # 지우는 순간 그 lock을 쥔 조회가 돌고 있어도 안전하다 —
-                # 그 스레드는 객체 참조를 이미 들고 있고, 새 query()는 어차피
-                # 존재 검증에서 JobSetNotFoundError로 끝난다.
-                self._query_locks.pop(jobset_id, None)
+                # 직렬화 lock은 여기서 안 지운다 — 쓰는 쪽이 스스로 치운다
+                # (_serialized_query 참고). 삭제 직후 도착한 조회가 lock을
+                # 되살려 영영 남던 자리다.
                 return
             streaks = self._missing_streak.get(jobset_id)
             if streaks is None:
@@ -118,9 +125,30 @@ class JobsetQuerier:
             return 0.0
         return max(0.0, float(self.command.config.internal_lost_grace_s))
 
-    def _qlock(self, jobset_id: str) -> threading.Lock:
+    @contextmanager
+    def _serialized_query(self, jobset_id: str):
+        """같은 jobset의 조회를 직렬화한다 — **쓰는 동안만** 표에 남는다.
+
+        예전엔 setdefault로 만들고 삭제(forget) 때 한 번 지웠는데, 삭제 직후
+        도착한 조회가 다시 만들어 넣으면 치울 주인이 없어 영영 남았다
+        (카오스 부하에서 실제로 걸렸다). 표가 사용자보다 오래 사는 구조
+        자체를 없앤다 — 마지막 사용자가 나가면 항목도 사라지므로,
+        "조회가 하나도 안 돌면 표는 비어 있다"가 불변식이 된다.
+        """
         with self._streak_lock:
-            return self._query_locks.setdefault(jobset_id, threading.Lock())
+            entry = self._query_locks.get(jobset_id)
+            if entry is None:
+                entry = self._query_locks[jobset_id] = _QLock()
+            entry.users += 1
+            lock = entry.lock
+        try:
+            with lock:
+                yield
+        finally:
+            with self._streak_lock:
+                entry.users -= 1
+                if entry.users <= 0 and self._query_locks.get(jobset_id) is entry:
+                    del self._query_locks[jobset_id]
 
     def query(self, jobset_id: str, *, fresh: bool = False) -> QueryResult:
         """jobset 1건 조회 + Store 반영.
@@ -128,7 +156,7 @@ class JobsetQuerier:
         fresh=True는 콜백 조회원(job_status_fetcher)에서만 의미가 있다 —
         스냅샷 캐시를 건너뛰고 새로 받는다. kill verify처럼 '방금'의 생사를
         봐야 하는 호출자가 쓴다(bjobs 경로는 항상 새로 실행하므로 무영향)."""
-        with self._qlock(jobset_id):         # 직렬화 근거는 __init__ 주석
+        with self._serialized_query(jobset_id):   # 직렬화 근거는 __init__ 주석
             return self._query_serialized(jobset_id, fresh=fresh)
 
     def _query_serialized(self, jobset_id: str, *,

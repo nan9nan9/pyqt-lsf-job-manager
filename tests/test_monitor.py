@@ -190,27 +190,67 @@ def test_polling_shutdown_cleans_timers_in_thread(qtbot, manager, fake_lsf,
     assert "Timers cannot be stopped from another thread" not in err, err
 
 
-def test_querier_forget_drops_the_serialization_lock(qtbot, manager):
-    """jobset을 만들고 지우기를 반복하는 장수 세션에서 jobset별 직렬화 lock이
-    쌓이면 안 된다 — forget()이 스트릭만 지우고 lock은 두고 갔다."""
+def test_serialization_locks_live_only_while_a_query_runs(qtbot, manager):
+    """조회 직렬화 lock 표는 **쓰는 동안만** 항목을 가진다.
+
+    예전엔 조회가 lock을 만들어 두고 jobset 삭제(forget) 때 한 번 지웠는데,
+    삭제 직후 도착한 조회가 다시 만들어 넣으면 치울 주인이 없어 영영 남았다
+    (여러 jobset을 무작위로 조작하는 부하 시험에서 실제로 걸렸다). 이제
+    마지막 사용자가 나가면 항목도 사라진다 — "조회가 안 돌면 표는 비어
+    있다"가 불변식이라 삭제 타이밍과 무관해진다.
+    """
     q = manager.querier
-    before = len(q._query_locks)
     ids = []
     for i in range(5):
         js = manager.create_jobset([f"echo {i}"], job_keys=[f"k{i}"])
         ids.append(js.id)
-        q.query(js.id)                       # lock 생성 지점
-    assert len(q._query_locks) == before + 5
+        q.query(js.id)
+    assert q._query_locks == {}, "조회가 끝났는데 lock이 남았다"
+
     for jsid in ids:
         manager.remove_jobset(jsid, force=True)
-    assert len(q._query_locks) == before, q._query_locks
+    assert q._query_locks == {}
 
 
-def test_querier_forget_keeps_the_lock_for_partial_job_removal(qtbot, manager):
-    """job 몇 개만 지운 것은 jobset이 살아있다는 뜻 — lock을 버리면 안 된다."""
+def test_query_after_removal_leaves_no_lock(qtbot, manager):
+    """삭제 뒤 도착한 조회(이미 큐에 들어가 있던 것)도 흔적을 안 남긴다."""
+    from lsfmgr.errors import JobSetNotFoundError
+
     q = manager.querier
-    js = manager.create_jobset(["a", "b"], job_keys=["ka", "kb"])
-    q.query(js.id)
-    assert js.id in q._query_locks
-    manager.remove_jobs(js.id, ["ka"])
-    assert js.id in q._query_locks
+    js = manager.create_jobset(["a"], job_keys=["ka"])
+    jsid = js.id
+    manager.remove_jobset(jsid, force=True)
+    with pytest.raises(JobSetNotFoundError):
+        q.query(jsid)                       # 존재 검증에서 끝난다
+    assert q._query_locks == {}, "삭제된 jobset의 lock이 되살아나 남았다"
+
+
+def test_concurrent_queries_share_one_lock(qtbot, manager):
+    """같은 jobset의 병행 조회는 여전히 직렬화된다 — 청소가 직렬화를 깨면 안 된다.
+    (미발견 스트릭이 유실/이중 증가하면 LOST 유예가 흔들린다)"""
+    import threading
+
+    q = manager.querier
+    js = manager.create_jobset(["a"], job_keys=["ka"])
+    overlap, inside = [], threading.Semaphore(0)
+    real = q._query_serialized
+
+    def slow(jsid, **kw):
+        overlap.append(1)
+        assert len(overlap) == 1, "같은 jobset 조회가 겹쳤다"
+        inside.release()
+        import time as _t
+        _t.sleep(0.15)
+        overlap.pop()
+        return real(jsid, **kw)
+
+    q._query_serialized = slow
+    try:
+        ts = [threading.Thread(target=q.query, args=(js.id,)) for _ in range(4)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(10)
+    finally:
+        q._query_serialized = real
+    assert q._query_locks == {}

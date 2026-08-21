@@ -1358,6 +1358,14 @@ class LsfJobManager(QObject):
         pacer가 job별 dwell을 채운 뒤 대신 발화한다. 켜져 있어도 요약
         (jobset_updated)과 pull(get_jobs)은 늦추지 않는다 — 요약은 store에서
         바로 계산되므로, dwell 동안 배지 카운트가 표보다 앞선다(의도된 시차)."""
+        # 삭제된 jobset의 늦은 배치는 버린다 — worker가 이미 만든 전이가
+        # remove_jobset 뒤에 도착하는 일은 흔하다. 흘려보내면 job_key로 행을
+        # 채우는 표에 지운 행이 되살아나고, pacer에는 치울 주인 없는 항목이
+        # 남는다(일회성 forget을 늦은 push가 되살리던 자리 — 카오스에서 걸림).
+        try:
+            self.store.get_jobset(jsid)
+        except LsfmgrError:
+            return
         if self._pacer is None:
             self.jobs_updated.emit(jsid, records)
         else:
