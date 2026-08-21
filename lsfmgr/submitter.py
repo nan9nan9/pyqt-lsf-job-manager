@@ -335,37 +335,69 @@ class BulkSubmitter(QObject):
         return True
 
     def _launch_cycle(self, ctx: _SubmitContext, keyed: List) -> None:
-        """제출 착수 본체 — 레코드 리셋 + task 생성 + fan-out. worker
-        스레드에서 실행되며 게이트 경로(_GateTask)와 비게이트 경로가
-        공유한다. 예외는 caller가 _gate_fail로 마무리한다(ctx 미완 방지)."""
-        jobset_id = ctx.jobset_id
-        log.info("submit 착수 %s: %d건", jobset_id, len(keyed))
-        # started(=submit_started)를 **실제 착수 지점**에서 발화한다 — 게이트
-        # 통과 후/비게이트 리셋 시작 직전. shutdown·born-cancelled로 여기에
-        # 도달 못 하면 started도 없어 'started만 나가고 finished가 영영 안 오는'
-        # 고아를 원천 차단한다 (started/finished 짝 계약).
-        self._safe_emit(self.started, jobset_id)
-        # 기존 레코드 리셋 — 이전 실행의 흔적(job_id/exit_code/실행시간)을
-        # 지우고 새 command 반영. 지우지 않으면 재제출 실패 시 죽은 옛
-        # job_id·이전 실행의 start/finish가 잔존한다. submit_cwd는 job
-        # 단위 속성이라 리셋 대상이 아니다(아래에서 그대로 재사용).
-        # 상태는 곧장 SUBMITTING으로 — 재제출은 즉시 제출 착수라,
-        # EXIT(kill) → SUBMITTING → PEND로 자연스럽게 보인다.
-        launch = []
-        reset_recs = []
-        # barrier에 걸린 key(register의 refused + 그 사이 도착한 kill의
-        # 취소분)는 **리셋조차 하지 않는다** — 리셋은 job_id/이력을 지우는
-        # 파괴적 연산이라, 제출하지 않을 job에 하면 원상 유지 계약이 깨진다.
+        """제출 착수 본체 — **단계 순서 자체가 계약**이다. worker 스레드에서
+        실행되며 게이트 경로(_GateTask)와 비게이트 경로가 공유한다. 예외는
+        caller가 _gate_fail로 마무리한다(ctx 미완 방지).
+
+          ① started 발화 — **실제 착수 지점**에서만. shutdown·born-cancelled로
+             여기 못 오면 started도 없어 'started만 나가고 finished는 영영
+             안 오는' 고아가 원천 차단된다(started/finished 짝 계약).
+          ② 레코드 리셋 → ③ task **전부** 생성 → ④ 무장 신호 → ⑤ fan-out.
+             ③이 ⑤보다 앞인 이유: 생성이 실패하면 어느 task도 시작하기 전에
+             예외가 난다(부분 착수 금지 — 실행 중 제출이 고아가 된다).
+             ④가 ⑤보다 앞인 이유: 즉시 완주하는 task의 finished가 무장보다
+             먼저 main에 도착하면 post_process 판정이 no-op으로 유실된다.
+        """
+        log.info("submit 착수 %s: %d건", ctx.jobset_id, len(keyed))
+        self._safe_emit(self.started, ctx.jobset_id)                   # ①
+        launch, reset_recs = self._reset_records(ctx, keyed)           # ②
+        tasks = [self._make_resubmit_task(ctx, key, item, cwd)         # ③
+                 for key, item, cwd in launch]
+        if reset_recs:
+            # 리셋된 SUBMITTING 즉시 발행 — 완료를 안 기다리고 표에 반영.
+            self._safe_emit(self.jobs_changed, ctx.jobset_id, reset_recs)
+
+        with ctx.lock:
+            already_finished = ctx.finished
+        if already_finished:
+            # 전 키 리셋 실패(전멸) — ②의 계상이 이미 finished를 확정했다.
+            # 여기서 무장 신호를 내면 끝난 사이클에 rearm/post_process 무장이
+            # 잔존해 다음 폴링이 옛 terminal 레코드에 오발화한다(리뷰 B2).
+            self._safe_emit(self.gate_rejected, ctx.jobset_id, ctx.arm_token)
+            return
+        self._safe_emit(self.records_reset, ctx.jobset_id, ctx.arm_token)  # ④
+        for task in tasks:                                             # ⑤
+            self._pool.start(task)
+        if not launch:
+            # 띄운 task가 0건 — 완료를 여기서 직접 확정한다(게이트 경로의
+            # 빈 제출 마무리와 동일). ※ 과거의 QTimer.singleShot(0) 방식은
+            # 이 worker 스레드에 이벤트 루프가 없어 영영 발화하지 않았다.
+            self._finish_if_done(ctx, force=True)
+
+    def _reset_records(self, ctx: _SubmitContext, keyed: List):
+        """② 이전 실행의 흔적을 지우고 SUBMITTING으로 — 반환: (착수 목록,
+        리셋된 레코드).
+
+        job_id/exit_code/실행시간을 지운다. 안 지우면 재제출 실패 시 죽은 옛
+        job_id와 이전 실행의 start/finish가 잔존한다. submit_cwd는 job 단위
+        속성이라 리셋 대상이 아니다(그대로 실어 보낸다). 상태를 곧장
+        SUBMITTING으로 두어 EXIT(kill) → SUBMITTING → PEND로 자연스럽게 보인다.
+
+        **barrier에 걸린 key는 리셋조차 하지 않는다** — 리셋은 파괴적 연산이라
+        제출하지 않을 job에 하면 '원상 유지' 계약이 깨진다.
+        어느 키에서 실패해도 나머지는 진행한다 — 여기서 예외가 전파되면
+        ctx가 미완(finished 미발행)으로 고착돼 jobset이 영구 잠긴다.
+        """
         with ctx.lock:
             blocked = set(ctx.cancelled_keys)
-        skipped = 0
+        launch, reset_recs, skipped = [], [], 0
         for key, item in keyed:
             if key in blocked:
                 skipped += 1
                 continue
             try:
                 rec = self.store.transition(
-                    jobset_id, key, JobState.SUBMITTING,
+                    ctx.jobset_id, key, JobState.SUBMITTING,
                     job_id=None, exit_code=None, fail_reason=None,
                     fail_message=None, killed=False,
                     retry_count=0, command=self._item_command(item),
@@ -375,70 +407,31 @@ class BulkSubmitter(QObject):
             except _RECORD_GONE:
                 # 소실(동시 삭제)은 정상 경로 — traceback을 찍지 않는다.
                 # 5000건 제출 중 remove_jobset이 들어오면 job 수만큼
-                # traceback이 쏟아져 로그가 잠긴다(다른 소실 경로와 같은 규칙).
-                log.info("삭제된 job의 리셋 건너뜀: %s/%s", jobset_id, key)
+                # traceback이 쏟아져 로그가 잠긴다.
+                log.info("삭제된 job의 리셋 건너뜀: %s/%s", ctx.jobset_id, key)
                 self._count(ctx, cancelled=True)
                 continue
-            except Exception as e:           # noqa: BLE001
-                # store 장애 — 이 키만 건너뛰고 나머지는 진행. 여기서
-                # 전파되면 ctx가 미완(finished 미발행)으로 고착되어
-                # jobset이 잠긴다.
+            except Exception as e:           # noqa: BLE001 — 이 키만 포기
                 log.exception("재제출 리셋 실패 — 건너뜀: %s/%s",
-                              jobset_id, key)
+                              ctx.jobset_id, key)
                 # 계상은 cancelled로 갈 수밖에 없지만(작업 1단위는 끝났다),
-                # 그대로 두면 앱에는 "취소됨"으로만 보여 store 장애가
-                # kill과 구별되지 않는다. error로 따로 알린다.
-                self._safe_emit(self.error, jobset_id,
+                # 그대로 두면 앱에는 "취소됨"으로만 보여 store 장애가 kill과
+                # 구별되지 않는다. error로 따로 알린다.
+                self._safe_emit(self.error, ctx.jobset_id,
                                 f"{key}: 제출 리셋 실패 — {e!r}")
                 self._count(ctx, cancelled=True)
                 continue
             if rec is not None:
                 reset_recs.append(rec)
-            # submit_cwd는 리셋이 건드리지 않아 rec에 보존된다 — task로
-            # 실어 subprocess cwd로 쓴다(rec None인 드문 경우만 부모 cwd).
             launch.append((key, item,
                            rec.submit_cwd if rec is not None else None))
-        # barrier 거부분을 **한 번에** 계상한다 — 건당 계상은 대형
-        # 재제출에서 O(N)회 lock/신호 발화가 된다(born-cancelled를
-        # _gate_reject가 O(1)로 처리하는 것과 같은 이유).
         if skipped:
+            # barrier 거부분은 **한 번에** 계상한다 — 건당 계상은 대형
+            # 재제출에서 O(N)회 lock/신호 발화가 된다.
             log.info("kill barrier로 제출 보류 %s: %d건 (레코드 원상 유지)",
-                     jobset_id, skipped)
+                     ctx.jobset_id, skipped)
             self._count(ctx, n=skipped, cancelled=True)
-        # task 객체를 **먼저 전부** 만든다 — 생성이 실패하면 어느 task도
-        # 시작하기 전에 예외가 난다. 부분 착수(일부 task는 이미 실행 중인데
-        # 착수가 죽어 _gate_fail이 그 레코드를 SUBMIT_FAILED로 되돌리면
-        # 실행 중 제출 subprocess가 고아가 된다)를 원천 차단한다.
-        tasks = [self._make_resubmit_task(ctx, key, item, cwd)
-                 for key, item, cwd in launch]
-        # 리셋된 SUBMITTING 즉시 발행 — 완료를 안 기다리고 표에 반영.
-        # user slot 예외를 격리한다: 전파되면 착수가 죽어 ctx가
-        # 미완으로 고착되고 jobset이 영구 잠긴다.
-        if reset_recs:
-            self._safe_emit(self.jobs_changed, jobset_id, reset_recs)
-        # **착수 확정** = 레코드 리셋 완료 + task 생성 성공. 이 시점(pool.start
-        # **직전**)에 manager가 rearm/post_process 무장/을 하도록 arming
-        # 신호를 보낸다. pool.start보다 먼저 발행해야 즉시 완주하는 task의
-        # finished가 records_reset보다 먼저 main에 도착해 무장 전에 post_process
-        # 판정(no-op)이 나는 유실을 막는다. (리셋은 위에서 끝나 레코드는
-        # SUBMITTING — 옛 terminal 오발화 창도 없다. pool.start는 예외 없음)
-        with ctx.lock:
-            already_finished = ctx.finished
-        if already_finished:
-            # 전 키 리셋 실패(전멸) — 위 _count 루프가 이미 finished를
-            # 확정했다(리뷰 B2). 여기서 records_reset(무장 신호)을 내면
-            # 끝난 사이클에 rearm/post_process 무장이 잔존해 다음 폴링이
-            # 옛 terminal 레코드에 오발화한다 — 보류 무장 폐기 신호로 대체.
-            self._safe_emit(self.gate_rejected, jobset_id, ctx.arm_token)
-            return
-        self._safe_emit(self.records_reset, jobset_id, ctx.arm_token)
-        for task in tasks:
-            self._pool.start(task)
-        if not launch:
-            # 띄운 task가 0건 — 완료를 여기서 직접 확정한다(게이트 경로의
-            # 빈 제출 마무리와 동일). ※ 과거의 QTimer.singleShot(0) 방식은
-            # 이 worker 스레드에 이벤트 루프가 없어 영영 발화하지 않았다.
-            self._finish_if_done(ctx, force=True)
+        return launch, reset_recs
 
     @staticmethod
     def _item_command(item) -> str:

@@ -252,115 +252,110 @@ class _KillTask(QRunnable):
                 scope.release()
 
     def _run_kill(self, scope) -> KillReport:
-        k = self.killer
-        strategies: List[str] = []
+        """kill 1건의 전 과정 — **단계 순서 자체가 계약**이다.
+
+        각 단계를 이름 붙은 메서드로 나눈 이유: 순서를 바꾸면 조용히 깨지는데
+        예전에는 그 제약이 주석으로만 있었다.
+          ① quiesce 먼저 — 그래야 제출 중이던 job의 job_id가 잡힌다.
+          ② key→target 해석은 ① **뒤** — 먼저 풀면 그 job이 kill을 빠져나간다.
+          ③ verify는 마킹 **앞** — 먼저 EXIT로 찍으면 그 레코드가 재조회
+             대상에서 빠져 verify가 생존을 영영 못 본다(verify 무력화).
+        """
         errors: List[str] = []
-        if scope is not None:
-            # kill 우선권 — barrier를 올리는 순간(SubmitGate lock 아래
-            # 원자적) 그 시점의 submit 활동을 넘겨받아 취소·대기한다. 미제출
-            # job은 CANCELLED로 확정돼 대상에서 빠지고, 그새 제출이 완료된
-            # job은 PEND(job_id 확보)로 확정되어 아래 스냅샷에 포함된다.
-            # barrier 이후의 새 시작은 등록 거부되므로 놓치는 유출이 없다.
-            # 대기 동안 pool 슬롯을 반납한다(releaseThread — Qt의 blocking
-            # task 표준 패턴) — 안 그러면 대기 몇 건이 pool(maxThreadCount=4)
-            # 을 전부 점유해 후속 kill(긴급 kill 포함)이 큐에 갇힌다.
-            k._pool.releaseThread()
-            try:
-                quiesced = scope.acquire()
-            finally:
-                k._pool.reserveThread()
-            if not quiesced:
-                # 대기 초과는 report.errors에 남긴다 — 스냅샷 이후 제출이
-                # 완료된 job이 kill 대상에서 빠졌을 수 있다는 뜻이라, 로그로만
-                # 삼키면 kill_finished가 '전부 정리됨'으로 오보된다.
-                # (v10.1: per-id 확인 도입으로 optimistic 마킹은 resolved
-                # 기반 — errors가 있어도 확인된 job의 EXIT 표시는 정확하다)
-                msg = ("quiesce: submit 정지 대기 초과 — 그 사이 제출된 "
-                       "job이 kill에서 빠졌을 수 있음")
-                log.warning("%s: %s", msg, self.jobset_id)
-                errors.append(msg)
-        # job_key → target 해석은 barrier(quiesce) **이후**에 한다. 호출
-        # 시점에 제출 중이라 job_id가 없던 job도, quiesce로 제출이 끝나면
-        # id가 잡혀 대상에 포함된다 — 먼저 해석하면 그 job이 kill을 빠져나가
-        # LSF에 살아남는다(선택 kill의 유출 경로).
-        if self.job_keys is not None:
+        self._quiesce(scope, errors)                                   # ①
+        if self.job_keys is not None:                                  # ②
             self.job_ids = self._resolve_keys()
-        optimistic = (k.command.config.kill_status_policy == "optimistic")
 
-        # --- kill 계획: 세 경로 모두 confirm chunk(_kill_confirm)로 죽인다 —
-        # 경로 차이는 _KillPlan 다섯 값뿐이고 실행·부기(장부)는 아래 공유
-        # 꼬리 한 벌이다 (v10.1).
         plan = self._make_plan()
-        recs, targets = plan.recs, plan.targets
-        requested, rec_target = plan.requested, plan.rec_target
-        label = plan.label
-
-        # --- 공유 꼬리: confirm 실행 + 전략 기록 + optimistic 대상 산출 ---
-        # verify_targets: "잔존(still_alive)"을 셀 target 문자열 집합 — job_id
-        # 만으로 세면 element 1개 kill에 형제 element가 잔존으로 오집계된다
-        # (_verify가 "id[idx]"를 (id,idx) 정확 매칭하는 이유).
-        verify_targets = set(targets)
         calls = unconfirmed = retries = 0
         resolved: set = set()
-        if targets:
+        strategies: List[str] = []
+        if plan.targets:
             calls, unconfirmed, retries, resolved = self._kill_confirm(
-                targets, errors)
-            strategies.append(label)
-        # 마킹 대상 — per-id 확인이 있으므로 errors 유무와 무관하게
-        # **확인된 target만** 마킹한다(미확인분은 on-LSF로 남아 폴링/재kill).
-        # 정책과 무관하게 산출한다: optimistic은 EXIT 전이 + killed 표식,
-        # actual은 표식만(전이는 폴링이 실측으로) — 어느 쪽이든 "내가 죽였다"는
-        # 지금만 알 수 있는 사실이라 여기서 레코드에 남긴다.
-        # 개별 id 경로(recs=None)는 풀을 여기서야 조회한다 — kill은 이미
-        # 끝났으므로 조회 실패(jobset 소실/비수치 id)는 마킹만 포기하고
-        # 삼킨다(LSF job은 죽었다 — 레코드 정리는 폴링이 수렴시킨다).
-        killed_recs: List = []
-        if resolved:
-            if recs is None:
-                try:
-                    recs = self._record_pool()
-                except Exception as e:       # noqa: BLE001 — 마킹만 포기
-                    log.warning("optimistic 마킹용 레코드 조회 실패(무시): %r",
-                                e)
-                    recs = []
-            killed_recs = [r for r in recs
-                           if r.job_id is not None
-                           and rec_target(r) in resolved]
+                plan.targets, errors)
+            strategies.append(plan.label)
 
-        # verify를 optimistic 마킹보다 **먼저** 한다. 먼저 EXIT로 찍으면 그
-        # 레코드가 재조회 대상(_ON_LSF)과 잔존 집계(is_on_lsf)에서 모두 빠져
-        # verify가 생존 job을 영영 못 보고 항상 0을 반환한다(verify 무력화).
-        # verify가 실측한 생존분(alive_keys)은 optimistic 마킹에서 제외해
-        # EXIT로 덮어 숨기지 않고 폴링/재kill에 남긴다.
+        # verify는 잔존을 셀 때 target 문자열로 정확 매칭한다 — job_id만으로
+        # 세면 element 1개 kill에 형제 element가 잔존으로 오집계된다.
         still_alive: Optional[int] = None
         alive_keys: set = set()
         verify_changed: List = []
         if self.verify:            # jobset 없어도 직접 조회로 검증 (v10.3)
             still_alive, alive_keys, verify_changed = \
-                self._verify(verify_targets)
+                self._verify(set(plan.targets))                        # ③
 
-        # optimistic 정책: 확인된 job을 즉시 EXIT로 전이 (bjobs 대기 없이).
-        # EXIT는 terminal이라 폴링 대상(is_on_lsf)에서 빠져 다시 조회되지 않는다.
-        changed: List = []
-        if killed_recs:
-            to_mark = ([r for r in killed_recs if r.job_key not in alive_keys]
-                       if alive_keys else killed_recs)
-            if optimistic:
-                changed = self._mark_exited(to_mark)      # EXIT + killed 표식
-            else:
-                self._flag_killed(to_mark)                # 표식만 (전이는 폴링)
-
-        # verify 조회가 수행한 전이도 report.changed로 합류시킨다 — verify가
-        # terminal(EXIT/DONE)로 전이시킨 job은 이후 폴링(_ON_LSF만 조회)에도,
-        # optimistic 마킹(is_on_lsf guard)에도 다시 안 잡혀 행 갱신 신호가
-        # 영구 유실됐다(리뷰 M5). verify 전이 → optimistic 마킹 순서라
-        # 중복 시에도 최신(optimistic) 레코드가 batch 뒤에 온다.
+        changed = self._mark_killed(plan, resolved, alive_keys)
+        # verify가 전이시킨 레코드도 합류시킨다 — 그 job은 이후 폴링(_ON_LSF만
+        # 조회)에도 마킹(is_on_lsf guard)에도 안 잡혀 행 갱신이 영구 유실됐다
+        # (리뷰 M5). verify → 마킹 순서라 중복 시 최신 것이 뒤에 온다.
         return KillReport(
-            jobset_id=self.jobset_id, requested=requested,
+            jobset_id=self.jobset_id, requested=plan.requested,
             strategies=strategies, command_calls=calls,
             still_alive=still_alive, unconfirmed=unconfirmed,
             kill_retries=retries, changed=verify_changed + changed,
             errors=errors)
+
+    def _quiesce(self, scope, errors: List[str]) -> None:
+        """① kill 우선권 — barrier를 올리고 그 범위의 제출이 멎기를 기다린다.
+
+        barrier를 올리는 순간(SubmitGate lock 아래 원자적) 그 시점의 submit
+        활동을 넘겨받아 취소·대기한다. 미제출 job은 CANCELLED로 확정돼 대상에서
+        빠지고, 그새 제출이 완료된 job은 PEND(job_id 확보)로 확정돼 아래
+        스냅샷에 포함된다. barrier 이후의 새 시작은 등록이 거부되므로 유출이 없다.
+
+        대기 동안 pool 슬롯을 반납한다(releaseThread — Qt의 blocking task 표준
+        패턴). 안 그러면 대기 몇 건이 pool(4개)을 전부 점유해 후속 kill(긴급
+        kill 포함)이 큐에 갇힌다.
+
+        대기 초과는 errors에 남긴다 — 스냅샷 이후 제출이 완료된 job이 kill에서
+        빠졌을 수 있다는 뜻이라, 로그로만 삼키면 kill_finished가 '전부 정리됨'
+        으로 오보된다.
+        """
+        if scope is None:
+            return
+        self.killer._pool.releaseThread()
+        try:
+            quiesced = scope.acquire()
+        finally:
+            self.killer._pool.reserveThread()
+        if not quiesced:
+            msg = ("quiesce: submit 정지 대기 초과 — 그 사이 제출된 "
+                   "job이 kill에서 빠졌을 수 있음")
+            log.warning("%s: %s", msg, self.jobset_id)
+            errors.append(msg)
+
+    def _mark_killed(self, plan: _KillPlan, resolved: set,
+                     alive_keys: set) -> List:
+        """⑤ "내가 죽였다"를 레코드에 남긴다. 반환: EXIT로 전이된 레코드.
+
+        **확인된 target만** 마킹한다(errors 유무와 무관) — 미확인분은 on-LSF로
+        남아 폴링/재kill이 처리한다. verify가 실측한 생존분은 제외해 EXIT로
+        덮어 숨기지 않는다.
+
+        정책과 무관하게 killed 표식은 남긴다: optimistic은 EXIT 전이까지,
+        actual은 표식만(전이는 폴링이 실측으로). 어느 쪽이든 "내가 죽였다"는
+        지금만 알 수 있는 사실이다.
+        """
+        if not resolved:
+            return []
+        recs = plan.recs
+        if recs is None:
+            # 개별 id 경로는 풀을 여기서야 조회한다 — kill은 이미 끝났으므로
+            # 조회 실패(jobset 소실/비수치 id)는 마킹만 포기하고 삼킨다.
+            try:
+                recs = self._record_pool()
+            except Exception as e:           # noqa: BLE001 — 마킹만 포기
+                log.warning("kill 마킹용 레코드 조회 실패(무시): %r", e)
+                return []
+        killed = [r for r in recs
+                  if r.job_id is not None and plan.rec_target(r) in resolved
+                  and r.job_key not in alive_keys]
+        if not killed:
+            return []
+        if self.killer.command.config.kill_status_policy == "optimistic":
+            return self._mark_exited(killed)     # EXIT + killed 표식
+        self._flag_killed(killed)                # 표식만 (전이는 폴링)
+        return []
 
     def _make_plan(self) -> _KillPlan:
         """진입 형태별 kill 계획 산출 — _run_kill의 공유 꼬리에 공급한다."""
