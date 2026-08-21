@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from .config import MAX_STATE_DWELL_S, validate_cmd_path
+from .config import NUMERIC_RANGES, _in_range, validate_cmd_path
 from dataclasses import dataclass, fields
 from typing import Any, Dict, Optional, Tuple
 
@@ -114,35 +114,12 @@ BUILTIN_DEFAULTS: Dict[str, Any] = {
 # 새 옵션은 키 집합(SHARED/MANAGER_ONLY)과 여기 한 줄이면 끝난다 —
 # if-체인 시절엔 분기 추가를 빠뜨리면 검증 없이 통과했다.
 # ----------------------------------------------------------------------
-def _int_in(lo: int, hi: Optional[int] = None):
-    """정수 범위 검증기 — hi=None이면 하한만."""
-    label = f"{lo}~{hi}" if hi is not None else f"{lo} 이상"
-
-    def check(key: str, value: Any) -> int:
-        v = int(value)
-        if v < lo or (hi is not None and v > hi):
-            raise ValueError(f"{key}는 {label} (got {value})")
-        return v
-    return check
-
-
 def _float_in(lo: float, hi: float):
     label = f"{lo:g}~{hi:g}"
 
     def check(key: str, value: Any) -> float:
         v = float(value)
         if not (lo <= v <= hi):                  # NaN도 거른다
-            raise ValueError(f"{key}는 {label} (got {value})")
-        return v
-    return check
-
-
-def _float_min(lo: float = 0.0, *, positive: bool = False):
-    label = "양수" if positive else f"{lo:g} 이상"
-
-    def check(key: str, value: Any) -> float:
-        v = float(value)
-        if v < lo or (positive and v <= 0):
             raise ValueError(f"{key}는 {label} (got {value})")
         return v
     return check
@@ -182,34 +159,37 @@ def _cmd_path(key: str, value: Any) -> Any:
 
 #: key → 검증기(key, value) -> 정규화 값. 없는 키는 무검증 통과
 #: (test_submit_wrapper_pattern_cmd는 LsfConfig.__post_init__가 구조 검증).
-_VALIDATORS: Dict[str, Any] = {
-    "workers": _int_in(1, 64),
-    "max_retry": _int_in(0),
+#: 수치 필드 검증기는 **config.NUMERIC_RANGES에서 파생**한다 — 범위 숫자를
+#: 두 곳에 적으면 어긋난다(실제로 그랬다: LsfConfig는 조용히 보정, 여기는
+#: 거부). 표에 없는 것(불리언·경로·열거·문자열 형식)만 아래에 손으로 쓴다.
+def _range_check(name: str):
+    cast, lo, hi, incl = NUMERIC_RANGES[name]
+
+    def check(key: str, value: Any):
+        return _in_range(value, key, cast, lo, hi, incl)
+    return check
+
+
+#: poll_interval_s만 상위 계층이 더 좁게 건다 — 5~60은 **UX 정책**이고,
+#: 저수준 LsfConfig는 양수만 본다(poll_interval_s=2 같은 빠른 로컬 폴링 허용).
+#: 유일한 의도적 예외라 여기 한 줄로 드러낸다.
+MIN_POLL_INTERVAL_S, MAX_POLL_INTERVAL_S = 5.0, 60.0
+
+_VALIDATORS: Dict[str, Any] = {name: _range_check(name)
+                               for name in NUMERIC_RANGES}
+_VALIDATORS.update({
+    "poll_interval_s": _float_in(MIN_POLL_INTERVAL_S, MAX_POLL_INTERVAL_S),
     "retry_backoff": _backoff,
-    "poll_interval_s": _float_in(5.0, 60.0),
-    "submit_timeout_s": _float_min(positive=True),
     "auto_poll": _bool,
     "verify_kill": _bool,
-    "chunk_size": _int_in(1, 5000),
-    "arg_max": _int_in(4096),
+    "poll_runtime_updates": _bool,
+    "submit_finished_on_gate_reject": _bool,
+    "collect_clusters": _bool,
     "bjobs_path": _cmd_path,
     "bkill_path": _cmd_path,
     "kill_status_policy": _policy,
-    "kill_chunk_size": _int_in(1, 5000),
-    "kill_workers": _int_in(1, 32),
-    "kill_max_retry": _int_in(0),
-    "kill_retry_delay_s": _float_min(0.0),
-    "progress_min_interval_s": _float_min(0.0),
-    "progress_min_step_ratio": _float_in(0.0, 1.0),
-    "poll_runtime_updates": _bool,
-    "submit_finished_on_gate_reject": _bool,
-    "lost_after_missing_polls": _int_in(1),
-    "internal_refresh_min_s": _opt_float_min(0.0),
-    "internal_retention_days": _float_min(0.0),
-    "internal_lost_grace_s": _float_min(0.0),
-    "collect_clusters": _bool,
-    "min_state_dwell_s": _float_in(0.0, MAX_STATE_DWELL_S),
-}
+    "internal_refresh_min_s": _opt_float_min(0.0),   # None = 폴링 주기에서 유도
+})
 
 
 def _validate(key: str, value: Any) -> Any:

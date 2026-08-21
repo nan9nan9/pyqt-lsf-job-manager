@@ -42,6 +42,11 @@ from .util import EmitThrottler, WorkerSlots
 
 log = logging.getLogger("lsfmgr.submit")
 
+#: JobRecord.fail_message 상한(문자). 터미널 원문(stderr+stdout)을 그대로
+#: 담되 무한정 쌓이지 않게 자른다 — 5000건이 각자 수십 KB를 물면 store가
+#: 그만큼 부푼다. 공개 계약이라(docs/submit.md) 여기 한 곳에서만 정한다.
+MAX_FAIL_MESSAGE_CHARS = 4000
+
 #: 게이트(pre_submit)·착수 worker 수. bsub를 돌리지 않으므로 workers 상한과
 #: 별개다 — 동시에 제출을 거는 jobset이 이보다 많으면 그만큼 착수가 줄 선다.
 COORD_THREADS = 8
@@ -686,7 +691,7 @@ class BulkSubmitter(QObject):
                     JobState.RETRY_WAIT,
                     retry_count=attempt + 1,
                     fail_reason=err.fail_reason,
-                    fail_message=err.diagnostic()[:4000])
+                    fail_message=err.diagnostic()[:MAX_FAIL_MESSAGE_CHARS])
             except _RECORD_GONE:
                 # 재시도할 레코드가 사라졌다 — 타이머를 걸면 발화 때 또 같은
                 # 소실을 만난다. 여기서 1단위 계상하고 끝낸다.
@@ -708,7 +713,7 @@ class BulkSubmitter(QObject):
                                         JobState.SUBMIT_FAILED,
                                         retry_count=attempt,
                                         fail_reason=err.fail_reason,
-                                        fail_message=err.diagnostic()[:4000])
+                                        fail_message=err.diagnostic()[:MAX_FAIL_MESSAGE_CHARS])
         except _RECORD_GONE:
             # 실패를 기록할 레코드가 없다 — 제출도 안 됐으니 LSF 흔적 없음
             self._task_vanished(ctx, job_key, job_id=None)
@@ -767,7 +772,7 @@ class BulkSubmitter(QObject):
             self.store.transition(ctx.jobset_id, job_key,
                                   JobState.SUBMIT_FAILED,
                                   fail_reason="INTERNAL_ERROR",
-                                  fail_message=repr(err)[:4000],
+                                  fail_message=repr(err)[:MAX_FAIL_MESSAGE_CHARS],
                                   guard=lambda cur: cur.job_id is None)
         except _RECORD_GONE:
             pass                                # 소실 — 남길 레코드가 없다
@@ -1036,7 +1041,7 @@ class BulkSubmitter(QObject):
                 nr = self.store.transition(
                     ctx.jobset_id, r.job_key, JobState.SUBMIT_FAILED,
                     guard=lambda cur: cur.state is JobState.SUBMITTING,
-                    fail_reason="LAUNCH_FAILED", fail_message=msg[:4000])
+                    fail_reason="LAUNCH_FAILED", fail_message=msg[:MAX_FAIL_MESSAGE_CHARS])
                 if nr is not None:
                     stuck.append(nr)
             except Exception:                # noqa: BLE001
