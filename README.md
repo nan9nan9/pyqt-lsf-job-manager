@@ -160,7 +160,7 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)     # 이번 submit만
 | `chunk_size` | 500 | **bjobs** 한 번에 넘길 job 수 (조회 전용) |
 | `arg_max` | 131072 | 명령줄 인자 총 길이 상한 (초과 시 `ArgMaxExceededError`) |
 | `lost_after_missing_polls` | 3 | bjobs에서 안 보이는 job을 **LOST로 확정하기까지** 필요한 연속 미발견 횟수. 1이면 즉시. 제출 직후 등록 지연으로 한두 사이클 안 보이는 job을 죽은 것으로 만들지 않기 위한 유예 |
-| `internal_refresh_min_s` | `poll_interval_s`/2 | internal 조회원의 최소 갱신 간격(초). 이 안에 겹쳐 들어온 조회는 콜백을 다시 돌리지 않음. 0이면 캐시 없음 (§5.8) |
+| `internal_refresh_min_s` | 자동 (`poll_interval_s`/2) | **콜백이 실제로 불리는 주기.** 이 간격 안에 겹쳐 들어온 조회는 콜백을 다시 돌리지 않음 — jobset이 몇 개든, job이 몇 건이든 REST 호출은 이 값 하나로 정해짐. 미지정이면 **실제 폴링 주기의 절반**을 자동 추종(`start_polling(js, 2)`면 1초로 내려감). 명시하면 그 값 고정. 0이면 캐시 없음. 현재 적용값은 `mgr.command.internal_status.stats()["refresh_min_s"]` (§5.8) |
 | `internal_retention_days` | 14 | internal 원장에서 **종료 job**을 보존할 기간(일). 넘으면 버려 메모리 누적을 막음. 0이면 만료 없음 (§5.8) |
 | `internal_lost_grace_s` | 60 | 콜백 조회원에서 **제출 후 이 시간 안**의 미발견은 LOST로 세지 않음 — 상태 원본(REST) 집계 지연 유예. 0이면 유예 없음 (§5.8) |
 | `poll_runtime_updates` | False | RUN 중 `run_time_s`(경과시간) 변화도 `jobs_updated`로 live 발행. 켜면 **RUN 전원이 매 폴링 재전이**된다(5000건 기준 사이클당 5000 transition + 5000레코드 배치). 끄면 경과시간은 상태 전이 시점에만 갱신 — 표에 실시간 경과시간 열이 꼭 필요할 때만 켤 것 |

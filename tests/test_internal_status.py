@@ -356,8 +356,9 @@ def test_removed_jobs_are_dropped_from_the_ledger(qtbot, fake_lsf):
         assert src.stats()["entries"] == 1, src.stats()
 
         mgr.remove_jobset(js.id)
-        assert src.stats() == {"job_ids": 0, "entries": 0,
-                               "tracked_ids": 0, "inflight": 0}, src.stats()
+        st = src.stats()
+        assert (st["job_ids"], st["entries"], st["tracked_ids"],
+                st["inflight"]) == (0, 0, 0, 0), st
     finally:
         mgr.shutdown()
 
@@ -386,9 +387,19 @@ def test_ignore_warning_fires_once_per_manager(qtbot, fake_lsf, caplog):
 
 
 def test_default_refresh_interval_is_half_the_poll_interval():
-    assert LsfConfig(poll_interval_s=10.0).effective_internal_refresh_min_s == 5.0
-    assert LsfConfig(internal_refresh_min_s=0.0
-                     ).effective_internal_refresh_min_s == 0.0
+    """갱신 간격의 **소유자는 조회원 하나**다 — 설정에서 유도한 값과
+    실행 중 자동 추종한 값이 따로 있으면 어느 쪽이 진짜인지 알 수 없다.
+    자동/고정 판정도 소스가 스스로 한다(예전엔 호출자가 같은 필드에서
+    값과 플래그를 각각 유도해 넘겨 어긋날 수 있었다)."""
+    def refresh_of(**cfg):
+        cmd = LsfCommand(LsfConfig(job_status_fetcher=lambda: _payload(),
+                                   **cfg))
+        return cmd.internal_status.stats()["refresh_min_s"]
+
+    assert refresh_of(poll_interval_s=10.0) == 5.0        # 자동 = 절반
+    assert refresh_of(internal_refresh_min_s=0.0) == 0.0  # 명시 = 그대로
+    assert refresh_of(internal_refresh_min_s=7.0,
+                      poll_interval_s=10.0) == 7.0        # 명시가 이긴다
 
 
 def test_polling_updates_state_without_running_bjobs(qtbot, fake_lsf):

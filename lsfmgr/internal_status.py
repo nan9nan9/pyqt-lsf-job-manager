@@ -329,20 +329,24 @@ class InternalStatusSource:
     MAX_INFLIGHT = 3
 
     def __init__(self, fetcher: JobStatusFetcher, *,
-                 refresh_min_s: float,
+                 refresh_min_s: Optional[float],
+                 poll_interval_s: float = 0.0,
                  wait_timeout_s: float,
                  retention_days: float = 14.0,
-                 auto_refresh: bool = False,
                  track_runtime: bool = True):
         if not callable(fetcher):
             raise ValueError(
                 f"job_status_fetcher는 호출 가능해야 합니다 (got {fetcher!r})")
         self._fetcher = fetcher
         #: 이 간격 안에 다시 들어온 조회는 콜백을 다시 돌리지 않는다.
-        self._refresh_min_s = max(0.0, float(refresh_min_s))
-        #: True면 실제 폴링 주기를 알게 될 때 위 값을 자동으로 낮춘다
-        #: (앱이 값을 명시했으면 건드리지 않는다).
-        self._auto_refresh = bool(auto_refresh)
+        #: refresh_min_s=None이면 **자동** — 실제 폴링 주기의 절반을 따라간다
+        #: (note_poll_interval). 앱이 값을 명시하면 그 값을 지킨다.
+        #: "자동인가"를 따로 받지 않고 여기서 판정하는 이유: 예전엔 호출자가
+        #: 같은 config 필드에서 값과 플래그를 **각각** 유도해 넘겨, 둘이
+        #: 어긋날 수 있는 구조였다.
+        self._explicit = refresh_min_s is not None
+        self._refresh_min_s = (float(refresh_min_s) if self._explicit
+                               else max(0.0, float(poll_interval_s)) / 2.0)
         #: 지금까지 통지받은 **가장 짧은** 폴링 주기 (자동 모드의 기준)
         self._min_poll_interval_s: Optional[float] = None
         #: 조회 1건을 기다리는 상한 — 넘으면 '조회 장애'로 보고해 호출자가
@@ -438,8 +442,8 @@ class InternalStatusSource:
         갱신이 밀린다. 최솟값 기준인 이유는 jobset마다 주기가 다를 수 있어서다
         — 가장 빠른 폴러에 맞춰야 아무도 캐시에 막히지 않는다.
         """
-        if not self._auto_refresh:
-            return
+        if self._explicit:
+            return                           # 앱이 정한 값 — 건드리지 않는다
         interval = max(0.0, float(interval_s))
         with self._cv:
             if (self._min_poll_interval_s is not None
@@ -468,7 +472,10 @@ class InternalStatusSource:
             jobs = sum(len(v) for v in self._ledger.values())
             return {"job_ids": len(self._ledger), "entries": jobs,
                     "tracked_ids": len(self._interest),
-                    "inflight": self._inflight}
+                    "inflight": self._inflight,
+                    # 실제로 적용 중인 갱신 간격 — 자동 모드면 폴링 주기를
+                    # 따라 바뀌므로 설정값이 아니라 여기를 봐야 한다.
+                    "refresh_min_s": self._refresh_min_s}
 
     # ------------------------------------------------------------------
     # 콜백 실행 — single-flight + 인계

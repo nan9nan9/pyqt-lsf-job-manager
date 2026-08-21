@@ -311,17 +311,6 @@ class LsfConfig:
                                  f"(got {self.internal_refresh_min_s!r})")
             self.internal_refresh_min_s = float(self.internal_refresh_min_s)
 
-    @property
-    def effective_internal_refresh_min_s(self) -> float:
-        """internal 스냅샷 갱신 간격의 실효값 — 미지정이면 폴링 주기의 절반.
-
-        절반인 이유: 폴링 사이클(poll_interval_s)마다 반드시 한 번은 새로
-        받으면서, 그 사이클 안에서 겹쳐 들어오는 조회는 캐시로 흡수한다.
-        """
-        if self.internal_refresh_min_s is not None:
-            return float(self.internal_refresh_min_s)
-        return float(self.poll_interval_s) / 2.0
-
 
 def cmd_tokens(path: CmdPath) -> List[str]:
     """CmdPath를 argv 앞부분 토큰 목록으로 정규화. str이면 프로그램 1개."""

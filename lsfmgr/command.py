@@ -318,18 +318,20 @@ class LsfCommand:
         if self.config.job_status_fetcher is not None:
             self._internal = InternalStatusSource(
                 self.config.job_status_fetcher,
-                refresh_min_s=self.config.effective_internal_refresh_min_s,
+                # None이면 소스가 자동 모드로 — 실제 폴링 주기를 알게 될 때
+                # 그 절반으로 따라간다(note_poll_interval).
+                refresh_min_s=self.config.internal_refresh_min_s,
+                poll_interval_s=self.config.poll_interval_s,
                 wait_timeout_s=self.config.query_timeout_s,
                 retention_days=self.config.internal_retention_days,
-                # 앱이 값을 명시하지 않았으면(=폴링 주기에서 유도) 실제
-                # 폴링 주기를 알게 될 때 자동으로 낮출 수 있게 한다.
-                auto_refresh=self.config.internal_refresh_min_s is None,
                 # run_time 갱신을 monitor가 버리는 설정이면 원장에서도
                 # 만들지 않는다 (전수 스캔 비용을 통째로 없앤다).
                 track_runtime=self.config.poll_runtime_updates)
             log.info("상태 조회원: job_status_fetcher 콜백 (bjobs 미사용, 최소 "
-                     "갱신 간격 %.1fs, 종료 job 보존 %.0f일)",
-                     self.config.effective_internal_refresh_min_s,
+                     "갱신 간격 %.1fs%s, 종료 job 보존 %.0f일)",
+                     self._internal.stats()["refresh_min_s"],
+                     "" if self.config.internal_refresh_min_s is not None
+                     else " — 실제 폴링 주기에 자동 추종",
                      self.config.internal_retention_days)
             if self.config.bjobs_path != DEFAULT_BJOBS_PATH:
                 # 조회는 콜백으로 가므로 이 경로는 아무 데도 안 쓰인다.
