@@ -397,6 +397,19 @@ class BulkSubmitter(QObject):
         """
         with ctx.lock:
             blocked = set(ctx.cancelled_keys)
+        # 리셋으로 사라질 옛 job_id를 조회원 원장에서도 버린다 — 레코드에서
+        # 지우기만 하면 그 id는 아무도 조회하지 않는데 원장·관심 집합에는
+        # 영영 남는다(종료 상태로 마지막에 보인 것만 보존기간 뒤 정리되고,
+        # 진행 중으로 보였던 것은 만료 대상이 아니라 영구히 남았다).
+        # 버리는 것은 항상 안전하다 — 캐시를 지울 뿐이고, 다시 조회하면
+        # 그때 새로 등록된다.
+        try:
+            stale_ids = [r.job_id for r in self.store.get_jobs(ctx.jobset_id)
+                         if r.job_id is not None and r.job_key not in blocked]
+        except Exception:                    # noqa: BLE001 — jobset 소실 등
+            stale_ids = []
+        if stale_ids:
+            self.command.forget_status(stale_ids)
         launch, reset_recs, skipped = [], [], 0
         for key, item in keyed:
             if key in blocked:

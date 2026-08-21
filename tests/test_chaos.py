@@ -10,6 +10,7 @@ lock 누수가 여기서만 걸렸다(삭제 직후 도착한 조회가 lock을 
   ③ 지운 jobset의 흔적이 살아있는 객체 어디에도 없다
   ④ submit_started 수 ≤ submit_finished 수 (착수/완료 짝)
   ⑤ 문서화된 거부(LsfmgrError/ValueError) 외의 예외가 없다
+  ⑥ 콜백 조회원 원장이 store에 없는 job_id를 붙들고 있지 않다
 """
 from __future__ import annotations
 
@@ -25,12 +26,25 @@ from tests.test_jobset_cleanup import _find_traces
 STEPS = 400
 
 
-@pytest.mark.parametrize("seed", [11, 12, 13])
-def test_random_operations_preserve_invariants(seed, qtbot, fake_lsf):
+@pytest.mark.parametrize("seed,rest", [(11, False), (12, False), (13, False),
+                                       (54, True), (55, True)])
+def test_random_operations_preserve_invariants(seed, rest, qtbot, fake_lsf):
+    """rest=True는 조회를 job_status_fetcher(REST 콜백)로 하는 판 — bjobs
+    경로와 코드가 갈리므로 따로 흔든다(원장 누수가 여기서만 걸렸다)."""
     rnd = random.Random(seed)
+
+    def fetcher():
+        if rnd.random() < 0.08:
+            raise RuntimeError("REST 장애")      # 조회 장애도 섞는다
+        with fake_lsf.lock:
+            return {"jobs": [{"dataId": f"{j.job_id}.c1", "stat": j.stat}
+                             for j in fake_lsf.jobs.values()]}
+
     mgr = LsfJobManager(
         store=InMemoryStore(),
         config=LsfConfig(poll_interval_s=5.0, workers=8,
+                         job_status_fetcher=fetcher if rest else None,
+                         internal_refresh_min_s=0.0 if rest else None,
                          kill_workers=4, kill_chunk_size=4,
                          max_retry=1, retry_delay_s=0.02,
                          min_state_dwell_s=rnd.choice([0.0, 0.15]),
@@ -106,6 +120,16 @@ def test_random_operations_preserve_invariants(seed, qtbot, fake_lsf):
         for (kind, j), c in pair.items():                      # 불변식 ④
             if kind == "s" and pair[("f", j)] < c:
                 viol.append(f"started {c} > finished {pair[('f', j)]} ({j})")
+        src = mgr.command.internal_status                      # 불변식 ⑥
+        if src is not None:
+            alive = set()
+            for jsr in mgr.store.list_jobsets():
+                alive |= {r.job_id for r in mgr.store.get_jobs(jsr.jobset_id)
+                          if r.job_id}
+            ghosts = set(src._interest) - alive
+            if ghosts:
+                viol.append(f"원장이 붙든 유령 job_id {len(ghosts)}건 — "
+                            f"store 어디에도 없다 (예: {sorted(ghosts)[:5]})")
         assert not viol, "\n  ".join([""] + viol[:10])
     finally:
         mgr.shutdown()

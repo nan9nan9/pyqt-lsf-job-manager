@@ -141,3 +141,44 @@ def test_documented_payload_diagnostic_works():
     # (넘기면 "job 0건"으로 읽혀 전 job이 LOST로 간다)
     with pytest.raises(ValueError, match="nope"):
         parse_internal_jobs({"jobs": [{"nope": 1, "stat": "RUN"}]})
+
+
+def test_resubmit_forgets_the_old_job_id(qtbot, fake_lsf):
+    """재제출은 레코드의 job_id를 지운다 — 원장에서도 같이 버려야 한다.
+
+    안 버리면 그 id는 아무도 조회하지 않는데 관심 집합·원장에 남는다.
+    종료 상태로 마지막에 보인 것만 보존기간 뒤 정리되고, 진행 중으로 보였던
+    것은 만료 대상이 아니라 **영구히** 남았다 — 재제출을 반복하는 세션에서
+    매 회차만큼 쌓인다(무작위 부하 시험에서 1000회 조작에 150여 건).
+    """
+    from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
+
+    live = {}
+    mgr = LsfJobManager(
+        store=InMemoryStore(),
+        config=LsfConfig(job_status_fetcher=lambda: {"jobs": [
+            {"dataId": f"{i}.c1", "stat": "RUN"} for i in live]},
+            internal_refresh_min_s=0.0),
+        runner=fake_lsf)
+    src = mgr.command.internal_status
+    try:
+        js = mgr.create_jobset(["mytool a.sp"], job_keys=["k"])
+        with qtbot.waitSignal(mgr.submit_finished, timeout=20000):
+            mgr.submit(js, auto_poll=False)
+        first = js.jobs()[0].job_id
+        live[first] = 1
+        mgr.query_once(js)                       # 관심 등록
+        qtbot.wait(200)
+        assert first in src._interest
+
+        with qtbot.waitSignal(mgr.kill_finished, timeout=20000):
+            mgr.kill(js)
+        with qtbot.waitSignal(mgr.submit_finished, timeout=20000):
+            mgr.submit(js, auto_poll=False)      # 재제출 — 옛 id는 레코드에서 사라진다
+        second = js.jobs()[0].job_id
+        assert second != first
+
+        assert first not in src._interest, "옛 job_id가 관심 집합에 남았다"
+        assert first not in src._ledger, "옛 job_id가 원장에 남았다"
+    finally:
+        mgr.shutdown()
