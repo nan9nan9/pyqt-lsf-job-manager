@@ -532,6 +532,12 @@ mgr.jobset(jobset_id)      # ID로 핸들 재획득
 >   `RETRY_WAIT → SUBMITTING`이 `jobs_updated`로 발행되고 `rec.retry_count`가
 >   몇 번째인지 알려 줍니다. 로그의 `WARNING submit 실패 [...]`는 재시도 예정을
 >   뜻하고, 최종 포기는 `ERROR SUBMIT_FAILED 확정 [...] (N회 시도)`입니다.
+>   **같은 사유가 20건을 넘으면 이후 로그는 접힙니다** — mbatchd 과부하로
+>   수천 건이 한꺼번에 떨어질 때 로그 자체가 부하가 되기 때문입니다(핸들러가
+>   GUI 위젯이면 이벤트루프까지 막습니다). 접혔다는 사실은 한 줄로 알리고,
+>   전체 내역은 `INFO submit 완료 [...] — 실패 사유: BSUB_EXIT_255 4800건`과
+>   `SubmitReport.fail_reasons`가 줍니다. 개별 job의 원인은 로그가 아니라
+>   `rec.fail_message`/`rec.fail_reason`에 **전건** 남습니다.
 > - **EXIT**: LSF 이력을 따로 조회하지 않습니다(폴링 오버헤드 0). 레코드 필드
 >   (`exit_code` / `run_time_s` / `submit_cwd` / `start_time` / `finish_time`)로
 >   보여 주면 됩니다 — 전부 로컬 스냅샷이라 LSF 호출이 0입니다.

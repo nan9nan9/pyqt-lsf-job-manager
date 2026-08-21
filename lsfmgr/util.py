@@ -86,3 +86,37 @@ def ledger_remove(table: dict, key: str, item) -> None:
             break
     if not lst:
         del table[key]
+
+
+class LogSampler:
+    """부류별로 앞의 N건만 남기고 접는 로그 표본기 — thread-safe.
+
+    job 하나마다 한 줄씩 남기는 로그는 실패가 몇 건일 때는 유용하지만,
+    mbatchd 과부하로 5000건이 한꺼번에 떨어지면 그 자체가 부하가 된다
+    (핸들러가 GUI 위젯이면 이벤트루프까지 막는다). 부류(fail_reason)마다
+    앞 N건은 그대로 남기고, 그 뒤로는 접었다는 사실을 한 번만 알린다.
+
+    사이클마다 새로 만들어 쓴다(제출 1회 = 표본기 1개) — 접힌 상태가
+    다음 제출로 새지 않는다. 전체 내역은 완료 로그의 부류별 요약이 준다.
+
+    kind는 hashable이면 뭐든 된다. **메시지 종류가 다르면 kind도 달라야
+    한다** — 예산을 공유하면 각 메시지가 반씩만 나와 둘 다 잘린 것처럼 보인다.
+    """
+
+    def __init__(self, limit: int = 20):
+        self.limit = max(1, int(limit))
+        self._n: dict = {}
+        self._lock = threading.Lock()
+
+    def allow(self, kind) -> bool:
+        """이 부류를 아직 그대로 남길지. limit번째 직후 1회만 False 대신
+        'folded'를 알리도록 note()와 짝지어 쓴다."""
+        with self._lock:
+            n = self._n.get(kind, 0) + 1
+            self._n[kind] = n
+            return n <= self.limit
+
+    def just_folded(self, kind) -> bool:
+        """방금 호출한 allow()가 한도를 처음 넘겼는가 (접힘 통지 1회용)."""
+        with self._lock:
+            return self._n.get(kind, 0) == self.limit + 1

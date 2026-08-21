@@ -99,3 +99,18 @@ def test_every_public_member_is_documented():
             missing.append(f"{cls.__name__}.{name}")
     assert not missing, ("README에 없는 공개 멤버(문서 누락이거나 "
                          f"내부용인데 공개된 것): {sorted(missing)}")
+
+
+def test_every_config_field_is_read():
+    """LsfConfig 필드는 반드시 읽는 곳이 있어야 한다 — 안 읽히면 '설정했는데
+    안 먹는' 함정이다(verify_kill이 정확히 그랬다)."""
+    import pathlib
+    import re
+    from dataclasses import fields
+
+    from lsfmgr.config import LsfConfig
+
+    src = "\n".join(p.read_text() for p in pathlib.Path("lsfmgr").rglob("*.py"))
+    unread = [f.name for f in fields(LsfConfig)
+              if not re.search(rf"\b(?:config|cfg|self)\.{f.name}\b", src)]
+    assert not unread, f"LsfConfig에 있으나 아무도 읽지 않는 필드: {unread}"

@@ -38,7 +38,7 @@ from .qt import (
 from .reports import SubmitProgress, SubmitReport
 from .states import JobState
 from .store.base import JobSetStore
-from .util import EmitThrottler, WorkerSlots
+from .util import EmitThrottler, LogSampler, WorkerSlots
 
 log = logging.getLogger("lsfmgr.submit")
 
@@ -71,6 +71,8 @@ class _SubmitContext:
     slots: WorkerSlots
     options: Options = field(default_factory=Options)
     throttler: EmitThrottler = field(default_factory=EmitThrottler)
+    #: job별 실패 로그 표본기 — 대량 실패 시 로그 폭주를 접는다(사이클 단위)
+    log_sampler: LogSampler = field(default_factory=LogSampler)
     cancel_event: threading.Event = field(default_factory=threading.Event)
     # RLock인 이유(리뷰 M2): finished/progress는 순서 보장을 위해 이 lock을
     # 쥔 채 발화된다. worker 발화는 queued라 무해하지만, main 스레드 발화
@@ -673,13 +675,33 @@ class BulkSubmitter(QObject):
                 job_id, ctx.jobset_id, job_key)
         self._count(ctx, cancelled=True)
 
+    def _log_failure(self, ctx: _SubmitContext, level: int, reason: str,
+                     fmt: str, *args) -> None:
+        """job별 실패 로그 — 부류(fail_reason)마다 앞 N건만 남긴다.
+
+        같은 이유로 수천 건이 한꺼번에 떨어지는 일이 실제로 있다(mbatchd/eauth
+        과부하 → BSUB_EXIT_255 "User permission denied"). 그때 job당 한 줄은
+        로그가 아니라 부하다 — 핸들러가 GUI 위젯이면 이벤트루프까지 막는다.
+        접힌 뒤의 전체 내역은 완료 로그의 부류별 요약이 준다."""
+        # 레벨까지 키에 넣는다 — 재시도 예정(WARNING)과 포기 확정(ERROR)은
+        # 다른 메시지라 예산을 나눠 쓰면 둘 다 반쪽만 나온다.
+        kind = (level, reason)
+        if ctx.log_sampler.allow(kind):
+            log.log(level, fmt, *args)
+        elif ctx.log_sampler.just_folded(kind):
+            log.log(level, "%s 실패가 %d건을 넘어 이후 같은 사유의 로그를 "
+                    "접습니다 — 전체 내역은 완료 로그의 요약을 보세요",
+                    reason, ctx.log_sampler.limit)
+
     def _task_failed(self, ctx: _SubmitContext, job_key: str, attempt: int,
                      err: SubmitError,
                      retry_factory: Callable[[int], QRunnable]) -> None:
         """실패 처리. err.retryable=False(예: NO_JOBID_PARSED)면 재시도 없이
         바로 SUBMIT_FAILED 확정한다. 재시도 task는 retry_factory(attempt+1)로
         생성한다(bsub 경로/‏wrapper 경로가 각자 자기 task 를 만든다)."""
-        log.warning("submit 실패 [%s] %s: %s", err.fail_reason, job_key, err)
+        self._log_failure(ctx, logging.WARNING, err.fail_reason,
+                          "submit 실패 [%s] %s: %s",
+                          err.fail_reason, job_key, err)
         if (getattr(err, "retryable", True) and attempt < ctx.options.max_retry
                 and not ctx.cancel_event.is_set() and not self._shutdown):
             # RETRY_WAIT → QTimer 스케줄 (스레드 sleep 점유 금지, §4)
@@ -706,8 +728,9 @@ class BulkSubmitter(QObject):
                 ctx, job_key, ctx.options.retry_delay_s(attempt),
                 lambda: retry_factory(attempt + 1))
             return
-        log.error("SUBMIT_FAILED 확정 [%s] %s (%d회 시도)",
-                  err.fail_reason, job_key, attempt + 1)      # ERROR
+        self._log_failure(ctx, logging.ERROR, err.fail_reason,
+                          "SUBMIT_FAILED 확정 [%s] %s (%d회 시도)",
+                          err.fail_reason, job_key, attempt + 1)
         try:
             rec = self.store.transition(ctx.jobset_id, job_key,
                                         JobState.SUBMIT_FAILED,
@@ -950,9 +973,14 @@ class BulkSubmitter(QObject):
             # 뒤에 두면 신호를 받은 main이 로그가 찍히기 전에 먼저 깨어난다
             # (완료 통지를 보고 로그를 읽는 쪽에서 완료 라인이 비어 보인다).
             # kill 경로(killer.py 'kill 완료')와 같은 순서.
-            log.info("submit 완료 %s: 성공 %d / 실패 %d / 취소 %d (총 %d)",
+            breakdown = ("" if not ctx.fail_reasons else
+                         " — 실패 사유: " + ", ".join(
+                             f"{r} {n}건" for r, n in
+                             sorted(ctx.fail_reasons.items(),
+                                    key=lambda kv: -kv[1])))
+            log.info("submit 완료 %s: 성공 %d / 실패 %d / 취소 %d (총 %d)%s",
                      ctx.jobset_id, report.succeeded, report.failed,
-                     report.cancelled, report.total)
+                     report.cancelled, report.total, breakdown)
             self.finished.emit(ctx.jobset_id, report)
         # 완료된 ctx 정리 — 장수 세션에서 jobset 수만큼 누적되는 것 방지.
         # (다른 사이클이 이미 새 ctx로 교체했으면 그대로 둔다)
