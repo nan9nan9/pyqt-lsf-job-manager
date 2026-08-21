@@ -373,8 +373,16 @@ class BulkSubmitter(QObject):
             self._safe_emit(self.gate_rejected, ctx.jobset_id, ctx.arm_token)
             return
         self._safe_emit(self.records_reset, ctx.jobset_id, ctx.arm_token)  # ④
-        for task in tasks:                                             # ⑤
-            self._pool.start(task)
+        for i, task in enumerate(tasks):                               # ⑤
+            # 우선순위 = **jobset 안의 순번**. 공용 풀은 우선순위가 같으면
+            # 선착순이라, 큰 jobset을 통째로 밀어 넣으면 뒤에 온 작은
+            # jobset이 그 400건 뒤에 전부 줄선다(실측: 400건 뒤의 5건이
+            # 1.07s 대기, 단독이면 0.013s). 순번을 우선순위로 주면 "모든
+            # jobset의 1번 → 모든 jobset의 2번 → …" 순으로 집행돼 그 자체가
+            # 라운드 로빈이 된다(같은 실측 0.09s). jobset **안**의 순서는
+            # 우선순위가 순번대로 내려가므로 그대로 보존된다.
+            # 계약은 test_submit_fairness가 지킨다.
+            self._pool.start(task, -i)
         if not launch:
             # 띄운 task가 0건 — 완료를 여기서 직접 확정한다(게이트 경로의
             # 빈 제출 마무리와 동일). ※ 과거의 QTimer.singleShot(0) 방식은
@@ -842,7 +850,11 @@ class BulkSubmitter(QObject):
             if self._shutdown or ctx.cancel_event.is_set():
                 self._finalize_retry(ctx, entry, "CANCELLED")
                 return
-            self._pool.start(entry.make_task())
+            # 재시도는 **끼어들기**다 — 우선순위 0은 어느 jobset의 1번과도
+            # 같은 자리라 대기 중인 후속분보다 앞선다. 우연이 아니라 결정이다:
+            # 이 job은 이미 RETRY_WAIT로 backoff를 기다린 뒤라 여기서 또 줄
+            # 뒤로 보내면 재시도가 지연을 두 번 먹는다.
+            self._pool.start(entry.make_task(), 0)
 
         if self._shutdown or ctx.cancel_event.is_set():
             fire()                      # 대기 없이 즉시 포기 확정
