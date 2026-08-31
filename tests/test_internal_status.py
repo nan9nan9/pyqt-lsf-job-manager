@@ -1181,3 +1181,28 @@ def test_manager_status_fetcher_state(qtbot, fake_lsf):
             timeout=10000)
     finally:
         mgr.shutdown()
+
+
+def test_fetcher_state_goes_down_when_the_callback_hangs():
+    """안 돌아오는 콜백은 조회가 '끝나지' 않아 완료 지점의 건강 판정이 영영
+    안 돈다 — 낡은 PRIMARY가 남으면 앱은 조회가 멈춘 것을 모른다. 판단
+    보류가 확정되는 시간 초과 지점에서 DOWN이 찍혀야 한다."""
+    from lsfmgr import FetcherState
+
+    hang = threading.Event()
+    state = {"hang": False}
+
+    def primary():
+        if state["hang"]:
+            hang.wait()                          # 영영 안 돌아옴
+        return _payload(_job(1))
+
+    # wait_timeout_s는 생성자가 1.0으로 클램프한다 — 더 줄여도 안 빨라진다.
+    src = _source(primary, wait_timeout_s=1.0)
+    src.statuses_by_ids([1])
+    assert src.fetcher_state() is FetcherState.PRIMARY    # 정상이었다가
+    state["hang"] = True
+    found, failed = src.statuses_by_ids([1])
+    assert failed == {1}                          # 보류
+    assert src.fetcher_state() is FetcherState.DOWN       # 낡은 PRIMARY 금지
+    hang.set()                                    # 갇힌 스레드 정리

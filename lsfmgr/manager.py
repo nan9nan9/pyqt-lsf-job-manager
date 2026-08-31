@@ -21,7 +21,6 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Union
 from .command import LsfCommand, Runner
 from .completion import CompletionTracker
 from .config import LsfConfig
-from .internal_status import FetcherState  # noqa: F401 (타입 힌트·재수출)
 from .errors import (
     JobEditNotAllowedError,
     JobNotFoundError,
@@ -32,6 +31,7 @@ from .errors import (
 )
 from .handle import JobSet
 from .handlers import HandlerContext, JobSetHandlerService, StateSpec
+from .internal_status import FetcherState
 from .jobset_core import JobSetManager
 from .killer import Killer
 from .monitor import JobsetQuerier, PollingService
@@ -442,14 +442,15 @@ class LsfJobManager(QObject):
             return
         self.polling.poll_now(jobset_id)
 
-    def status_fetcher_state(self) -> Optional["FetcherState"]:
+    def status_fetcher_state(self) -> Optional[FetcherState]:
         """[sync, snapshot] 상태 조회 콜백의 건강 — 지금 누가 답하고 있나.
 
         콜백 조회원(job_status_fetcher)일 때 FetcherState를 돌려준다:
         PRIMARY=주 콜백 정상 / FAILOVER=주 실패, 예비 콜백이 대신 동작 /
         DOWN=마지막 조회 실패(예비까지 실패, 또는 예비 없음) / IDLE=아직
-        조회 전. bjobs 조회면 None. 판정은 마지막으로 **끝난** 조회 기준이라
-        진행 중(미회수) 조회는 끝나기 전까지 반영되지 않는다 (README §5.8).
+        조회 전. bjobs 조회면 None. 판정은 마지막으로 **끝난** 조회 기준
+        — 콜백이 안 돌아오면(미회수) 판단 보류가 확정되는 시점(대기 시간
+        초과)에 DOWN으로 반영된다 (README §5.8).
         """
         return self.command.status_fetcher_state()
 

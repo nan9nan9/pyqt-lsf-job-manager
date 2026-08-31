@@ -67,8 +67,9 @@ class FetcherState(Enum):
     """상태 조회 콜백의 건강 — 지금 누가 답하고 있나.
 
     LsfJobManager.status_fetcher_state()가 돌려준다. 판정은 마지막으로
-    **끝난** 조회의 결과다 — 진행 중(미회수) 조회는 끝나기 전까지 반영되지
-    않고, 늦게 끝난 낡은 조회는 판정을 덮지 못한다(늦은 쓰기 술어).
+    **끝난** 조회 — 또는 미회수로 **판단 보류가 확정**된 시점(대기 시간
+    초과·미회수 상한) — 의 결과다. 늦게 끝난 낡은 조회는 판정을 덮지
+    못한다(늦은 쓰기 술어).
     """
     IDLE = "IDLE"          # 아직 조회한 적 없음
     PRIMARY = "PRIMARY"    # 주 콜백(job_status_fetcher)이 정상 동작 중
@@ -592,6 +593,8 @@ class InternalStatusSource:
             log.error("미회수 status 조회가 %d건 — 새 조회를 띄우지 않습니다. "
                       "상태 조회 콜백이 반환하지 않고 있습니다"
                       "(콜백에 timeout을 주세요)", self._inflight)
+            self._note_outcome_locked(time.monotonic(), ok=False,
+                                      served_by_failover=False)
             return False
         log.warning("진행 중 status 조회가 %.0fs를 넘겨 새로 시작합니다 — "
                     "상태 조회 콜백이 반환하지 않고 있습니다"
@@ -611,6 +614,12 @@ class InternalStatusSource:
         if remaining <= 0 or not self._cv.wait(timeout=remaining):
             log.warning("internal status 조회 대기 시간 초과(%.0fs) — "
                         "이번 사이클은 판단 보류", self._wait_timeout_s)
+            # 안 돌아오는 콜백은 조회가 **끝나지 않아** 완료 지점의 건강
+            # 판정이 영영 안 돈다 — 낡은 PRIMARY/IDLE가 남으면 앱은 조회가
+            # 멈춘 것을 모른다. 보류가 확정되는 여기서 DOWN을 기록한다.
+            # (shutdown으로 풀려나는 경로는 건강 이벤트가 아니라 제외.)
+            self._note_outcome_locked(time.monotonic(), ok=False,
+                                      served_by_failover=False)
             return False
         if self._closed:
             return False
@@ -629,8 +638,12 @@ class InternalStatusSource:
                         and self._primary_unreturned > 0)
         if use_failover:
             # 주 콜백이 오래 갇혀 있으면 매 조회가 이 경로다 — 전환(첫 회)만
-            # 알리고 반복은 debug로 내린다 (failover 경로의 warning과 동일 원칙).
-            emit = (log.debug if self._health is FetcherState.FAILOVER
+            # 알리고 반복은 debug로 내린다 (failover 경로의 warning과 동일
+            # 원칙). DOWN도 강등이다 — 예비까지 실패 중이면 매 사이클
+            # '조회 실패' warning이 이미 나가고 있어 이 안내는 반복분이다.
+            emit = (log.debug
+                    if self._health in (FetcherState.FAILOVER,
+                                        FetcherState.DOWN)
                     else log.info)
             emit("이번 status 조회는 예비 콜백으로 갑니다 "
                  "(주 콜백 미회수 %d건)", self._primary_unreturned)
@@ -730,10 +743,6 @@ class InternalStatusSource:
                 except Exception as e:           # noqa: BLE001
                     error = e                    # 병합/청소 실패도 조회 장애
                 finally:
-                    # 건강 판정은 성공·실패 **모두** 기록한다 (병합 실패 포함).
-                    self._note_outcome_locked(
-                        at, ok=error is None and statuses is not None,
-                        served_by_failover=served_by_failover)
                     if self._fetch_token is token:
                         # 인계되지 않았을 때만 진행 상태를 건드린다 — 뒤늦게
                         # 돌아온 조회가 새 조회의 부기를 덮으면 안 된다.
@@ -741,6 +750,13 @@ class InternalStatusSource:
                         self._fetch_deadline = float("inf")
                         self._gen += 1
                     self._cv.notify_all()
+                    # 건강 판정은 성공·실패 **모두** 기록한다 (병합 실패
+                    # 포함). 깨우기 보증 **뒤**에 둔다 — 여기서 무슨 일이
+                    # 나도 부기·notify는 이미 끝났다. lock은 with 끝까지
+                    # 유지되므로 깨워진 대기자가 판정 전 값을 보는 일은 없다.
+                    self._note_outcome_locked(
+                        at, ok=error is None and statuses is not None,
+                        served_by_failover=served_by_failover)
         if error is not None:
             log.warning("internal status 조회 실패 — 이번 사이클은 판단 보류: %r",
                         error)
@@ -774,8 +790,10 @@ class InternalStatusSource:
             log.info("주 콜백(job_status_fetcher) 회복 — 상태 조회 정상화 "
                      "(%s → PRIMARY)", old.value)
         elif old is FetcherState.DOWN and new is FetcherState.FAILOVER:
-            log.info("예비 콜백 회복 — 상태 조회가 예비로 재개됩니다 "
-                     "(주 콜백은 여전히 실패)")
+            # '회복'이라 부르지 않는다 — 주 콜백 미회수로 DOWN이 된 뒤 예비의
+            # **첫** 응답이 이 전환을 밟는 경우, 예비는 실패한 적이 없다.
+            log.info("상태 조회가 예비 콜백으로 재개됩니다 "
+                     "(주 콜백은 여전히 실패, DOWN → FAILOVER)")
 
     def _merge_locked(self, statuses: List, now: datetime) -> None:
         """받은 상태를 원장에 덮어쓴다 — 증분 payload면 나머지는 유지된다.
