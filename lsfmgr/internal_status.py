@@ -23,6 +23,14 @@ subprocess 대신 이 객체를 쓴다. 앱은 그 콜백 하나만 주면 되�
 — 어차피 그 나이의 종료 job은 조회 대상이 아니다(추적 중인 job은 진작
 terminal로 확정돼 monitor가 조회하지 않는다).
 
+**예비 콜백**: `job_status_fetcher_failover`를 주면 주 콜백이 동작하지
+않을 때 — 예외·해석 불가 응답·미회수(안 돌아옴) — 같은 조회를 예비 콜백으로
+다시 시도한다. 매 조회는 항상 주 콜백부터라 주 콜백이 회복되면 자동으로
+되돌아간다. 유일한 예외는 주 콜백이 **미회수로 잡혀 있는 동안**이다: 그때
+새 조회를 또 주 콜백부터 걸면 인계 사이클마다 wait_timeout_s를 통째로 다시
+날리므로, 처음부터 예비로 간다(미회수 호출이 돌아오면 다시 주부터). 예비까지
+실패하면 종전대로 '조회 장애'(판단 보류)다 — flow는 그대로다.
+
 **thread safety**: 호출자가 둘이다 — 폴링 스레드, killer verify 워커.
 (detect_lost는 순수 Store 판정이라 여기 안 온다.) 둘이 동시에 들어와도
 콜백은 **한 번만** 돈다(single-flight): 하나가 조회를 띄우고 나머지는
@@ -259,6 +267,12 @@ def parse_internal_jobs(payload, now: Optional[datetime] = None,
     """
     if now is None:
         now = datetime.now()
+    if payload is None:
+        # 맨 None은 콜백이 return을 빼먹은 것이다 — '0건'으로 접으면 전 job이
+        # 미발견으로 몰려 LOST가 된다. ({"jobs": None}과 다르다: 그건 빈 결과를
+        # null로 주는 서버 표기라 봉투가 있고, 아래에서 빈 목록으로 접는다.)
+        raise ValueError("internal status 응답이 None입니다 — "
+                         "콜백이 payload를 반환하는지 확인하세요")
     if isinstance(payload, dict):
         if "jobs" not in payload:
             raise ValueError(
@@ -329,6 +343,7 @@ class InternalStatusSource:
     MAX_INFLIGHT = 3
 
     def __init__(self, fetcher: JobStatusFetcher, *,
+                 failover: Optional[JobStatusFetcher] = None,
                  refresh_min_s: Optional[float],
                  poll_interval_s: float = 0.0,
                  wait_timeout_s: float,
@@ -337,7 +352,18 @@ class InternalStatusSource:
         if not callable(fetcher):
             raise ValueError(
                 f"job_status_fetcher는 호출 가능해야 합니다 (got {fetcher!r})")
+        if failover is not None and not callable(failover):
+            raise ValueError(
+                f"job_status_fetcher_failover는 호출 가능해야 합니다 (got {failover!r})")
         self._fetcher = fetcher
+        #: 예비 콜백 — 주 콜백이 실패/미회수일 때 같은 조회를 이걸로 재시도.
+        self._failover = failover
+        #: 시작했지만 아직 안 돌아온 **주 콜백** 호출 수. 예비가 있을 때 이
+        #: 값이 0이 아니면 새 조회를 처음부터 예비로 보낸다 — 매번 주부터
+        #: 걸면 인계 사이클마다 wait_timeout_s를 통째로 다시 날린다.
+        self._primary_unreturned = 0
+        #: 마지막 성공 스냅샷을 예비 콜백이 제공했는가 (전환 로그·진단용).
+        self._served_by_failover = False
         #: 이 간격 안에 다시 들어온 조회는 콜백을 다시 돌리지 않는다.
         #: refresh_min_s=None이면 **자동** — 실제 폴링 주기의 절반을 따라간다
         #: (note_poll_interval). 앱이 값을 명시하면 그 값을 지킨다.
@@ -473,6 +499,9 @@ class InternalStatusSource:
             return {"job_ids": len(self._ledger), "entries": jobs,
                     "tracked_ids": len(self._interest),
                     "inflight": self._inflight,
+                    # 예비 콜백 진단 — 마지막 스냅샷의 출처와 미회수 주 콜백 수.
+                    "served_by_failover": self._served_by_failover,
+                    "primary_unreturned": self._primary_unreturned,
                     # 실제로 적용 중인 갱신 간격 — 자동 모드면 폴링 주기를
                     # 따라 바뀌므로 설정값이 아니라 여기를 봐야 한다.
                     "refresh_min_s": self._refresh_min_s}
@@ -537,12 +566,14 @@ class InternalStatusSource:
         if time.monotonic() < self._fetch_deadline:
             return True                      # 아직 기다릴 만하다
         if self._inflight >= self.MAX_INFLIGHT:
+            # 콜백을 특정하지 않는다 — 주가 빨리 실패하고 예비가 갇힌
+            # 경우도 이 경로다. 지목이 틀리면 앱이 엉뚱한 콜백을 고친다.
             log.error("미회수 status 조회가 %d건 — 새 조회를 띄우지 않습니다. "
-                      "job_status_fetcher가 반환하지 않고 있습니다"
+                      "상태 조회 콜백이 반환하지 않고 있습니다"
                       "(콜백에 timeout을 주세요)", self._inflight)
             return False
         log.warning("진행 중 status 조회가 %.0fs를 넘겨 새로 시작합니다 — "
-                    "job_status_fetcher가 반환하지 않고 있습니다"
+                    "상태 조회 콜백이 반환하지 않고 있습니다"
                     "(콜백에 timeout을 주세요)", self._wait_timeout_s)
         self._start_fetch_locked()
         return True
@@ -571,29 +602,88 @@ class InternalStatusSource:
         self._fetch_token = token
         self._fetch_deadline = time.monotonic() + self._wait_timeout_s
         self._inflight += 1
-        threading.Thread(target=self._fetch_worker, args=(token,),
+        # 주 콜백이 미회수(안 돌아옴)면 처음부터 예비로 — 인계 경로에서 또
+        # 주부터 걸면 그 조회도 같은 이유로 wait_timeout_s를 다 쓴다.
+        use_failover = (self._failover is not None
+                        and self._primary_unreturned > 0)
+        if use_failover:
+            # 주 콜백이 오래 갇혀 있으면 매 조회가 이 경로다 — 전환(첫 회)만
+            # 알리고 반복은 debug로 내린다 (failover 경로의 warning과 동일 원칙).
+            emit = log.debug if self._served_by_failover else log.info
+            emit("이번 status 조회는 예비 콜백으로 갑니다 "
+                 "(주 콜백 미회수 %d건)", self._primary_unreturned)
+        threading.Thread(target=self._fetch_worker, args=(token, use_failover),
                          name="lsfmgr-status-fetch", daemon=True).start()
 
-    def _fetch_worker(self, token: object) -> None:
-        """[전용 스레드] 콜백 1회 실행 + 원장 병합."""
+    def _attempt(self, fetcher: JobStatusFetcher, now: datetime) -> List:
+        """[전용 스레드] 콜백 1회 호출 + 파싱 — 실패는 예외 그대로 올린다."""
+        payload = fetcher()
+        # 관심 스냅샷은 콜백이 **돌아온 뒤에** 뜬다 — 콜백 앞에서 뜨면
+        # 그 왕복(수 초) 동안 새로 제출돼 조회에 들어온 job이 파싱
+        # 필터에 걸려 버려진다. 병합은 그 job을 받아들이는데(관심
+        # 검사는 lock 아래 최신값) 파싱이 이미 지웠으니, 결과는
+        # '조회 장애'가 아니라 **미발견**이라 monitor의 LOST 스트릭이
+        # 올라간다(유예를 0으로 둔 앱에서는 곧장 LOST).
+        with self._cv:
+            keep = set(self._interest)           # 파싱 단계 필터용 스냅샷
+        return parse_internal_jobs(payload, now, keep)
+
+    def _attempt_primary(self, now: datetime) -> List:
+        """[전용 스레드] 주 콜백 1회 — 미회수 부기를 두른다.
+
+        counter는 try 안에서 올리고 finally에서 내린다. 콜백이 안 돌아오면
+        이 스레드가 여기 갇힌 채 counter가 올라 있어, 다음 조회가 처음부터
+        예비로 가는 근거가 된다(돌아오는 순간 내려가 주 콜백이 복권된다).
+        """
+        with self._cv:
+            self._primary_unreturned += 1
+        try:
+            return self._attempt(self._fetcher, now)
+        finally:
+            with self._cv:
+                self._primary_unreturned -= 1
+
+    def _fetch_worker(self, token: object, use_failover: bool) -> None:
+        """[전용 스레드] 콜백 1회 실행 + 원장 병합.
+
+        use_failover이면 처음부터 예비 콜백으로 간다(주 콜백 미회수 — 인계
+        경로). 아니면 주 콜백을 돌리고, 실패하면 **같은 스레드에서** 예비
+        콜백으로 한 번 더 시도한다 — 그래서 호출자는 어느 쪽이 답했는지
+        모른 채 같은 계약의 결과만 받는다.
+        """
         statuses = None
+        served_by_failover = use_failover
         error: Optional[BaseException] = None
         at = time.monotonic()
         now = datetime.now()
         try:
-            try:
-                payload = self._fetcher()
-                # 관심 스냅샷은 콜백이 **돌아온 뒤에** 뜬다 — 콜백 앞에서 뜨면
-                # 그 왕복(수 초) 동안 새로 제출돼 조회에 들어온 job이 파싱
-                # 필터에 걸려 버려진다. 병합은 그 job을 받아들이는데(관심
-                # 검사는 lock 아래 최신값) 파싱이 이미 지웠으니, 결과는
-                # '조회 장애'가 아니라 **미발견**이라 monitor의 LOST 스트릭이
-                # 올라간다(유예를 0으로 둔 앱에서는 곧장 LOST).
-                with self._cv:
-                    keep = set(self._interest)   # 파싱 단계 필터용 스냅샷
-                statuses = parse_internal_jobs(payload, now, keep)
-            except Exception as e:               # noqa: BLE001 — 조회 장애로 강등
-                error = e
+            if use_failover:
+                statuses = self._attempt(self._failover, now)
+            else:
+                try:
+                    statuses = self._attempt_primary(now)
+                except Exception as primary_err:  # noqa: BLE001
+                    if self._failover is None:
+                        raise
+                    # 전환 순간만 warning — 주 콜백이 오래 죽어 있으면 매
+                    # 조회가 이 경로라, 반복분은 debug로 내린다.
+                    with self._cv:
+                        already = self._served_by_failover
+                    emit = log.debug if already else log.warning
+                    emit("주 콜백(job_status_fetcher) 실패 — 예비 콜백으로 "
+                         "다시 시도합니다: %r", primary_err)
+                    try:
+                        statuses = self._attempt(self._failover, now)
+                        served_by_failover = True
+                    except Exception:
+                        # 최종 오류는 아래 공통 로그가 맡는다 — 여기서는
+                        # 거기 안 실리는 주 콜백 쪽 문맥만 남긴다.
+                        log.warning("예비 콜백(job_status_fetcher_failover)도 "
+                                    "실패했습니다 — 주 콜백 오류: %r",
+                                    primary_err)
+                        raise
+        except Exception as e:                   # noqa: BLE001 — 조회 장애로 강등
+            error = e
         finally:
             # 어떤 예외(BaseException 포함)로 빠져나가도 부기를 마치고
             # 대기자를 깨운다 — 안 그러면 이후 조회가 전부 대기만 하다
@@ -602,12 +692,19 @@ class InternalStatusSource:
                 self._inflight -= 1
                 try:
                     if statuses is not None:
+                        # 병합은 늦은 쓰기 술어 **밖**이다 — 조회가 늦게
+                        # 돌아왔어도 응답은 콜백이 돌아온 시점에 서버가 준
+                        # 것이라(시작 시각과 무관), 버릴 이유가 없다.
                         self._merge_locked(statuses, now)
                         # 성공 표식은 병합이 끝난 뒤에 찍는다 — 반쯤 병합된
-                        # 원장을 '최신'으로 광고하면 안 된다. max()인 이유:
-                        # 인계된 뒤 뒤늦게 돌아온 조회가 시계를 되돌리면 안 된다.
+                        # 원장을 '최신'으로 광고하면 안 된다. at 비교(늦은
+                        # 쓰기 술어)인 이유: 인계된 뒤 뒤늦게 돌아온 조회가
+                        # 시계를 되돌리면 안 되고, 스냅샷 **출처**도 같다 —
+                        # 낡은 주 콜백 성공이 예비가 서빙 중인 상태를
+                        # '회복'으로 덮으면 안 된다.
                         if at > self._last_fetch_at:
                             self._last_fetch_at = at
+                            self._note_served_locked(served_by_failover)
                         self._prune_locked(at, now)
                 except Exception as e:           # noqa: BLE001
                     error = e                    # 병합/청소 실패도 조회 장애
@@ -626,6 +723,19 @@ class InternalStatusSource:
     # ------------------------------------------------------------------
     # 원장 병합 / 만료 (둘 다 lock 보유 상태에서만 호출)
     # ------------------------------------------------------------------
+    def _note_served_locked(self, served_by_failover: bool) -> None:
+        """[lock 보유] 이번 스냅샷의 출처를 기록 — 회복 전환만 로그.
+
+        예비→주 전환은 여기가 유일한 로그 지점이다(주 콜백 실패의 warning은
+        failover 순간에 이미 났고, 성공은 조용해서 여기서 알려야 보인다).
+        호출자는 늦은 쓰기 술어(at > _last_fetch_at)를 통과한 조회만 여기로
+        보낸다 — 낡은 조회는 출처를 덮지 못한다.
+        """
+        if self._served_by_failover and not served_by_failover:
+            log.info("주 콜백(job_status_fetcher) 회복 — 예비 콜백 사용을 "
+                     "중단합니다")
+        self._served_by_failover = served_by_failover
+
     def _merge_locked(self, statuses: List, now: datetime) -> None:
         """받은 상태를 원장에 덮어쓴다 — 증분 payload면 나머지는 유지된다.
 

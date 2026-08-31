@@ -156,6 +156,7 @@ mgr.submit(js, workers=8, max_retry=0, auto_poll=False)     # 이번 submit만
 |---|---|---|
 | `bjobs_path` / `bkill_path` | PATH 탐색 | 조회/kill 명령 경로. 토큰 목록이면 고정 인자가 앞에 붙음. `job_status_fetcher`를 주면 `bjobs_path`는 안 쓰임(§5.8) |
 | `job_status_fetcher` | 없음 | **`LsfConfig` 전용.** 상태 조회 콜백. **주면 bjobs 대신 이 콜백으로 조회** — `LsfConfig` 필드다(§5.8) |
+| `job_status_fetcher_failover` | 없음 | **`LsfConfig` 전용.** 상태 조회 **예비** 콜백. 주 콜백이 동작하지 않을 때(예외·해석 불가 응답·미회수) 같은 조회를 이 콜백으로 재시도. 주가 회복되면 자동 복귀. 주 콜백 없이 주면 ValueError (§5.8) |
 | `chunk_size` | 500 | **bjobs** 한 번에 넘길 job 수 (조회 전용) |
 | `arg_max` | 131072 | 명령줄 인자 총 길이 상한 (초과 시 `ArgMaxExceededError`) |
 | `lost_after_missing_polls` | 3 | bjobs에서 안 보이는 job을 **LOST로 확정하기까지** 필요한 연속 미발견 횟수. 1이면 즉시. 제출 직후 등록 지연으로 한두 사이클 안 보이는 job을 죽은 것으로 만들지 않기 위한 유예 |
@@ -696,6 +697,35 @@ mgr = LsfJobManager(config=LsfConfig(job_status_fetcher=fetch_status))
 - GUI 스레드가 아닌 **백그라운드 스레드에서** 실행됩니다. 콜백 안에서 Qt 위젯을
   건드리면 안 됩니다.
 
+#### 예비 콜백 (`job_status_fetcher_failover`)
+
+주 콜백이 동작하지 않을 때 조회를 이어받을 **예비 콜백**을 하나 더 줄 수
+있습니다. 계약은 주 콜백과 완전히 같고(인자 없음, REST 응답 반환, 타임아웃은
+콜백 몫), 결과는 같은 원장에 병합됩니다 — 상위 flow는 어느 쪽이 답했는지
+모릅니다.
+
+```python
+mgr = LsfJobManager(config=LsfConfig(
+    job_status_fetcher=fetch_primary,          # 평상시
+    job_status_fetcher_failover=fetch_fallback)) # 주가 안 될 때
+```
+
+- **넘어가는 조건** — 주 콜백이 ① 예외를 던지거나, ② 응답을 한 건도 해석하지
+  못했거나(형식 불일치), ③ 돌아오지 않아 조회가 인계됐을 때. 그 조회를 같은
+  스레드에서 예비 콜백으로 다시 시도합니다.
+- **돌아오는 조건** — 매 조회는 항상 주 콜백부터 시도하므로, 주가 성공하는
+  순간 예비 사용이 자동으로 끝납니다. 유일한 예외는 주 콜백이 **아직 안
+  돌아온**(미회수) 동안입니다 — 그때 또 주부터 걸면 인계 사이클마다
+  `query_timeout_s`를 통째로 다시 날리므로, 미회수 호출이 남아 있는 동안은
+  처음부터 예비로 갑니다(그 호출이 돌아오면 주가 복권됩니다).
+- **예비까지 실패하면** — 종전대로 "조회 장애"(판단 보류)입니다. 아무도 LOST로
+  확정되지 않습니다.
+- 전환은 로그로 보입니다: 주→예비는 전환 순간 1회 `WARNING`(반복은 DEBUG),
+  예비→주 복귀는 `INFO`. 현재 상태는
+  `mgr.command.internal_status.stats()["served_by_failover"]`.
+- 주 콜백 없이 예비만 주면 **`ValueError`** 입니다 — 조회가 bjobs로 가서 예비
+  콜백은 아무 데도 안 쓰이는 설정이기 때문입니다.
+
 > **페이로드가 맞는지 미리 확인하기** — 실환경에 붙이기 전에 응답 한 건을
 > 파서에 그대로 넣어 보세요. 라이브러리가 실제로 쓰는 바로 그 함수입니다.
 >
@@ -877,6 +907,7 @@ mgr = LsfJobManager(config=LsfConfig(
 | 옵션 | 기본값 | 설명 |
 |---|---|---|
 | `job_status_fetcher` | 없음 | 조회 콜백. **주면 콜백 조회, 안 주면 bjobs** — 모드 스위치는 이것뿐 |
+| `job_status_fetcher_failover` | 없음 | **예비** 조회 콜백 — 주 콜백 실패 시 같은 조회를 재시도. 위 "예비 콜백" 참고 |
 | `internal_refresh_min_s` | 실제 폴링 주기/2 | 최소 갱신 간격(초). 이 안에 겹쳐 들어온 조회는 콜백을 다시 안 돌림. 0이면 캐시 없음. **미지정이면 가장 짧은 폴링 주기의 절반으로 자동 추종** — `start_polling(js, 2.0)`이면 1초로 내려감 |
 | `internal_retention_days` | 14 | 원장에서 **종료 job**을 보존할 기간(일). 0이면 만료 없음 |
 | `internal_lost_grace_s` | 60 | 제출 후 이 시간 안의 미발견은 LOST로 세지 않음. 0이면 유예 없음 |
@@ -892,7 +923,7 @@ mgr = LsfJobManager(config=LsfConfig(
 ```
 
 > `internal_*` 셋은 `LsfJobManager(...)` kwarg로도 줄 수 있지만
-> `job_status_fetcher`는 **`LsfConfig` 전용**입니다.
+> `job_status_fetcher`/`job_status_fetcher_failover`는 **`LsfConfig` 전용**입니다.
 
 #### 콜백은 언제, 몇 번 실행되나
 

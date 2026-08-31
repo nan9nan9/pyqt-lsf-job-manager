@@ -95,6 +95,17 @@ class LsfConfig:
     #: 아래 internal_* 노브들이 이 조회원의 동작을 정한다.
     job_status_fetcher: Optional[JobStatusFetcher] = None
 
+    #: 상태 조회 **예비** 콜백. 주 콜백(job_status_fetcher)이 동작하지 않을 때
+    #: — 예외를 던지거나, 응답을 한 건도 해석할 수 없거나, 돌아오지 않아
+    #: 인계됐을 때 — 같은 조회를 이 콜백으로 다시 시도한다. 계약(인자 없음,
+    #: REST 응답 반환, 타임아웃은 콜백 몫)은 주 콜백과 같고, 결과는 같은
+    #: 원장에 병합된다. 매 조회는 항상 주 콜백부터 시도하므로 주 콜백이
+    #: 회복되면 자동으로 되돌아간다(주 콜백이 미회수로 잡혀 있는 동안만
+    #: 처음부터 예비로 간다 — internal_status.py). 예비까지 실패하면 종전대로
+    #: '조회 장애'(판단 보류)다. 주 콜백 없이 이 값만 주면 ValueError —
+    #: 조회가 bjobs로 가서 아무 데도 안 쓰인다 (README §5.8).
+    job_status_fetcher_failover: Optional[JobStatusFetcher] = None
+
     #: wrapper 제출의 **실행 프로그램 치환** — (glob 패턴, 대체 CmdPath).
     #: 제출 커맨드는 문자열에 프로그램명이 박혀 있어(lsfmgr가 조립하지 않는다)
     #: 별도 경로 노브가 없다. 이 옵션은 argv[0]의 basename이 패턴에 맞을 때
@@ -309,6 +320,18 @@ class LsfConfig:
                 and not callable(self.job_status_fetcher)):
             raise ValueError("job_status_fetcher는 호출 가능해야 합니다 "
                              f"(got {self.job_status_fetcher!r})")
+        if self.job_status_fetcher_failover is not None:
+            if not callable(self.job_status_fetcher_failover):
+                raise ValueError(
+                    "job_status_fetcher_failover는 호출 가능해야 합니다 "
+                    f"(got {self.job_status_fetcher_failover!r})")
+            if self.job_status_fetcher is None:
+                # 조용히 무시하면 앱은 예비가 있다고 믿는데 조회는 bjobs로
+                # 간다 — 장애 때 예비가 안 도는 것을 그때서야 알게 된다.
+                raise ValueError(
+                    "job_status_fetcher_failover는 job_status_fetcher(주 콜백)와 "
+                    "함께 줘야 합니다 — 주 콜백이 없으면 조회가 bjobs로 가서 "
+                    "예비 콜백은 아무 데도 안 쓰입니다")
         # internal 갱신 간격은 0(캐시 끔) 허용 — 음수만 막는다.
         if self.internal_refresh_min_s is not None:
             if float(self.internal_refresh_min_s) < 0:

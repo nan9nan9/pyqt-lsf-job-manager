@@ -318,6 +318,8 @@ class LsfCommand:
         if self.config.job_status_fetcher is not None:
             self._internal = InternalStatusSource(
                 self.config.job_status_fetcher,
+                # 예비 콜백 — 주 콜백이 실패/미회수일 때 같은 조회를 재시도.
+                failover=self.config.job_status_fetcher_failover,
                 # None이면 소스가 자동 모드로 — 실제 폴링 주기를 알게 될 때
                 # 그 절반으로 따라간다(note_poll_interval).
                 refresh_min_s=self.config.internal_refresh_min_s,
@@ -328,11 +330,14 @@ class LsfCommand:
                 # 만들지 않는다 (전수 스캔 비용을 통째로 없앤다).
                 track_runtime=self.config.poll_runtime_updates)
             log.info("상태 조회원: job_status_fetcher 콜백 (bjobs 미사용, 최소 "
-                     "갱신 간격 %.1fs%s, 종료 job 보존 %.0f일)",
+                     "갱신 간격 %.1fs%s, 종료 job 보존 %.0f일%s)",
                      self._internal.stats()["refresh_min_s"],
                      "" if self.config.internal_refresh_min_s is not None
                      else " — 실제 폴링 주기에 자동 추종",
-                     self.config.internal_retention_days)
+                     self.config.internal_retention_days,
+                     ", 예비 콜백 있음"
+                     if self.config.job_status_fetcher_failover is not None
+                     else "")
             if self.config.bjobs_path != DEFAULT_BJOBS_PATH:
                 # 조회는 콜백으로 가므로 이 경로는 아무 데도 안 쓰인다.
                 # 앱이 mock bjobs를 가리켜 놓고 "왜 안 불리지" 하는 것을 막는다.

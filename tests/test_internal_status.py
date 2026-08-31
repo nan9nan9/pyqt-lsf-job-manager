@@ -761,7 +761,9 @@ def test_terminal_job_run_time_is_not_recomputed():
                               startTime="2026-08-08T12:00:00",
                               finishTime="2026-08-08T12:01:40")),
                 _payload()]
-    src = _source(lambda: payloads.pop(0))
+    # 만료는 이 테스트의 관심사가 아니다 — 절대 날짜라 보존기간(14일)이
+    # 지나면 첫 조회의 청소가 항목을 지워 버린다. 만료를 끈다.
+    src = _source(lambda: payloads.pop(0), retention_days=0.0)
     (first,), _f = src.statuses_by_ids([1])
     time.sleep(1.1)
     (again,), _f = src.statuses_by_ids([1])
@@ -906,3 +908,194 @@ def test_unparsable_time_keeps_the_row():
     (st,) = parse_internal_jobs({"jobs": [
         {"dataId": "1", "stat": "RUN", "startTime": "깨진값"}]})
     assert st.job_id == 1 and st.start_time is None
+
+
+# ----------------------------------------------------------------------
+# 8) 예비 콜백 (job_status_fetcher_failover)
+# ----------------------------------------------------------------------
+def test_failover_serves_when_primary_raises():
+    """주 콜백이 예외를 던지면 같은 조회를 예비 콜백으로 다시 시도한다 —
+    판단 보류가 아니라 결과가 나와야 failover다."""
+    def primary():
+        raise RuntimeError("primary down")
+    src = _source(primary, failover=lambda: _payload(_job(7)))
+    found, failed = src.statuses_by_ids([7])
+    assert [st.job_id for st in found] == [7] and not failed
+    assert src.stats()["served_by_failover"] is True
+
+
+def test_failover_serves_when_primary_payload_is_garbage():
+    """'동작하지 않는다'에는 해석 불가 응답도 들어간다 — 형식이 깨진 주
+    콜백 응답은 조회 장애인데, 예비가 있으면 거기서 받는다."""
+    src = _source(lambda: {"nope": 1},          # 'jobs' 키 없음 → ValueError
+                  failover=lambda: _payload(_job(3)))
+    found, failed = src.statuses_by_ids([3])
+    assert [st.job_id for st in found] == [3] and not failed
+
+
+def test_both_callbacks_failing_defers_judgment():
+    """예비까지 실패하면 종전대로 '조회 장애' — 전원 보류, LOST 확정 없음."""
+    def bad():
+        raise RuntimeError("down")
+    src = _source(bad, failover=bad)
+    found, failed = src.statuses_by_ids([1, 2])
+    assert not found and failed == {1, 2}
+
+
+def test_primary_is_retried_every_fetch_and_recovers():
+    """매 조회는 항상 주 콜백부터다 — 주가 회복되면 예비 사용이 자동으로
+    끝나야 한다(한 번 넘어갔다고 예비에 눌러앉으면 안 된다)."""
+    calls = []
+    state = {"fail": True}
+
+    def primary():
+        calls.append("p")
+        if state["fail"]:
+            raise RuntimeError("down")
+        return _payload(_job(1))
+
+    def failover():
+        calls.append("b")
+        return _payload(_job(1))
+
+    src = _source(primary, failover=failover)
+    found, _f = src.statuses_by_ids([1])
+    assert found and src.stats()["served_by_failover"] is True
+    state["fail"] = False                        # 주 콜백 회복
+    found, _f = src.statuses_by_ids([1])
+    assert found and src.stats()["served_by_failover"] is False
+    assert calls[-1] == "p", calls               # 회복 후엔 예비가 안 불린다
+
+
+def test_hung_primary_fails_over_without_repaying_the_timeout():
+    """주 콜백이 안 돌아오면(미회수) 인계된 조회는 **처음부터** 예비로
+    간다 — 인계마다 다시 주부터 걸면 사이클마다 wait_timeout_s를 통째로
+    날리고, 예비는 영영 차례가 안 온다."""
+    hang = threading.Event()                     # 절대 set 안 함
+    src = _source(lambda: hang.wait() or _payload(),
+                  failover=lambda: _payload(_job(9)),
+                  wait_timeout_s=0.3)
+    found, failed = src.statuses_by_ids([9])     # 첫 사이클: 주에 붙잡힘
+    for _ in range(5):                           # 인계 후 예비로 정상화
+        if found:
+            break
+        found, failed = src.statuses_by_ids([9])
+    assert [st.job_id for st in found] == [9] and not failed
+    stats = src.stats()
+    assert stats["served_by_failover"] is True
+    assert stats["primary_unreturned"] >= 1      # 주 콜백은 아직 갇혀 있다
+    # 주가 갇혀 있는 동안의 후속 조회는 예비로 즉시 답한다 — 타임아웃을
+    # 다시 물지 않는다.
+    t0 = time.monotonic()
+    found, failed = src.statuses_by_ids([9])
+    assert found and not failed
+    assert time.monotonic() - t0 < 0.3, "미회수 주 콜백을 또 기다렸다"
+    hang.set()                                   # 갇힌 스레드 정리
+
+
+def test_failover_results_merge_into_the_same_ledger():
+    """예비 응답도 같은 원장에 병합된다 — 증분 payload에서 주가 준 job이
+    예비로 넘어갔다고 사라지면 안 된다."""
+    state = {"fail": False}
+
+    def primary():
+        if state["fail"]:
+            raise RuntimeError("down")
+        return _payload(_job(1, stat="RUN"))
+
+    src = _source(primary, failover=lambda: _payload(_job(2, stat="RUN")))
+    src.statuses_by_ids([1, 2])                  # 주: job 1만 옴
+    state["fail"] = True
+    found, failed = src.statuses_by_ids([1, 2])  # 예비: job 2만 옴
+    assert not failed
+    assert sorted(st.job_id for st in found) == [1, 2]   # 1은 원장에서 유지
+
+
+def test_failover_config_requires_primary_and_callable():
+    """예비만 주면 조회가 bjobs로 가서 아무 데도 안 쓰인다 — 조용히 무시하지
+    않고 생성 시점에 막는다. 호출 불가 값도 같은 취급."""
+    with pytest.raises(ValueError, match="job_status_fetcher_failover"):
+        LsfConfig(job_status_fetcher_failover=lambda: _payload())
+    with pytest.raises(ValueError, match="호출 가능"):
+        LsfConfig(job_status_fetcher=lambda: _payload(),
+                  job_status_fetcher_failover="not-callable")
+    with pytest.raises(ValueError, match="호출 가능"):
+        _source(lambda: _payload(), failover="not-callable")
+
+
+def test_manager_uses_failover_when_primary_is_down(qtbot, fake_lsf):
+    """manager 통합 — 주 콜백이 죽어 있어도 예비가 상태를 공급해 jobset이
+    끝까지 간다(폴링·완료 신호 flow는 조회원 내부 사정을 모른다)."""
+    ids = []
+
+    def failover():
+        return _payload(*[_job(i, stat="DONE",
+                               startTime="2026-08-08T12:00:00",
+                               finishTime=None) for i in ids])
+
+    def primary():
+        raise RuntimeError("REST down")
+
+    mgr = _internal_mgr(fake_lsf, primary,
+                        job_status_fetcher_failover=failover)
+    try:
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            js = submit_cmds(mgr, ["mytool a.sp"], auto_poll=False)
+        ids.extend(r.job_id for r in js.jobs())
+        with qtbot.waitSignal(mgr.jobset_finished, timeout=10000):
+            mgr.start_polling(js.id, 0.1)
+        assert [r.state.value for r in js.jobs()] == ["DONE"]
+        assert mgr.command.internal_status.stats()["served_by_failover"] is True
+    finally:
+        mgr.shutdown()
+
+
+def test_failover_switch_warns_once_then_stays_quiet(caplog):
+    """주 콜백이 오래 죽어 있으면 매 조회가 failover 경로다 — 전환 순간만
+    warning이고 반복은 debug여야 로그가 폭주하지 않는다. 회복은 info 1회."""
+    state = {"fail": True}
+
+    def primary():
+        if state["fail"]:
+            raise RuntimeError("down")
+        return _payload(_job(1))
+
+    src = _source(primary, failover=lambda: _payload(_job(1)))
+    with caplog.at_level("INFO", logger="lsfmgr.internal_status"):
+        for _ in range(4):                       # 실패 4사이클 — 전환은 1회
+            src.statuses_by_ids([1])
+        state["fail"] = False                    # 회복
+        src.statuses_by_ids([1])
+    switch = [r for r in caplog.records
+              if "예비 콜백으로 다시" in r.message and r.levelname == "WARNING"]
+    recover = [r for r in caplog.records if "회복" in r.message]
+    assert len(switch) == 1, [r.message for r in caplog.records]
+    assert len(recover) == 1
+
+
+def test_fresh_query_is_served_by_failover_when_primary_is_down():
+    """kill verify는 fresh 조회다('방금'을 봐야 한다) — 주 콜백이 죽어 있어도
+    예비가 그 계약(이 호출 이후 시작된 조회)을 그대로 채워야 한다."""
+    def primary():
+        raise RuntimeError("down")
+
+    src = _source(primary, failover=lambda: _payload(_job(5, stat="EXIT")),
+                  refresh_min_s=30.0)          # 캐시가 있어도 fresh는 우회
+    src.statuses_by_ids([5], fresh=True)       # 원장 채움 + 관심 등록
+    found, failed = src.statuses_by_ids([5], fresh=True)
+    assert [st.state.value for st in found] == ["EXIT"] and not failed
+
+
+def test_bare_none_payload_is_a_failure_not_an_empty_answer():
+    """콜백이 return을 빼먹으면 payload가 None이다 — '0건'으로 접으면 전
+    job이 미발견 → LOST로 몰린다. 형식 오류(조회 장애)로 올려야 하고,
+    예비가 있으면 예비가 받는다. ({"jobs": None}은 빈 결과의 서버 표기라
+    정상 — 구분이 이 테스트의 요점이다.)"""
+    found, failed = _source(lambda: None).statuses_by_ids([1])
+    assert not found and failed == {1}           # 보류, LOST 아님
+    found, failed = _source(lambda: None,
+                            failover=lambda: _payload(_job(1))
+                            ).statuses_by_ids([1])
+    assert [st.job_id for st in found] == [1] and not failed
+    found, failed = _source(lambda: {"jobs": None}).statuses_by_ids([1])
+    assert not found and not failed              # 봉투 있는 null = 정상 0건
