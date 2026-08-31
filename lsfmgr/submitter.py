@@ -77,7 +77,7 @@ class _SubmitContext:
     # RLock인 이유(리뷰 M2): finished/progress는 순서 보장을 위해 이 lock을
     # 쥔 채 발화된다. worker 발화는 queued라 무해하지만, main 스레드 발화
     # 경로(born-cancelled 정산·QTimer 재시도 확정·shutdown drain)는 슬롯이
-    # direct로 실행돼, 슬롯이 progress_snapshot()/abort_retries() 같은
+    # direct로 실행돼, 슬롯이 progress_snapshot()/cancel_submit() 같은
     # lock-보유 API를 pull하면 비재진입 Lock에선 같은 스레드 재획득으로
     # 영구 데드락(GUI freeze)이 났다. RLock은 같은 스레드 재진입만 허용해
     # 이 계열을 없애고 cross-thread 배타는 그대로 유지한다.
@@ -606,8 +606,17 @@ class BulkSubmitter(QObject):
     def cancel_submit(self, jobset_id: str) -> None:
         """진행 중 submit 중단. 이미 submit된 job은 유지."""
         ctx = self._ctx(jobset_id)
-        if ctx is not None:
-            ctx.cancel_event.set()
+        if ctx is None:
+            return
+        ctx.cancel_event.set()
+        # QTimer 대기 중인 재시도도 **지금** 포기 확정한다 — 그대로 두면 각
+        # backoff 타이머가 만료돼야 fire()가 취소를 보고 확정하므로, expo
+        # backoff가 긴 job 하나에 finished가 분 단위로 밀리고 그동안
+        # is_active=True라 편집/재제출/remove_jobset이 전부 막힌다
+        # (kill 경로 _cancel_scope가 같은 이유로 함께 부른다).
+        # 취소 이후에 새로 등록되는 재시도는 _on_retry_requested가 대기 없이
+        # 즉시 포기하므로 이 한 번이면 전부 덮인다.
+        self._abort_retries_ctx(ctx, reason="CANCELLED")
 
     def shutdown(self) -> None:
         """모든 submit 중단 요청 후 pool join.
@@ -631,26 +640,13 @@ class BulkSubmitter(QObject):
             for entry in entries:
                 self._finalize_retry(ctx, entry, "SHUTDOWN")
 
-    def abort_retries(self, jobset_id: str,
-                      keys: Optional[Sequence[str]] = None) -> None:
-        """이 jobset의 대기 중 재시도(QTimer)를 포기 확정 — RETRY_WAIT →
-        SUBMIT_FAILED. 전체 kill과 함께 호출해, kill 뒤 재시도 타이머가
-        발화해 job이 부활하는 것을 막는다. 이후 타이머가 발화해도 원장
-        pop이 빈손이라 no-op(정확히 한 번).
-
-        keys=None이면 이 jobset의 전 재시도, key 집합이면 그 job의 재시도만
-        포기한다 (범위 kill — 대상 아닌 job의 재시도는 살려 둔다).
-        SubmitGate의 Scope와 같은 규약(None=전체)이라 `_cancel_scope`가
-        받은 scope를 그대로 넘긴다."""
-        ctx = self._ctx(jobset_id)
-        if ctx is not None:
-            self._abort_retries_ctx(ctx, keys=keys)
-
     def _abort_retries_ctx(self, ctx: _SubmitContext,
-                           keys: Optional[Sequence[str]] = None) -> None:
+                           keys: Optional[Sequence[str]] = None,
+                           reason: str = "KILLED") -> None:
         """abort_retries의 본체 — **이 ctx**의 원장만 건드린다. kill 콜백
         (_cancel_scope)처럼 ctx를 이미 쥔 caller는 이름 재조회 없이 직접
-        부른다(사이클 교체 경합 창 제거)."""
+        부른다(사이클 교체 경합 창 제거). reason은 포기 사유 표식 —
+        kill 경로는 KILLED, 사용자 취소(cancel_submit)는 CANCELLED."""
         with ctx.retry_lock:
             if keys is None:
                 entries = list(ctx.pending_retries.values())
@@ -659,7 +655,7 @@ class BulkSubmitter(QObject):
                 entries = [ctx.pending_retries.pop(k)
                            for k in set(keys) if k in ctx.pending_retries]
         for entry in entries:
-            self._finalize_retry(ctx, entry, "KILLED")
+            self._finalize_retry(ctx, entry, reason)
 
     # ------------------------------------------------------------------
     # worker 콜백 (worker 스레드에서 호출됨 — Store는 thread-safe)
@@ -723,6 +719,18 @@ class BulkSubmitter(QObject):
         self._log_failure(ctx, logging.WARNING, err.fail_reason,
                           "submit 실패 [%s] %s: %s",
                           err.fail_reason, job_key, err)
+        with ctx.lock:
+            job_cancelled = job_key in ctx.cancelled_keys
+        if job_cancelled:
+            # 선택 kill이 이 job을 겨냥한 사이(제출 시도 중) 실패가 돌아왔다 —
+            # 재시도를 걸면 kill이 끝난 뒤에도 backoff가 만료될 때까지
+            # RETRY_WAIT(활성)로 남아 can_submit이 막히고 kill이 덜 끝난
+            # 것처럼 보인다(_cancel_scope의 원장 비우기는 등록 전이라 못
+            # 잡는다). 취소 판정을 조금만 먼저 통과했을 때와 같은 결과
+            # (CANCELLED + killed 표식)로 바로 확정한다 — 타이밍에 따라
+            # 최종 상태가 갈리지 않는다.
+            self._task_cancelled(ctx, job_key)
+            return
         if (getattr(err, "retryable", True) and attempt < ctx.options.max_retry
                 and not ctx.cancel_event.is_set() and not self._shutdown):
             # RETRY_WAIT → QTimer 스케줄 (스레드 sleep 점유 금지, §4)
@@ -812,18 +820,22 @@ class BulkSubmitter(QObject):
             log.info("삭제된 job에서 예외 흡수: %s/%s", ctx.jobset_id, job_key)
             self._task_vanished(ctx, job_key, job_id=None)
             return
+        nr = None
         try:
-            self.store.transition(ctx.jobset_id, job_key,
-                                  JobState.SUBMIT_FAILED,
-                                  fail_reason="INTERNAL_ERROR",
-                                  fail_message=repr(err)[:MAX_FAIL_MESSAGE_CHARS],
-                                  guard=lambda cur: cur.job_id is None)
+            nr = self.store.transition(
+                ctx.jobset_id, job_key, JobState.SUBMIT_FAILED,
+                fail_reason="INTERNAL_ERROR",
+                fail_message=repr(err)[:MAX_FAIL_MESSAGE_CHARS],
+                guard=lambda cur: cur.job_id is None)
         except _RECORD_GONE:
             pass                                # 소실 — 남길 레코드가 없다
         except Exception:                       # noqa: BLE001
             log.exception("crash 후 전이 실패: %s", job_key)
         self._safe_emit(self.error, ctx.jobset_id, f"{job_key}: {err!r}")
-        self._count(ctx, failed=True, reason="INTERNAL_ERROR")
+        # 전이 레코드를 반드시 changed로 발행한다 — SUBMIT_FAILED는 폴링
+        # 대상(is_on_lsf)이 아니라 여기서 안 알리면 행이 SUBMITTING에 영구
+        # 고착된다 (_mark_cancelled와 같은 규칙).
+        self._count(ctx, failed=True, reason="INTERNAL_ERROR", changed=nr)
 
     # ------------------------------------------------------------------
     # retry 스케줄 — 원장 등록(worker 스레드) → QTimer 발화(submitter 스레드)
@@ -1047,11 +1059,18 @@ class BulkSubmitter(QObject):
             if ctx.finished:
                 return
             ctx.finished = True
+            # 이미 계상된 단위(리셋 중 소실/barrier 거부분)는 각자 분류를
+            # 유지하고 **남은 단위만** 일괄 확정한다 — total로 덮어쓰면
+            # 부분 계상 뒤 착수가 죽었을 때 failed+cancelled 합이 total을
+            # 넘는 보고서가 된다.
+            remaining = ctx.total - ctx.done
+            ctx.done = ctx.total
             if failed:
-                ctx.failed = ctx.total
-                ctx.fail_reasons["PRE_SUBMIT_FAILED"] = ctx.total
+                ctx.failed += remaining
+                if remaining:
+                    ctx.fail_reasons["PRE_SUBMIT_FAILED"] = remaining
             else:
-                ctx.cancelled = ctx.total
+                ctx.cancelled += remaining
             if emit_finished:
                 self._safe_emit(self.finished, ctx.jobset_id,
                                 self._make_report(ctx))

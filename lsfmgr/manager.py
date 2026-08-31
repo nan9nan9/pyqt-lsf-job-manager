@@ -1283,8 +1283,9 @@ class LsfJobManager(QObject):
                     f"{jobset_id}: submit/kill 진행 중에는 remove_jobset할 수"
                     f" 없습니다 (force=True로 강제 가능 — 진행 중 제출은 취소됨)",
                     jobset_id=jobset_id)
+            # cancel_submit이 QTimer 대기 중 재시도까지 즉시 포기 확정한다
+            # (RETRY_WAIT 장기 backoff 중에도 강제 정리가 가능해야 한다)
             self.submitter.cancel_submit(jobset_id)
-            self.submitter.abort_retries(jobset_id)
         # 조회원 원장 정리에 쓸 job_id를 삭제 **전에** 떠 둔다 — 삭제 후에는
         # 레코드가 없어 어느 id를 버려야 할지 알 방법이 없다.
         try:

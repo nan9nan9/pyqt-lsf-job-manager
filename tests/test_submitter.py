@@ -202,6 +202,96 @@ def test_cancel_submit(qtbot, manager, fake_lsf):
     assert len(pend) == report.succeeded
 
 
+def test_cancel_submit_aborts_pending_retries_now(qtbot, manager, fake_lsf):
+    """RETRY_WAIT로 backoff를 기다리는 job이 있어도 cancel_submit은 **즉시**
+    사이클을 끝내야 한다 — 각 backoff 타이머의 만료를 기다리면 긴 expo
+    backoff 하나에 submit_finished가 분 단위로 밀리고, 그동안
+    is_active=True라 편집/재제출/remove_jobset이 전부 막힌다."""
+    fake_lsf.fail_next_bsub = 99
+    js = submit_cmds(manager, ["mytool a.sp"], max_retry=5,
+                     retry_backoff="fixed:600", auto_poll=False)
+    qtbot.waitUntil(
+        lambda: manager.get_jobs(js.id)[0].state is JobState.RETRY_WAIT,
+        timeout=5000)
+    with qtbot.waitSignal(manager.submit_finished, timeout=3000) as blk:
+        manager.cancel_submit(js)                # 600초 타이머를 안 기다린다
+    rpt = blk.args[1]
+    assert rpt.cancelled == 1 and rpt.failed == 0
+    rec = manager.get_jobs(js.id)[0]
+    assert rec.state is JobState.CANCELLED and rec.killed
+    assert not manager.is_submitting(js)
+
+
+def test_internal_error_transition_reaches_the_ui(qtbot, fake_lsf, config):
+    """분류 불가 예외(_task_crashed)의 SUBMIT_FAILED 전이도 jobs_updated로
+    나가야 한다 — SUBMIT_FAILED는 폴링 대상(is_on_lsf)이 아니라서 여기서
+    안 알리면 요약 배지는 SUBMIT_FAILED인데 행은 SUBMITTING에 영구
+    고착된다."""
+    from lsfmgr import InMemoryStore, LsfJobManager
+
+    def crashing_runner(argv, timeout, cwd=None):
+        if any("boom" in a for a in argv):
+            raise RuntimeError("runner 폭발 주입")
+        return fake_lsf(argv, timeout, cwd)
+
+    mgr = LsfJobManager(store=InMemoryStore(), config=config,
+                        runner=crashing_runner)
+    try:
+        seen = []
+        mgr.jobs_updated.connect(
+            lambda jsid, recs: seen.extend(r.state for r in recs))
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000) as blk:
+            js = submit_cmds(mgr, ["boom a.sp"], auto_poll=False)
+        assert blk.args[1].failed == 1
+        qtbot.wait(50)                       # 큐에 남은 배치 소진
+        assert JobState.SUBMIT_FAILED in seen, seen
+        rec = mgr.get_jobs(js.id)[0]
+        assert rec.state is JobState.SUBMIT_FAILED
+        assert rec.fail_reason == "INTERNAL_ERROR"
+    finally:
+        mgr.shutdown()
+
+
+def test_selection_kill_during_failing_attempt_skips_retry_wait(
+        qtbot, fake_lsf, config):
+    """선택 kill이 겨냥한 job의 제출 시도가 kill **뒤에** 실패로 돌아오면
+    재시도(RETRY_WAIT backoff)로 눕지 말고 곧장 CANCELLED로 확정돼야 한다 —
+    _cancel_scope의 재시도 원장 비우기는 등록 전이라 이 재시도를 못 잡고,
+    backoff 동안 활성으로 남아 can_submit이 막히고 kill이 덜 끝난 것처럼
+    보인다. 취소 판정을 조금만 먼저 통과한 경우와 같은 결과여야 한다."""
+    import threading
+    from lsfmgr import InMemoryStore, LsfJobManager
+    from lsfmgr.command import CommandResult
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_failing_runner(argv, timeout, cwd=None):
+        if any("slowboom" in a for a in argv):
+            started.set()
+            release.wait(10)
+            return CommandResult(1, "", "LSF error: queue unavailable")
+        return fake_lsf(argv, timeout, cwd)
+
+    mgr = LsfJobManager(store=InMemoryStore(), config=config,
+                        runner=slow_failing_runner)
+    try:
+        js = mk_jobset(mgr, ["slowboom a.sp"])
+        mgr.submit(js, max_retry=5, retry_backoff="fixed:600",
+                   auto_poll=False)
+        assert started.wait(5)               # 시도가 도는 중이다
+        mgr.kill_jobs(js, ["k0"])            # 선택 kill — 취소 지시(동기)
+        release.set()                        # 이제 시도가 실패로 돌아온다
+        with qtbot.waitSignal(mgr.submit_finished, timeout=5000) as blk:
+            pass                             # 600초 backoff를 안 기다린다
+        rpt = blk.args[1]
+        assert rpt.cancelled == 1 and rpt.failed == 0
+        rec = mgr.get_jobs(js.id)[0]
+        assert rec.state is JobState.CANCELLED and rec.killed
+    finally:
+        mgr.shutdown()
+
+
 # ----------------------------------------------------------------------
 # array
 # ----------------------------------------------------------------------
