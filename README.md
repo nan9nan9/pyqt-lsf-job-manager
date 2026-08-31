@@ -721,8 +721,27 @@ mgr = LsfJobManager(config=LsfConfig(
 - **예비까지 실패하면** — 종전대로 "조회 장애"(판단 보류)입니다. 아무도 LOST로
   확정되지 않습니다.
 - 전환은 로그로 보입니다: 주→예비는 전환 순간 1회 `WARNING`(반복은 DEBUG),
-  예비→주 복귀는 `INFO`. 현재 상태는
-  `mgr.command.internal_status.stats()["served_by_failover"]`.
+  회복은 `INFO`.
+- **지금 누가 답하고 있나** — `mgr.status_fetcher_state()`가 `FetcherState`를
+  돌려줍니다 (GUI 상태 표시용):
+
+  | 값 | 뜻 |
+  |---|---|
+  | `FetcherState.PRIMARY` | 주 콜백 정상 동작 중 |
+  | `FetcherState.FAILOVER` | 주는 실패 — 예비 콜백이 대신 동작 중 |
+  | `FetcherState.DOWN` | 마지막 조회 실패 (예비까지 실패, 또는 예비 없음) |
+  | `FetcherState.IDLE` | 아직 조회한 적 없음 |
+  | `None` | 콜백 조회원이 아님 (bjobs 조회) |
+
+  ```python
+  from lsfmgr import FetcherState
+  if mgr.status_fetcher_state() is FetcherState.DOWN:
+      status_bar.show("상태 서버 연결 끊김 — 조회 보류 중")
+  ```
+
+  판정은 마지막으로 **끝난** 조회 기준입니다 — 진행 중(미회수) 조회는 끝나기
+  전까지 반영되지 않습니다. 예비가 없어도 유효합니다(주 콜백 하나의 생사를
+  PRIMARY/DOWN으로 답함).
 - 주 콜백 없이 예비만 주면 **`ValueError`** 입니다 — 조회가 bjobs로 가서 예비
   콜백은 아무 데도 안 쓰이는 설정이기 때문입니다.
 

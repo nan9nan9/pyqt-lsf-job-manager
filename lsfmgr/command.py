@@ -22,7 +22,7 @@ from typing import (
 
 from .config import DEFAULT_BJOBS_PATH, LsfConfig, cmd_tokens
 from .errors import ArgMaxExceededError, LsfCommandError, SubmitError
-from .internal_status import InternalStatusSource
+from .internal_status import FetcherState, InternalStatusSource
 from .states import LSF_STAT_MAP, JobState, JobStatus  # noqa: F401
 # JobStatus는 states로 옮겼다(순환 제거) — 기존 import 경로
 # `from lsfmgr.command import JobStatus`는 그대로 쓸 수 있게 재수출한다.
@@ -378,6 +378,11 @@ class LsfCommand:
     def internal_status(self) -> Optional[InternalStatusSource]:
         """콜백 조회원 (job_status_fetcher 미지정이면 None) — 테스트/진단용."""
         return self._internal
+
+    def status_fetcher_state(self) -> Optional[FetcherState]:
+        """[sync] 상태 조회 콜백의 건강 — bjobs 조회면 None."""
+        return (None if self._internal is None
+                else self._internal.fetcher_state())
 
     def note_poll_interval(self, interval_s: float) -> None:
         """실제 폴링 주기 통지 — 콜백 조회원의 갱신 간격을 그에 맞춘다.

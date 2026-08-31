@@ -1099,3 +1099,85 @@ def test_bare_none_payload_is_a_failure_not_an_empty_answer():
     assert [st.job_id for st in found] == [1] and not failed
     found, failed = _source(lambda: {"jobs": None}).statuses_by_ids([1])
     assert not found and not failed              # 봉투 있는 null = 정상 0건
+
+
+# ----------------------------------------------------------------------
+# 9) 건강 판정 API (fetcher_state / mgr.status_fetcher_state)
+# ----------------------------------------------------------------------
+def test_fetcher_state_reports_who_is_serving():
+    """앱이 '지금 주가 정상인가, 예비로 버티는 중인가, 둘 다 죽었나'를
+    물을 수 있어야 한다 — 상태 전이 전체를 한 바퀴 돈다."""
+    from lsfmgr import FetcherState
+
+    health = {"p": True, "f": True}
+
+    def primary():
+        if not health["p"]:
+            raise RuntimeError("p down")
+        return _payload(_job(1))
+
+    def failover():
+        if not health["f"]:
+            raise RuntimeError("f down")
+        return _payload(_job(1))
+
+    src = _source(primary, failover=failover)
+    assert src.fetcher_state() is FetcherState.IDLE       # 조회 전
+    src.statuses_by_ids([1])
+    assert src.fetcher_state() is FetcherState.PRIMARY    # 주 정상
+    health["p"] = False
+    src.statuses_by_ids([1])
+    assert src.fetcher_state() is FetcherState.FAILOVER   # 예비가 동작
+    health["f"] = False
+    src.statuses_by_ids([1])
+    assert src.fetcher_state() is FetcherState.DOWN       # 둘 다 실패
+    health["f"] = True
+    src.statuses_by_ids([1])
+    assert src.fetcher_state() is FetcherState.FAILOVER   # 예비만 회복
+    health["p"] = True
+    src.statuses_by_ids([1])
+    assert src.fetcher_state() is FetcherState.PRIMARY    # 완전 회복
+    assert src.stats()["fetcher_state"] == "PRIMARY"      # stats에도 노출
+
+
+def test_fetcher_state_without_failover():
+    """예비가 없어도 유효한 API다 — 주 콜백 하나의 생사를 답한다."""
+    from lsfmgr import FetcherState
+
+    health = {"p": False}
+
+    def primary():
+        if not health["p"]:
+            raise RuntimeError("down")
+        return _payload(_job(1))
+
+    src = _source(primary)
+    src.statuses_by_ids([1])
+    assert src.fetcher_state() is FetcherState.DOWN
+    health["p"] = True
+    src.statuses_by_ids([1])
+    assert src.fetcher_state() is FetcherState.PRIMARY
+
+
+def test_manager_status_fetcher_state(qtbot, fake_lsf):
+    """manager 공개 API — bjobs 조회면 None, 콜백 조회원이면 판정."""
+    from lsfmgr import FetcherState
+
+    mgr = LsfJobManager(store=InMemoryStore(), config=LsfConfig(),
+                        runner=fake_lsf)
+    try:
+        assert mgr.status_fetcher_state() is None         # bjobs 모드
+    finally:
+        mgr.shutdown()
+
+    mgr = _internal_mgr(fake_lsf, lambda: _payload())
+    try:
+        assert mgr.status_fetcher_state() is FetcherState.IDLE
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            js = submit_cmds(mgr, ["mytool a.sp"], auto_poll=False)
+        mgr.query_once(js.id)
+        qtbot.waitUntil(
+            lambda: mgr.status_fetcher_state() is FetcherState.PRIMARY,
+            timeout=10000)
+    finally:
+        mgr.shutdown()

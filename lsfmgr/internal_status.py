@@ -52,6 +52,7 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from typing import (
     Any, Dict, List, Optional, Sequence, Set, Tuple,
 )
@@ -60,6 +61,19 @@ from .config import JobStatusFetcher  # noqa: F401 (재수출)
 from .states import LSF_STAT_MAP, JobState, JobStatus
 
 log = logging.getLogger("lsfmgr.internal_status")
+
+
+class FetcherState(Enum):
+    """상태 조회 콜백의 건강 — 지금 누가 답하고 있나.
+
+    LsfJobManager.status_fetcher_state()가 돌려준다. 판정은 마지막으로
+    **끝난** 조회의 결과다 — 진행 중(미회수) 조회는 끝나기 전까지 반영되지
+    않고, 늦게 끝난 낡은 조회는 판정을 덮지 못한다(늦은 쓰기 술어).
+    """
+    IDLE = "IDLE"          # 아직 조회한 적 없음
+    PRIMARY = "PRIMARY"    # 주 콜백(job_status_fetcher)이 정상 동작 중
+    FAILOVER = "FAILOVER"  # 주는 실패 — 예비 콜백이 대신 동작 중
+    DOWN = "DOWN"          # 마지막 조회 실패 (예비까지 실패, 또는 예비 없음)
 
 #: dataId 표기 — "1432342.cluster1" / "1432342[3].cluster1" / "1432342".
 _DATA_ID_RE = re.compile(r"^(\d+)(?:\[(\d+)\])?(?:\.(.+))?$")
@@ -362,8 +376,9 @@ class InternalStatusSource:
         #: 값이 0이 아니면 새 조회를 처음부터 예비로 보낸다 — 매번 주부터
         #: 걸면 인계 사이클마다 wait_timeout_s를 통째로 다시 날린다.
         self._primary_unreturned = 0
-        #: 마지막 성공 스냅샷을 예비 콜백이 제공했는가 (전환 로그·진단용).
-        self._served_by_failover = False
+        #: 건강 판정 — 마지막으로 끝난 조회의 결과 (fetcher_state()).
+        self._health = FetcherState.IDLE
+        self._health_at = float("-inf")          # 판정의 늦은 쓰기 술어용 시계
         #: 이 간격 안에 다시 들어온 조회는 콜백을 다시 돌리지 않는다.
         #: refresh_min_s=None이면 **자동** — 실제 폴링 주기의 절반을 따라간다
         #: (note_poll_interval). 앱이 값을 명시하면 그 값을 지킨다.
@@ -492,6 +507,11 @@ class InternalStatusSource:
             self._closed = True
             self._cv.notify_all()
 
+    def fetcher_state(self) -> FetcherState:
+        """건강 판정 — 마지막으로 끝난 조회 기준 (FetcherState docstring 참고)."""
+        with self._cv:
+            return self._health
+
     def stats(self) -> Dict[str, Any]:
         """원장 현황 — 진단/테스트용."""
         with self._cv:
@@ -499,8 +519,9 @@ class InternalStatusSource:
             return {"job_ids": len(self._ledger), "entries": jobs,
                     "tracked_ids": len(self._interest),
                     "inflight": self._inflight,
-                    # 예비 콜백 진단 — 마지막 스냅샷의 출처와 미회수 주 콜백 수.
-                    "served_by_failover": self._served_by_failover,
+                    # 예비 콜백 진단 — 건강 판정과 미회수 주 콜백 수.
+                    "fetcher_state": self._health.value,
+                    "served_by_failover": self._health is FetcherState.FAILOVER,
                     "primary_unreturned": self._primary_unreturned,
                     # 실제로 적용 중인 갱신 간격 — 자동 모드면 폴링 주기를
                     # 따라 바뀌므로 설정값이 아니라 여기를 봐야 한다.
@@ -609,7 +630,8 @@ class InternalStatusSource:
         if use_failover:
             # 주 콜백이 오래 갇혀 있으면 매 조회가 이 경로다 — 전환(첫 회)만
             # 알리고 반복은 debug로 내린다 (failover 경로의 warning과 동일 원칙).
-            emit = log.debug if self._served_by_failover else log.info
+            emit = (log.debug if self._health is FetcherState.FAILOVER
+                    else log.info)
             emit("이번 status 조회는 예비 콜백으로 갑니다 "
                  "(주 콜백 미회수 %d건)", self._primary_unreturned)
         threading.Thread(target=self._fetch_worker, args=(token, use_failover),
@@ -666,10 +688,12 @@ class InternalStatusSource:
                     if self._failover is None:
                         raise
                     # 전환 순간만 warning — 주 콜백이 오래 죽어 있으면 매
-                    # 조회가 이 경로라, 반복분은 debug로 내린다.
+                    # 조회가 이 경로라, 이미 강등 상태(FAILOVER/DOWN)의
+                    # 반복분은 debug로 내린다.
                     with self._cv:
-                        already = self._served_by_failover
-                    emit = log.debug if already else log.warning
+                        degraded = self._health in (FetcherState.FAILOVER,
+                                                    FetcherState.DOWN)
+                    emit = log.debug if degraded else log.warning
                     emit("주 콜백(job_status_fetcher) 실패 — 예비 콜백으로 "
                          "다시 시도합니다: %r", primary_err)
                     try:
@@ -699,16 +723,17 @@ class InternalStatusSource:
                         # 성공 표식은 병합이 끝난 뒤에 찍는다 — 반쯤 병합된
                         # 원장을 '최신'으로 광고하면 안 된다. at 비교(늦은
                         # 쓰기 술어)인 이유: 인계된 뒤 뒤늦게 돌아온 조회가
-                        # 시계를 되돌리면 안 되고, 스냅샷 **출처**도 같다 —
-                        # 낡은 주 콜백 성공이 예비가 서빙 중인 상태를
-                        # '회복'으로 덮으면 안 된다.
+                        # 시계를 되돌리면 안 된다.
                         if at > self._last_fetch_at:
                             self._last_fetch_at = at
-                            self._note_served_locked(served_by_failover)
                         self._prune_locked(at, now)
                 except Exception as e:           # noqa: BLE001
                     error = e                    # 병합/청소 실패도 조회 장애
                 finally:
+                    # 건강 판정은 성공·실패 **모두** 기록한다 (병합 실패 포함).
+                    self._note_outcome_locked(
+                        at, ok=error is None and statuses is not None,
+                        served_by_failover=served_by_failover)
                     if self._fetch_token is token:
                         # 인계되지 않았을 때만 진행 상태를 건드린다 — 뒤늦게
                         # 돌아온 조회가 새 조회의 부기를 덮으면 안 된다.
@@ -723,18 +748,34 @@ class InternalStatusSource:
     # ------------------------------------------------------------------
     # 원장 병합 / 만료 (둘 다 lock 보유 상태에서만 호출)
     # ------------------------------------------------------------------
-    def _note_served_locked(self, served_by_failover: bool) -> None:
-        """[lock 보유] 이번 스냅샷의 출처를 기록 — 회복 전환만 로그.
+    def _note_outcome_locked(self, at: float, ok: bool,
+                             served_by_failover: bool) -> None:
+        """[lock 보유] 이번 조회의 결과로 건강 판정(fetcher_state)을 갱신.
 
-        예비→주 전환은 여기가 유일한 로그 지점이다(주 콜백 실패의 warning은
-        failover 순간에 이미 났고, 성공은 조용해서 여기서 알려야 보인다).
-        호출자는 늦은 쓰기 술어(at > _last_fetch_at)를 통과한 조회만 여기로
-        보낸다 — 낡은 조회는 출처를 덮지 못한다.
+        늦은 쓰기 술어(at 비교) — 인계된 뒤 뒤늦게 끝난 조회가 더 새 조회의
+        판정을 덮으면 안 된다. _last_fetch_at과 원칙은 같지만 시계는 따로다:
+        건강은 실패도 기록하지만 _last_fetch_at은 성공만 전진시킨다.
+
+        로그는 **좋아지는 전환**만 여기서 낸다 — 회복은 조용해서 여기서
+        알려야 보인다. 나빠지는 전환(→DOWN)과 주→예비 전환의 warning은
+        실패가 난 지점이 이미 남긴다.
         """
-        if self._served_by_failover and not served_by_failover:
-            log.info("주 콜백(job_status_fetcher) 회복 — 예비 콜백 사용을 "
-                     "중단합니다")
-        self._served_by_failover = served_by_failover
+        if at <= self._health_at:
+            return
+        self._health_at = at
+        new = (FetcherState.DOWN if not ok
+               else FetcherState.FAILOVER if served_by_failover
+               else FetcherState.PRIMARY)
+        old, self._health = self._health, new
+        if new is old:
+            return
+        if new is FetcherState.PRIMARY and old in (FetcherState.FAILOVER,
+                                                   FetcherState.DOWN):
+            log.info("주 콜백(job_status_fetcher) 회복 — 상태 조회 정상화 "
+                     "(%s → PRIMARY)", old.value)
+        elif old is FetcherState.DOWN and new is FetcherState.FAILOVER:
+            log.info("예비 콜백 회복 — 상태 조회가 예비로 재개됩니다 "
+                     "(주 콜백은 여전히 실패)")
 
     def _merge_locked(self, statuses: List, now: datetime) -> None:
         """받은 상태를 원장에 덮어쓴다 — 증분 payload면 나머지는 유지된다.
