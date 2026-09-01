@@ -88,9 +88,14 @@ class JobsetQuerier:
     def _set_streaks(self, jobset_id: str, streaks: Dict[str, int]) -> None:
         # 조회는 스트릭을 꺼내(_pop_streaks) 계산하고 여기서 되쓴다. 그 사이에
         # jobset이 지워졌다면 되쓰기가 forget을 무효로 만든다 — 버린다.
-        if not self.store.exists(jobset_id):
-            return
+        # exists 검사는 반드시 streak lock **안**이다: 밖에 두면 "검사 통과 →
+        # main이 store 삭제 + forget → 되쓰기" 순서에서 지워진 jobset의
+        # 스트릭이 되살아나 치울 주인 없이 영영 남는다(remove_jobset은
+        # forget을 한 번만 부른다). 안에 두면 forget(같은 lock)이 되쓰기
+        # 뒤에 와서 지우거나, store 삭제가 먼저라 되쓰기가 거부된다.
         with self._streak_lock:
+            if not self.store.exists(jobset_id):
+                return
             if streaks:
                 self._missing_streak[jobset_id] = streaks
             else:

@@ -87,6 +87,23 @@ def test_dropping_a_job_id_also_forgets_it(name, mgr, qtbot):
     assert not (set(src._ledger) - alive)
 
 
+def test_partial_resubmit_keeps_untargeted_ids_in_the_ledger(mgr, qtbot):
+    """submit(only=)은 **대상 아닌** job의 원장 항목을 버리면 안 된다 —
+    증분 payload는 안 바뀐 job을 다시 보내지 않으므로, 버리는 순간 그
+    RUN job이 매 폴링 미발견으로 몰려 LOST(되돌릴 수 없음)로 확정될 수
+    있다. forget은 이 사이클이 리셋하는 key의 id에만 걸려야 한다."""
+    js, _ids = _submitted(qtbot, mgr, ["k0", "k1"])
+    src = mgr.command.internal_status
+    k1_id = next(r.job_id for r in js.jobs() if r.job_key == "k1")
+    assert k1_id in src._ledger                  # 전제 — 원장에 있다
+    with qtbot.waitSignal(mgr.kill_finished, timeout=20000):
+        mgr.kill_jobs(js, ["k0"])                # k0만 비활성으로
+    with qtbot.waitSignal(mgr.submit_finished, timeout=20000):
+        mgr.submit(js, only=["k0"], auto_poll=False)   # k1은 RUN인 채
+    assert k1_id in src._interest and k1_id in src._ledger, \
+        "only= 재제출이 대상 아닌 RUN job의 원장 항목을 버렸다"
+
+
 def test_the_matrix_covers_every_dropping_api():
     """job_id를 떨어뜨릴 수 있는 공개 API가 위 표에 다 있는지.
 

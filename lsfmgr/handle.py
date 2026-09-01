@@ -23,8 +23,8 @@ class JobSet(QObject):
     명령은 manager로: mgr.submit(js) / mgr.kill(js) / mgr.add_jobs(js, …) …"""
 
     # 이름은 Manager Signal과 일치시킨다(jsid 인자만 없음) — 같은 이벤트를
-    # 이 JobSet으로 좁혀 발행한다. 1:1 매핑의 예외 셋:
-    #   submit_started/job_lost — 대시보드용 전역 신호라 핸들에 없다
+    # 이 JobSet으로 좁혀 발행한다. 1:1 매핑의 예외 둘:
+    #   job_lost — 대시보드용 전역 신호라 핸들에 없다
     #   jobs_failed — jobs_updated에서 실패분만 걸러 주는 핸들 전용 파생
     jobset_updated = Signal(dict)      # 요약 {"total":.., "RUN":.., ...}
     jobs_updated = Signal(list)        # 상태 변경분 [JobRecord] — 테이블 행 갱신용

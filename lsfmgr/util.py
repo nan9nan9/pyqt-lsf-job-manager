@@ -106,17 +106,28 @@ class LogSampler:
     def __init__(self, limit: int = 20):
         self.limit = max(1, int(limit))
         self._n: dict = {}
+        #: 한도를 막 넘긴 부류 — 접힘 통지를 아직 안 낸 것. 카운트 값 비교
+        #: (n == limit+1)로 판정하면 allow/just_folded 두 lock 획득 사이에
+        #: 다른 스레드의 allow가 끼어들어(n이 limit+2로) 통지가 유실된다 —
+        #: 넘긴 순간을 여기 적어 두고 읽는 쪽이 지우면 정확히 1회다.
+        self._folded_pending: set = set()
         self._lock = threading.Lock()
 
     def allow(self, kind) -> bool:
         """이 부류를 아직 그대로 남길지. limit번째 직후 1회만 False 대신
-        'folded'를 알리도록 note()와 짝지어 쓴다."""
+        'folded'를 알리도록 just_folded()와 짝지어 쓴다."""
         with self._lock:
             n = self._n.get(kind, 0) + 1
             self._n[kind] = n
+            if n == self.limit + 1:
+                self._folded_pending.add(kind)
             return n <= self.limit
 
     def just_folded(self, kind) -> bool:
-        """방금 호출한 allow()가 한도를 처음 넘겼는가 (접힘 통지 1회용)."""
+        """이 부류가 한도를 넘겼는데 접힘 통지가 아직 안 나갔는가 —
+        True를 돌려주며 소진한다(정확히 1회, 어느 스레드가 받아도 무방)."""
         with self._lock:
-            return self._n.get(kind, 0) == self.limit + 1
+            if kind in self._folded_pending:
+                self._folded_pending.discard(kind)
+                return True
+            return False

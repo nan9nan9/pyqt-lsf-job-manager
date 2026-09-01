@@ -409,13 +409,17 @@ class BulkSubmitter(QObject):
         # 지우기만 하면 그 id는 아무도 조회하지 않는데 원장·관심 집합에는
         # 영영 남는다(종료 상태로 마지막에 보인 것만 보존기간 뒤 정리되고,
         # 진행 중으로 보였던 것은 만료 대상이 아니라 영구히 남았다).
-        # 버리는 것은 항상 안전하다 — 캐시를 지울 뿐이고, 다시 조회하면
-        # 그때 새로 등록된다.
-        try:
-            stale_ids = [r.job_id for r in self.store.get_jobs(ctx.jobset_id)
-                         if r.job_id is not None and r.job_key not in blocked]
-        except Exception:                    # noqa: BLE001 — jobset 소실 등
-            stale_ids = []
+        # **이 사이클이 리셋할 key만** 본다 — jobset 전체를 훑으면 only=
+        # 재제출에서 대상 아닌 RUN job의 원장 항목까지 버려지는데, 증분
+        # payload는 안 바뀐 job을 다시 보내지 않으므로 그 job이 미발견으로
+        # 몰려 LOST(되돌릴 수 없음)로 확정될 수 있다. 리셋 대상의 forget은
+        # 항상 안전하다 — 그 id는 리셋으로 정말 죽는 id다.
+        # (get_jobs_by_keys는 jobset 소실 시 빈 dict — 예외 방어 불필요)
+        cycle_keys = [key for key, _item in keyed if key not in blocked]
+        stale_ids = [r.job_id for r in
+                     self.store.get_jobs_by_keys(ctx.jobset_id,
+                                                 cycle_keys).values()
+                     if r.job_id is not None]
         if stale_ids:
             self.command.forget_status(stale_ids)
         launch, reset_recs, skipped = [], [], 0
