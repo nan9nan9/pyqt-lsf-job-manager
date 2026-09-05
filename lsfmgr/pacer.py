@@ -13,11 +13,11 @@ dwell(기본 1초)만큼 머문 뒤에야 다음 전이를 내보낸다. 전이�
     t=0.3  store: PEND        → (큐에 보류)                   표: SUBMITTING
     t=1.0                     → jobs_updated([PEND])          표: PEND
 
-이 모듈은 **표시만** 늦춘다 — store는 늘 즉시 진실을 쓴다. 그래서 켜면
-jobs_updated에 한해 두 계약이 느슨해진다 (README §5.1):
+이 모듈은 **표시만** 늦춘다 — Store 갱신과 내부 판정은 늦추지 않는다.
+지연된 jobs_updated의 소비 규칙은 다음과 같다(README §6.5):
 
-  - store-first: 지연된 jobs_updated의 slot에서 js.jobs()를 pull하면
-    신호보다 **앞선** 상태가 보인다 (store는 이미 PEND).
+  - pull은 현재 스냅샷: js.jobs()는 신호보다 앞선 상태일 수 있다.
+    표에 중간 상태를 표시하려면 신호로 받은 레코드를 사용한다.
   - finished-last: submit_finished/kill_finished가 마지막 전이 배치보다
     먼저 도착할 수 있다 (위 예에서 t=0.4의 finished).
   라이브러리 내부 판정(post_process·can_submit·detect_lost·handler)은 전부
@@ -104,7 +104,7 @@ class StatePacer(QObject):
     def forget(self, jobset_id: str,
                job_keys: Optional[List[str]] = None) -> None:
         """사라지거나 교체된 job·jobset의 보류분을 버린다.
-        안 버리면 dwell 창(최대 dwell초) 안에 지워진 job의 전이가 뒤늦게
+        안 버리면 표시 대기 중 지워진 job의 전이가 뒤늦게
         발화돼, job_key로 행을 채우는 표에 삭제된 행이 되살아난다.
         job_keys=None이면 그 jobset 전체."""
         drop = ([(jobset_id, k) for k in job_keys] if job_keys is not None

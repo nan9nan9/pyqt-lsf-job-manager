@@ -121,7 +121,7 @@ def test_stale_signal_from_previous_cycle_is_ignored(qtbot, fake_lsf):
         with qtbot.waitSignal(mgr.submit_finished, timeout=20000):
             mgr.submit(js, auto_poll=False, post_process=lambda r: None)
         # 낡은 토큰으로 무장/폐기 신호를 흉내낸다
-        mgr._on_records_reset(js.id, object())
+        mgr._on_records_reset(js.id, object(), [])
         mgr._on_gate_rejected(js.id, object())
         with qtbot.waitSignal(mgr.kill_finished, timeout=20000):
             mgr.kill(js)

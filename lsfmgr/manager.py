@@ -870,33 +870,11 @@ class LsfJobManager(QObject):
             keys = [r.job_key for r in changed]
             if self._pacer is not None:
                 self._pacer.forget(jobset_id, keys)
-            self._rearm_tracking(jobset_id, keys,
-                                 [before[k] for k in keys if before.get(k)])
+            self._forget_tracking(jobset_id, keys,
+                                  [before[k] for k in keys if before.get(k)])
             self._relay_jobs_changed(jobset_id, list(changed))
         self._resume_polling_if_watchable(jobset_id)
         return changed
-
-    def _rearm_tracking(self, jobset_id: str, keys: List[str],
-                        stale_ids: Optional[List[int]] = None) -> None:
-        """재실행/교체될 job의 추적 장부 무효화 — 항상 **한 벌로** 리셋한다.
-
-        - handler 진행 상태(rearm): 옛 _FINISHED가 남으면 같은 key의 새
-          실행에 handler가 영영 침묵한다.
-        - LOST 미발견 스트릭(forget): querier는 사이클마다 스트릭을
-          재구축하지만, 조회 대상(on-LSF)이 하나도 없는 사이클은 query()가
-          조기 반환해 옛 값이 그대로 남는다 — 재제출 사이가 정확히 그
-          상태다(전원 terminal/CREATED). 그대로 두면 새 실행이 옛 실행의
-          미발견 횟수를 물려받아, 제출 직후 등록 지연으로 한 번만 안 보여도
-          LOST(되돌릴 수 없는 terminal)가 확정된다.
-        - 콜백 조회원 원장(stale_ids): 교체로 레코드에서 사라진 옛 job_id.
-          안 버리면 아무도 조회하지 않는 id가 관심 집합에 남아, 진행 중으로
-          마지막에 보였던 것은 만료 대상도 아니라 영구히 쌓인다.
-          **id를 지우는 쪽이 버리는 것도 책임진다**(재제출은 submitter가,
-          삭제는 remove_*가, 교체는 여기가)."""
-        self.handlers.rearm(jobset_id, keys)
-        self.querier.forget(jobset_id, keys)
-        if stale_ids:
-            self.command.forget_status(stale_ids)
 
     def _resume_polling_if_watchable(self, jobset_id: str) -> None:
         """관찰할 job(비terminal)이 생겼으면 폴링을 (재)시작한다.
@@ -951,18 +929,28 @@ class LsfJobManager(QObject):
         self._emit_summary(jobset_id)
         return removed
 
+    def _forget_tracking(self, jobset_id: str,
+                         job_keys: Optional[List[str]] = None,
+                         job_ids: Optional[List[int]] = None) -> None:
+        """삭제·교체·실제 재제출의 추적 정리 공통 지점.
+
+        handler 상태와 이전 실행의 미발견 횟수를 정리한다. Store에서 ID를
+        지운 쪽이 조회원의 ID도 버린다. 재제출의 ID 정리는 Store reset 직후
+        worker에서 수행하며, 이 main 통지를 기다리지 않는다.
+        """
+        self.handlers.rearm(jobset_id, job_keys)
+        self.querier.forget(jobset_id, job_keys)
+        if job_ids:
+            self.command.forget_status(job_ids)
+
     def _forget_paced(self, jobset_id: str,
                       job_keys: Optional[List[str]] = None,
                       job_ids: Optional[List[int]] = None) -> None:
-        """사라진 job/jobset에 매달린 **보류 상태**를 일괄 정리한다.
+        """실제 삭제된 key의 표시·전달 이력을 비우고 추적 정리를 수행한다.
 
-        - pacer: 보류 중인 표시 전이 — dwell 창 안에 삭제되면 늦게 도착한
-          전이가 지워진 행을 되살린다.
-        - querier: LOST 미발견 스트릭 — jobset이 통째로 사라지면(remove_jobset)
-          그 jobset으로는 다시 query()가 안 불려 항목이 영영 남는다.
-        - 콜백 조회원(job_status_fetcher)의 누적 원장: 만료는 종료(DONE/EXIT)
-          항목만 걷어내므로, 삭제된 job은 여기서 명시적으로 버려야 원장이
-          create/remove를 반복하는 세션에서 계속 커지지 않는다."""
+        살아 있는 key의 revision은 재제출·교체에서도 증가하므로 보존한다.
+        재제출에서는 이미 수락된 EXIT→SUBMITTING 표시 대기열도 유지한다.
+        """
         if self._pacer is not None:
             self._pacer.forget(jobset_id, job_keys)
         if job_keys is None:
@@ -973,9 +961,7 @@ class LsfJobManager(QObject):
                 revisions.pop(key, None)
             if not revisions:
                 self._emitted_revisions.pop(jobset_id, None)
-        self.querier.forget(jobset_id, job_keys)
-        if job_ids:
-            self.command.forget_status(job_ids)
+        self._forget_tracking(jobset_id, job_keys, job_ids)
 
     @staticmethod
     def _ids_of(records) -> List[int]:
@@ -1111,11 +1097,10 @@ class LsfJobManager(QObject):
                 f"{busy[:5]} (먼저 kill 하거나 완료를 기다리세요)",
                 jobset_id=jobset_id, job_keys=busy)
         keyed = [(r.job_key, self._record_to_item(r)) for r in jobs]
-        keys = [k for k, _ in keyed]
         # handler·후처리·자동 폴링은 records_reset 이후에 무장한다.
         # 그 전에 무장하면 이전 실행의 terminal 레코드를 처리할 수 있다. token은 사이클 식별자다.
         token = object()
-        self._completion.stage(jobset_id, token, keys, post_process,
+        self._completion.stage(jobset_id, token, post_process,
                                opts.poll_interval_s if opts.auto_poll
                                else None)
         # submitter가 실제 착수 또는 시작 전 취소를 정산할 때 submit_started를 발행한다.
@@ -1127,7 +1112,7 @@ class LsfJobManager(QObject):
             self._completion.discard(jobset_id, token)
         return self.jobset(jobset_id)
 
-    def _on_records_reset(self, jsid: str, token: object) -> None:
+    def _on_records_reset(self, jsid: str, token: object, records: list) -> None:
         """[main] submitter가 레코드 리셋을 마친 직후(착수 확정) — 이 사이클의
         보류분(rearm/post_process/폴링)을 무장한다. 리셋 완료 후라 폴링
         tick이 봐도 레코드는 이미 SUBMITTING — 옛 terminal 오발화 창이 없다.
@@ -1135,8 +1120,9 @@ class LsfJobManager(QObject):
         ent = self._completion.confirm(jsid, token)   # post_process 무장 포함
         if ent is None:
             return
-        if ent.keys:
-            self._rearm_tracking(jsid, ent.keys)
+        records = self._current_records(jsid, records)
+        if records:
+            self._forget_tracking(jsid, [r.job_key for r in records])
         if ent.poll_interval_s is not None:
             self.start_polling(jsid, ent.poll_interval_s)   # 자동 폴링 시작
 
@@ -1311,7 +1297,7 @@ class LsfJobManager(QObject):
         """
         current = self.store.get_jobs_by_keys(jsid, [r.job_key for r in records])
         return [r for r in records if r.job_key in current
-                and r._generation == current[r.job_key]._generation]
+                and r.same_execution(current[r.job_key])]
 
     def _emit_jobs(self, jsid: str, records: list) -> None:
         """jobs_updated 발화 **단일 지점** — min_state_dwell_s가 켜져 있으면
@@ -1384,12 +1370,15 @@ class LsfJobManager(QObject):
         by_js: Dict[str, list] = {}
         for r in changed:
             by_js.setdefault(r.jobset_id, []).append(r)
+        for j in report._jobset_ids:
+            by_js.setdefault(j, [])
         if jsid:                         # jobset 단위 kill은 changed 없어도 요약
             by_js.setdefault(jsid, [])
         for j, recs in by_js.items():
             if recs:
                 self._emit_jobs(j, recs)
             self._emit_summary(j)
+            self._completion.maybe_finish(j)
 
     def _handle_of(self, jobset_id: str) -> Optional[JobSet]:
         h = self._handles.get(jobset_id)

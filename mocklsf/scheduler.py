@@ -11,6 +11,7 @@
 import os
 import time
 from collections import defaultdict
+from dataclasses import replace
 from typing import Dict, List
 
 from . import config
@@ -64,8 +65,7 @@ class Scheduler:
             now = time.time()
 
         active = self.db.jobs_in_states(list(ACTIVE_STATES))
-        # (job, prev_stat) 쌍. prev_stat 은 tick 시작 시점에 DB 에서 읽은 상태로,
-        # 조건부 갱신(guarded update)에 사용해 동시 변경(bkill 등)을 덮지 않는다.
+        # 변경 전 레코드와 함께 저장해 상태가 돌아온 stop/resume도 감지한다.
         changed = []
 
         # 1) 실행 중 job 의 종료/suspend 처리.
@@ -73,7 +73,7 @@ class Scheduler:
             if j.stat == USUSP:
                 # 사용자 suspend 는 스케줄러가 건드리지 않는다 (bresume 로만 해제).
                 continue
-            prev = j.stat
+            prev = replace(j)
             if j.finish_time is not None and now >= j.finish_time:
                 self._finish(j, now)
                 changed.append((j, prev))
@@ -120,11 +120,12 @@ class Scheduler:
             host = self._pick_host(j, used)
             if host is None:
                 continue
+            prev = replace(j)
             self._dispatch(j, host, now)
             used[host] = used.get(host, 0) + j.num_cpus
             if j.array_index is not None:
                 array_active[j.job_id] += 1
-            changed.append((j, PEND))  # PEND 였던 job 만 dispatch 대상
+            changed.append((j, prev))
             dispatched += 1
 
         self._apply_transitions(changed, now)
@@ -132,7 +133,7 @@ class Scheduler:
     def _apply_transitions(self, changed, now: float):
         """실제 저장된 전이만 이벤트와 bpeek 출력으로 발행한다."""
         for j, prev in self.db.update_guarded_many(changed):
-            if prev == PEND:
+            if prev.stat == PEND:
                 self.db.log_event(j.job_id, j.array_index, "dispatch",
                                   j.exec_host, ts=now)
                 self._write_job_banner(j, j.exec_host)

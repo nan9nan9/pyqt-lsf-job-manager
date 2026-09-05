@@ -142,6 +142,11 @@ class JobRecord:
     # Store가 같은 key의 쓰기마다 증가시킨다. worker 신호의 역순 도착 판정용.
     _revision: int = field(default=0, repr=False, compare=False)
 
+    def same_execution(self, other: "JobRecord") -> bool:
+        """같은 논리 작업의 같은 실행인가. 상태·revision은 실행 중 바뀔 수 있다."""
+        return (self.jobset_id == other.jobset_id and self.job_key == other.job_key
+                and self._generation == other._generation)
+
 
 @dataclass(frozen=True)
 class JobSetRecord:

@@ -8,8 +8,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from dataclasses import dataclass, replace
+from typing import Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from .command import LsfCommand, classify_targets, target_parent_id
 from .errors import LsfmgrError, RECORD_GONE
@@ -40,12 +40,21 @@ class _KillPlan:
     label: str                           # 전략 라벨 ("chunk" 등)
 
 
+@dataclass
+class _KillActivity:
+    """접수부터 main의 결과 전달까지 유지하는 kill 범위와 진행률."""
+    job_ids: FrozenSet[int]
+    done: int = 0
+    total: int = 0
+
+
 class Killer(QObject):
     """kill 진입점 — 실제 실행은 QThreadPool 단발 task (§4)."""
 
     finished = Signal(str, object)           # jobset_id, KillReport
     progress = Signal(str, int, int)         # jobset_id, done, total (chunk 진행)
     error = Signal(str, str)
+    _completed = Signal(str, object, object)  # jobset_id, activity, report
 
     def __init__(self, store: JobSetStore, command: LsfCommand,
                  querier: JobsetQuerier, parent: Optional[QObject] = None):
@@ -56,17 +65,26 @@ class Killer(QObject):
         self._pool = QThreadPool()
         self._pool.setMaxThreadCount(4)
         # jobset별 진행 slot 목록. 겹친 kill을 각각 등록·해제하며 worker와 조회 스레드가 공유한다.
-        self._active: Dict[str, List[List[int]]] = {}
+        self._active: Dict[str, List[_KillActivity]] = {}
         self._active_lock = threading.Lock()
         self._shutdown = False
         # shutdown 판정과 pool.start를 원자화해 종료 이후 task 추가를 막는다.
         # 잠금 순서는 _shutdown_lock → _active_lock이며 역순 취득하지 않는다.
         self._shutdown_lock = threading.Lock()
+        self._completed.connect(self._finish_activity)
 
     def is_active(self, jobset_id: str) -> bool:
         """이 jobset에 진행 중인 kill이 있는지 (pull)."""
         with self._active_lock:
             return bool(self._active.get(jobset_id))
+
+    def blocks_completion(self, jobset_id: str, records: list) -> bool:
+        """[main] 결과가 아직 전달되지 않은 kill이 이 완료에 영향을 주는가."""
+        with self._active_lock:
+            if self._active.get(jobset_id):
+                return True
+            ids = {r.job_id for r in records if r.job_id is not None}
+            return any(ids & a.job_ids for a in self._active.get("", ()))
 
     def progress_snapshot(self, jobset_id: str) -> Optional[KillProgress]:
         """진행 중 kill의 실시간 스냅샷 — 없으면 None.
@@ -76,34 +94,49 @@ class Killer(QObject):
             if not slots:
                 return None
             return KillProgress(jobset_id=jobset_id,
-                                done=sum(s[0] for s in slots),
-                                total=sum(s[1] for s in slots))
+                                done=sum(s.done for s in slots),
+                                total=sum(s.total for s in slots))
 
-    def _reg(self, jobset_id: str) -> List[int]:
+    def _reg(self, jobset_id: str, job_ids=()) -> _KillActivity:
         """kill 1건 등록 — 반환 slot으로만 갱신/해제한다.
         전역 kill(jsid="")도 빈 키로 등록한다 — kill_started 직후
         is_killing()/kill_state()이 True/값을 준다는 pull 계약이 전역
         경로에서만 깨지지 않게 한다(jobset 가드는 실제 jsid로만 조회하므로
         빈 키 항목의 영향이 없다)."""
-        slot = [0, 0]
+        slot = _KillActivity(frozenset(
+            pid for pid in map(target_parent_id, job_ids) if pid is not None))
         with self._active_lock:
             ledger_add(self._active, jobset_id, slot)
         return slot
 
-    def _set_progress(self, slot: Optional[List[int]],
+    def _set_progress(self, slot: Optional[_KillActivity],
                       done: int, total: int) -> None:
         if slot is not None:
             with self._active_lock:
-                slot[0], slot[1] = done, total
+                slot.done, slot.total = done, total
 
-    def _unreg(self, jobset_id: str, slot: Optional[List[int]]) -> None:
+    def _unreg(self, jobset_id: str, slot: Optional[_KillActivity]) -> None:
         """slot 해제 — 멱등(이미 제거됐으면 no-op).
         반드시 identity로 제거한다 — list.remove는 equality 매칭이라 겹친
-        kill의 slot 값이 같으면([0,0] 등) 남의 slot을 지운다."""
+        kill의 범위·진행률이 같으면 남의 slot을 지울 수 있다."""
         if slot is None:
             return
         with self._active_lock:
             ledger_remove(self._active, jobset_id, slot)
+
+    def _finish_activity(self, jobset_id: str, slot, report: KillReport) -> None:
+        """[main] 반영 완료 → 활동 해제 → 결과 전달. 폴링과 전달 순서를 공유한다."""
+        affected = {jobset_id} if jobset_id else set()
+        if not jobset_id and slot is not None and slot.job_ids:
+            try:
+                affected.update(r.jobset_id for r in
+                                self.store.find_jobs(slot.job_ids))
+            except Exception:
+                # 원시 ID kill은 Store 역매핑 실패와 무관하게 결과를 전달한다.
+                log.exception("kill 완료 소속 조회 실패")
+        self._unreg(jobset_id, slot)
+        self.finished.emit(jobset_id, replace(
+            report, _jobset_ids=tuple(sorted(affected))))
 
     # ------------------------------------------------------------------
     def kill_jobset(self, jobset_id: str, *,
@@ -147,7 +180,7 @@ class Killer(QObject):
                 log.warning("shutdown 후 %s 요청 무시: %s",
                             what, jobset_id or "(전역)")
                 return False
-            slot = self._reg(jobset_id)
+            slot = self._reg(jobset_id, task_kwargs.get("job_ids") or ())
             self._pool.start(_KillTask(
                 self, jobset_id=jobset_id, slot=slot, **task_kwargs))
         return True
@@ -158,6 +191,8 @@ class Killer(QObject):
         with self._shutdown_lock:
             self._shutdown = True
         self._pool.waitForDone(-1)
+        with self._active_lock:
+            self._active.clear()
 
 
 class _KillTask(QRunnable):
@@ -167,7 +202,7 @@ class _KillTask(QRunnable):
                  job_keys: Optional[List[str]] = None,
                  verify: bool = False,
                  scope: Optional[object] = None,
-                 slot: Optional[List[int]] = None):
+                 slot: Optional[_KillActivity] = None):
         super().__init__()
         self.setAutoDelete(True)
         self.killer = killer
@@ -188,39 +223,34 @@ class _KillTask(QRunnable):
         log.info("kill 착수 %s (%s)", target, mode)
 
         try:
-            try:
-                report = self._run()
-            except Exception as e:           # noqa: BLE001
-                # 착수/완료 짝 계약 — 예외에도 kill_finished는 발행한다.
-                # 안 하면 kill_started로 스피너를 켠 UI가 영구 고착된다.
-                log.exception("kill 실패: %s", self.jobset_id)
-                self.killer.error.emit(self.jobset_id, repr(e))
-                report = KillReport(
-                    jobset_id=self.jobset_id, requested=0,
-                    errors=[f"internal: {e!r}"])
-            else:
-                log.info("kill 완료 %s: 요청 %d / 미확인 %d / 잔존 %s "
-                         "(전략 %s, LSF호출 %d회%s)",
-                         target, report.requested, report.unconfirmed,
-                         "미검증" if report.still_alive is None
-                         else report.still_alive,
-                         "+".join(report.strategies) or "-",
-                         report.command_calls,
-                         f", 오류 {len(report.errors)}건"
-                         if report.errors else "")
-                # 완료 시 항상 100% 보장 (미확인이 남아도 작업은 끝) —
-                # submit과 대칭. 예외 경로는 진행 보장 대상이 아니다.
-                self.killer._set_progress(self.slot, report.requested,
-                                          report.requested)
-                self.killer.progress.emit(self.jobset_id, report.requested,
-                                          report.requested)
-            # 종료 시퀀스 **단일 출구** — finished보다 먼저 등록 해제:
-            # queued 신호를 받은 slot이 is_killing을 pull하면 반드시 False여야
-            # 한다 (결정적 계약). finally의 중복 해제는 멱등이라 무해.
-            self.killer._unreg(self.jobset_id, self.slot)
-            self.killer.finished.emit(self.jobset_id, report)
-        finally:
-            self.killer._unreg(self.jobset_id, self.slot)
+            report = self._run()
+        except Exception as e:           # noqa: BLE001
+            # 착수/완료 짝 계약 — 예외에도 kill_finished는 발행한다.
+            # 안 하면 kill_started로 스피너를 켠 UI가 영구 고착된다.
+            log.exception("kill 실패: %s", self.jobset_id)
+            self.killer.error.emit(self.jobset_id, repr(e))
+            report = KillReport(
+                jobset_id=self.jobset_id, requested=0,
+                errors=[f"internal: {e!r}"])
+        else:
+            log.info("kill 완료 %s: 요청 %d / 미확인 %d / 잔존 %s "
+                     "(전략 %s, LSF호출 %d회%s)",
+                     target, report.requested, report.unconfirmed,
+                     "미검증" if report.still_alive is None
+                     else report.still_alive,
+                     "+".join(report.strategies) or "-",
+                     report.command_calls,
+                     f", 오류 {len(report.errors)}건"
+                     if report.errors else "")
+            # 완료 시 항상 100% 보장 (미확인이 남아도 작업은 끝) —
+            # submit과 대칭. 예외 경로는 진행 보장 대상이 아니다.
+            self.killer._set_progress(self.slot, report.requested,
+                                      report.requested)
+            self.killer.progress.emit(self.jobset_id, report.requested,
+                                      report.requested)
+        # main이 활동을 해제하고 finished를 전달한다. 그 전까지는 완료
+        # 판정이 verify·마킹 사이의 스냅샷으로 결론을 내리지 않는다.
+        self.killer._completed.emit(self.jobset_id, self.slot, report)
 
     def _emit_progress(self, done: int, total: int) -> None:
         """chunk 진행 통지 (throttled) + pull 스냅샷 갱신(throttle 무관 최신)."""
@@ -366,12 +396,12 @@ class _KillTask(QRunnable):
                 return []
         killed = [r for r in recs
                   if r.job_id is not None and plan.rec_target(r) in accepted
-                  and r.job_key not in alive_keys]
+                  and (r.jobset_id, r.job_key) not in alive_keys]
         optimistic = self.killer.command.config.kill_status_policy == "optimistic"
         changed = []
         for r in killed:
             def same_job(cur, target=r):
-                return (cur._generation == target._generation
+                return (cur.same_execution(target)
                         and cur.job_id == target.job_id
                         and cur.array_index == target.array_index)
 
@@ -641,7 +671,7 @@ class _KillTask(QRunnable):
         # 확인된 kill의 EXIT/killed 마킹까지 빠진다(_verify_direct와 같은 규칙).
         known = [r for r in alive if r.job_id not in qr.query_failed]
         still_alive = len(known) if len(known) == len(alive) else None
-        return still_alive, {r.job_key for r in known}, list(qr.changed)
+        return still_alive, {(r.jobset_id, r.job_key) for r in known}, list(qr.changed)
 
     def _verify_global(self, whole, exact, ranges
                        ) -> Tuple[Optional[int], set, List]:
@@ -673,4 +703,4 @@ class _KillTask(QRunnable):
             return len(alive), set(), []
         # 잔존 수 단위를 jobset 경로(레코드 수)와 맞춘다 — element 수로 세면
         # 같은 array가 요청 1건에 잔존 3건으로 보고된다.
-        return len(recs), {r.job_key for r in recs}, []
+        return len(recs), {(r.jobset_id, r.job_key) for r in recs}, []

@@ -254,7 +254,7 @@ class JobSetManager:
         if not candidates:
             return []
         def _still(rec):
-            return lambda cur: (cur.job_id is None
+            return lambda cur: (cur.same_execution(rec) and cur.job_id is None
                                 and cur.state is rec.state)
         specs = [(rec.job_key, JobState.LOST, _still(rec),
                   {"fail_reason": rec.fail_reason or "NO_JOBID_PARSED"})

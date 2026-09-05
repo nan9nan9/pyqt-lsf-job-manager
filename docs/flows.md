@@ -15,8 +15,8 @@ mgr.start_polling(js)───▶   polling QThread (전역 1개)
 ```
 
 - 모든 사용자 명령은 **즉시 반환**(비동기)하고 결과는 Signal로 온다.
-- 모든 상태 변경은 **store에 먼저** 반영된 뒤 Signal이 나간다(store-first) —
-  어느 slot에서든 `js.jobs()` pull이 신호 내용과 일치한다.
+- 상태 변경은 Store에 먼저 반영된 뒤 Signal로 전달된다. Signal은 그 전이의
+  스냅샷이고, `js.jobs()`는 현재 스냅샷이므로 다음 갱신이 이미 반영됐을 수 있다.
 - worker→main Signal은 queued connection — slot은 항상 main에서 실행된다.
 
 ## 1. submit — `mgr.submit(js)` (유일한 제출 경로)
@@ -89,22 +89,24 @@ mgr.kill(js)
                                     │     · 그새 제출됨 → PEND+job_id (스냅샷에 포함)
                                     │     · barrier 중 새 submit → 등록 거부(born-cancelled)
                                     ├ 대상 스냅샷 (is_on_lsf)
-                                    ├ (MC) cluster 미상이면 최소 포맷 1회 조회 →
-                                    │      env(cshrc)별 그룹 분류
                                     ├ bkill id chunk 실행 + 확인 문구 파싱
                                     │     → kill_progress (스로틀)
                                     │     → 미확인분은 kill_max_retry까지 재시도
                                     ├ (verify=True) 재조회로 잔존 확인 → still_alive
                                     ├ optimistic(기본): 확인분 즉시 EXIT
-                                    ├ kill_finished(KillReport)
-                                    │     → jobs_updated([EXIT 전원 배치])
-                                    │     → jobset_updated(요약)
-                                    └ scope.release()        # barrier ↓ (finally)
+                                    ├ scope.release()        # barrier ↓ (_run의 finally)
+                                    └ 결과를 main으로 전달 (활동 등록 유지)
+                                          → main에서 활동 해제 → kill_finished
+                                          → jobs_updated + jobset_updated
+                                          → 보류된 완료 판정 재개
 ```
 
 - kill 경로는 **job_id chunk 단일**이다 — group/array/name 기반 일괄 kill은 쓰지
   않는다(제출이 wrapper 단일 경로라 LSF 부착물이 없다). ARG_MAX 안전은
   `kill_chunk_size`/`arg_max`가 담당한다.
+- kill의 진행 등록은 main의 결과 전달까지 유지한다. 그 사이 폴링이 terminal을
+  관측해도 완료 판정은 보류한다. 결과 전달 후 관련 JobSet을 다시 판정하므로
+  전원 kill의 오통지와 자연 종료의 통지 누락을 함께 막는다.
 - chunk 는 `kill_workers`(기본 4) 개까지 **동시에** 돈다 — 실행 풀이 공용이라
   kill 명령이 몇 건이든 bkill 총수가 이 값을 넘지 않는다.
   직렬(=1)이면 소요가 `ceil(N/kill_chunk_size) x bkill 1회`로 늘어선다.

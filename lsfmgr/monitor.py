@@ -87,21 +87,25 @@ class JobsetQuerier:
         # 삭제·교체 전 조회가 스트릭을 되살리지 않도록 실행 확인과
         # 되쓰기를 forget과 같은 잠금 아래 수행한다. 대상 key만 읽는다.
         with self._streak_lock:
-            if streaks:
-                current = self.store.get_jobs_by_keys(jobset_id, list(streaks))
-                streaks = {key: entry for key, entry in streaks.items()
-                           if key in current
-                           and current[key]._generation == entry[0]
-                           and current[key].state.is_on_lsf}
+            streaks = self._current_streaks(jobset_id, streaks)
             if streaks:
                 self._missing_streak[jobset_id] = streaks
             else:
                 self._missing_streak.pop(jobset_id, None)
 
+    def _current_streaks(self, jobset_id: str, streaks: dict) -> dict:
+        """[streak lock 보유] 현재 추적 중인 실행에 속하는 횟수만 유지한다."""
+        if not streaks:
+            return {}
+        current = self.store.get_jobs_by_keys(jobset_id, list(streaks))
+        return {key: entry for key, entry in streaks.items()
+                if key in current and current[key]._generation == entry[0]
+                and current[key].state.is_on_lsf}
+
     def forget(self, jobset_id: str,
                job_keys: Optional[List[str]] = None) -> None:
-        """사라진 job(remove/clear)·jobset(remove_jobset)의 미발견 스트릭을
-        버린다. job_keys=None이면 그 jobset 전체.
+        """삭제·교체·재제출된 실행의 미발견 스트릭을 버린다.
+        job_keys=None이면 삭제된 jobset/전체 job의 스트릭을 비운다.
 
         **살아있는 job의 스트릭까지 지우면 안 된다** — 지우면 LOST 유예가
         처음부터 다시 세어져 확정이 그만큼 늦어진다. 그래서 jobset 통째
@@ -116,8 +120,10 @@ class JobsetQuerier:
             streaks = self._missing_streak.get(jobset_id)
             if streaks is None:
                 return
-            for key in job_keys:
-                streaks.pop(key, None)
+            selected = {key: streaks[key] for key in job_keys if key in streaks}
+            retained = self._current_streaks(jobset_id, selected)
+            for key in selected.keys() - retained.keys():
+                del streaks[key]
             if not streaks:
                 self._missing_streak.pop(jobset_id, None)
 
@@ -252,7 +258,7 @@ class JobsetQuerier:
 
         # 3) 스냅샷과 같은 레코드만 CAS로 갱신해 조회 중 재제출된 job을 보호한다.
         def unchanged(rec: JobRecord):
-            return lambda cur: (cur.job_id == rec.job_id
+            return lambda cur: (cur.same_execution(rec) and cur.job_id == rec.job_id
                                 and cur.state is rec.state)
 
         # 전이는 개별 실행하지 않고 spec으로 모아 store.transition_many로

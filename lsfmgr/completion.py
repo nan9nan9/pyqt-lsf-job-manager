@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, Optional, Set
 
 from .errors import LsfmgrError
 from .qt import QRunnable, QThreadPool
@@ -35,7 +35,6 @@ class _PendingArm:
     token은 사이클 정체성 — 큐에 남은 이전 사이클의 낡은 신호가 새 사이클의
     보류분을 건드리지 못하게 한다."""
     token: object
-    keys: List[str]                          # rearm 대상 job_key
     post_process: Optional[Callable]
     poll_interval_s: Optional[float]         # None이면 자동 폴링 없음
 
@@ -60,7 +59,7 @@ class CompletionTracker:
     # ------------------------------------------------------------------
     # 제출 사이클 무장 프로토콜 — stage → confirm / discard
     # ------------------------------------------------------------------
-    def stage(self, jobset_id: str, token: object, keys: List[str],
+    def stage(self, jobset_id: str, token: object,
               post_process: Optional[Callable],
               poll_interval_s: Optional[float]) -> None:
         """[main] 제출 접수 — 이전 제출의 잔여 무장을 해제하고(이번 호출
@@ -69,7 +68,7 @@ class CompletionTracker:
         실행의 terminal 레코드에 post_process가 오발화한다."""
         self._post_process.pop(jobset_id, None)
         self._pending_arm[jobset_id] = _PendingArm(
-            token, keys, post_process, poll_interval_s)
+            token, post_process, poll_interval_s)
 
     def confirm(self, jobset_id: str, token: object) -> Optional[_PendingArm]:
         """[main] 착수 확정(records_reset) — 보류분을 소진하고 무장한다.
@@ -107,8 +106,8 @@ class CompletionTracker:
         return bool(recs) and all(r.state.is_terminal for r in recs)
 
     def maybe_finish(self, jobset_id: str) -> None:
-        """전원 terminal 도달 감지의 **공통 지점** — 폴링/query_once/submit
-        완료에서 호출된다. 두 가지를 처리한다:
+        """전원 terminal 도달 감지의 공통 지점 — 폴링/query_once/submit/kill
+        결과 전달에서 호출된다. 두 가지를 처리한다:
 
           1. jobset_finished(요약) 발화 — post_process 등록과 **무관**하게
              LSF 상태만 보고 전원 terminal이면 1회.
@@ -132,6 +131,10 @@ class CompletionTracker:
             return
         if not self._all_terminal(recs):
             self._finished_latch.discard(jobset_id)   # 다시 활성 — 재무장
+            return
+        if mgr.killer.blocks_completion(jobset_id, recs):
+            # verify가 terminal을 먼저 썼어도 killed 귀속은 아직 확정되지 않았다.
+            # kill 결과 전달에서 이 JobSet을 반드시 다시 판정한다.
             return
         # 완료 슬롯의 재제출이 현재 후처리를 지우지 않도록 신호 발행 전에 꺼내 둔다.
         fn = self._post_process.pop(jobset_id, None)  # 한 번만

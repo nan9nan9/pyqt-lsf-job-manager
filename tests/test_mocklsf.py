@@ -11,6 +11,7 @@ import time
 import pytest
 import subprocess
 import textwrap
+from dataclasses import replace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -241,13 +242,14 @@ def test_guarded_update_preserves_concurrent_change():
                                        submit_time=1000.0)
         database.insert_jobs(jobs)
         j = database.jobs_in_states([PEND])[0]   # 스케줄러가 읽은 스냅샷
+        before = replace(j)
         # 동시 변경: 다른 프로세스가 EXIT 커밋.
         victim = database.jobs_by_id(j.job_id)[0]
         victim.stat = EXIT
         database.update_job(victim)
         # 스케줄러가 뒤늦게 RUN 으로 guarded update (prev=PEND).
         j.stat = RUN
-        database.update_guarded_many([(j, PEND)])
+        database.update_guarded_many([(j, before)])
         assert database.jobs_by_id(j.job_id)[0].stat == EXIT
 
 

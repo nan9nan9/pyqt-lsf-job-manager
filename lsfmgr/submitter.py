@@ -215,7 +215,7 @@ class BulkSubmitter(QObject):
     started = Signal(str)                     # jobset_id — 게이트 통과 후 제출 착수
     # records_reset은 착수 확정, gate_rejected는 착수 전 종료를 알린다.
     # 두 번째 인자의 사이클 token으로 manager가 낡은 무장 신호를 구별한다.
-    records_reset = Signal(str, object)       # jobset_id, arm_token
+    records_reset = Signal(str, object, list)  # jobset_id, arm_token, 실제 리셋분
     gate_rejected = Signal(str, object)       # jobset_id, arm_token
     pre_submit_started = Signal(str)               # jobset_id — pre_submit 게이트 시작
     pre_submit_finished = Signal(str, bool)        # jobset_id, ok — 게이트 종료(True=통과)
@@ -320,17 +320,16 @@ class BulkSubmitter(QObject):
         launch, reset_recs = self._reset_records(ctx, keyed)           # ②
         tasks = [self._make_resubmit_task(ctx, key, item, cwd)         # ③
                  for key, item, cwd in launch]
-        if reset_recs:
-            # 리셋된 SUBMITTING 즉시 발행 — 완료를 안 기다리고 표에 반영.
-            self._safe_emit(self.jobs_changed, ctx.jobset_id, reset_recs)
-
         with ctx.lock:
             already_finished = ctx.finished
         if already_finished:
             # 리셋 단계에서 완료된 사이클에는 handler·후처리를 무장하지 않는다.
             self._safe_emit(self.gate_rejected, ctx.jobset_id, ctx.arm_token)
             return
-        self._safe_emit(self.records_reset, ctx.jobset_id, ctx.arm_token)  # ④
+        self._safe_emit(self.records_reset, ctx.jobset_id, ctx.arm_token,
+                        reset_recs)                                  # ④
+        if reset_recs:
+            self._safe_emit(self.jobs_changed, ctx.jobset_id, reset_recs)
         for i, task in enumerate(tasks):                               # ⑤
             # jobset 내 순번을 우선순위로 써 여러 jobset의 작업을 교대로 실행한다.
             # 큰 jobset 뒤에 들어온 작은 jobset의 대기를 줄이면서 각 집합 내부 순서는 보존한다.
@@ -1100,4 +1099,3 @@ class _GateTask(QRunnable):
             return
         if ctx.total == 0:                           # 빈 제출 — 직접 마무리
             sub._finish_if_done(ctx, force=True)
-

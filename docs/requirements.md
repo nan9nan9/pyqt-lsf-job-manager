@@ -270,9 +270,10 @@ Exception
 - QT-6: cancel은 job 경계 안전 지점에서, 이미 submit된 job은 정상 기록
 - 스레딩: submit=QThreadPool+QRunnable / polling=전용 QThread+소속 QTimer /
   kill·단발조회=QThreadPool / retry 대기=QTimer 스케줄(sleep 금지)
-- **store-first-signal-later**: store 갱신 뒤 Signal → 어느 slot에서든 `js.jobs()`
-  pull이 신호 내용과 일치. (`min_state_dwell_s`를 켜면 `jobs_updated`에 한해
-  의도적으로 완화된다 — README §6.5.)
+- **store-first-signal-later**: Signal은 Store에 반영된 전이의 스냅샷이다.
+  `js.jobs()` pull은 호출 시점의 현재 스냅샷이므로 신호보다 앞설 수 있다.
+  같은 실행에서 이미 전달한 revision보다 오래된 결과는 전달하지 않는다.
+  `min_state_dwell_s`는 `jobs_updated`에 추가 표시 지연을 준다(README §6.5).
 - shutdown(): 진행 중 제출은 완료까지 대기(job_id 유실 방지), 미착수분 취소. 멱등.
 
 ---
@@ -392,28 +393,28 @@ JobSetStore(ABC) ── InMemoryStore
   실행(GUI 접근 금지, 멱등 권장).
 - **FR-10 post_process 후처리**: `mgr.submit(js, post_process=fn)` — 이 제출의
   **전 job이 terminal**(DONE/EXIT/SUBMIT_FAILED/CANCELLED/LOST — §3의 `is_terminal`)에 도달하면
-  worker에서 **1회** 실행. 완료 감지는 폴링/`query_once`의 공통 지점(FR-4)에서
-  이뤄지며, 감지 즉시 무장 해제해 중복 발화하지 않는다. **성공/실패 무관** — 전원
+  worker에서 **1회** 실행. 완료 감지는 폴링/`query_once`/submit·kill 결과 전달의
+  공통 지점에서 이뤄지며, 감지 즉시 무장 해제해 중복 발화하지 않는다. **성공/실패 무관** — 전원
   terminal이면 실행하고, 콜백이 최종 JobRecord 목록을 받아 결과를 분류한다("이 실행이
   끝났다"는 시점이지 "전부 성공"이 아니다). 신호: `post_processing_started →
   post_processing_finished(result)`(반환값, 예외 시 `None` + `error_occurred`).
   한 제출당 1회, 완료 전 `post_process` 없이 재제출하면 이전 무장 해제.
-- **FR-11 jobset_finished 완료 통지**: jobset의 **전 job이 terminal**에 도달한 순간
+- **FR-11 jobset_finished 완료 통지**: jobset의 **전 job이 terminal**에 도달하고
+  관련 제출·kill 활동의 정산을 마치면
   `jobset_finished(jobset_id, summary)` 1회. 등록물(`post_process`/handler)과
-  **무관**하게 job 상태만 보고 판정하므로, 아무것도 등록하지 않은 jobset도 완료를
-  통지받는다. 감지 지점은 FR-10과 같은 공통 지점(폴링/`query_once`/submit 완료)이며,
+  **무관**하게 판정하므로, 아무것도 등록하지 않은 jobset도 완료를
+  통지받는다. 감지 지점은 FR-10과 같은 공통 지점(폴링/`query_once`/submit·kill 결과 전달)이며,
   `post_process`도 걸었다면 `jobset_finished → post_processing_started` 순서다.
   **재무장**: 다시 non-terminal이 되면(재제출·job 추가) latch가 풀려 다음
   완료에 또 발화한다 — "완료"는 제출 사이클이 아니라 jobset 상태의 성질이다.
   job이 하나도 없는 빈 jobset에서는 발화하지 않는다.
-  **사용자 kill 억제**: `mgr.kill(js)`/`kill_jobs`로 끝난 완료는 발화하지 않는다
-  (latch만 세운다) — 사용자가 스스로 끝낸 것이라 알릴 것이 없다. 두 판정을 쓴다:
-  ① kill 완료 시점에 그 jobset이 이미 전원 terminal(=kill이 끝낸 완료),
-  ② 완료 감지 시점에 전 job이 `JobRecord.killed`(=전원 내가 죽인 것) — ②는 EXIT
-  전이가 나중에 확인돼도(actual 정책·verify·폴링 수렴) 표식만으로 성립한다.
-  의도치 않은 종료(자연 종료·외부 bkill·비정상 EXIT)는 kill 요청을 안 거쳐
-  `killed=False`로 남으므로 그대로 통지되고, 부분 kill은 남은 job이 non-terminal
-  이라 억제되지 않는다. post_process는 억제하지 않는다(FR-10은 별개 계약).
+  **사용자 kill 억제**: 전원 terminal이며 전 job이 `JobRecord.killed=True`일 때만
+  통지를 생략한다(latch만 세움). 자연 종료와 kill이 섞인 완료는 통지한다.
+  관련 kill이 진행 중이면 verify와 killed 마킹 사이의 상태로 판정하지 않도록
+  보류하고, kill 결과가 main에 전달되면 다시 판정한다. JobSet 없는 원시 ID kill과
+  겹친 kill에도 적용한다. actual 정책에서 아직 살아 있으면 이후 폴링에서 판정한다.
+  `already finished` 응답만 받은 자연 종료는 `killed=False`를 유지한다.
+  post_process는 전원 kill이어도 실행하며, kill 귀속이 반영된 레코드를 받는다.
 
 ---
 

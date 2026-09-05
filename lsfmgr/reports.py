@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -89,5 +89,6 @@ class KillReport:
     changed: List = field(default_factory=list)   # optimistic 정책에서 EXIT로
                                          # 전이된 JobRecord
     errors: List[str] = field(default_factory=list)
-
+    # 전역 kill도 관련 JobSet의 보류된 완료를 다시 판정한다. 공개 요청 범위와 별개다.
+    _jobset_ids: Tuple[str, ...] = field(default=(), repr=False, compare=False)
 

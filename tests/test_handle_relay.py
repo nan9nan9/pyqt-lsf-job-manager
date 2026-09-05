@@ -11,6 +11,7 @@ import pytest
 
 from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
 from lsfmgr.handle import JobSet
+from lsfmgr.reports import KillReport
 
 # 핸들 Signal 이름 → Facade 쪽 emit 인자(jsid 뒤에 붙는 것들)
 FACADE_ARGS = {
@@ -20,7 +21,7 @@ FACADE_ARGS = {
     "submit_progress":          (1, 2),
     "submit_finished":          (object(),),
     "kill_started":             (),
-    "kill_finished":            (object(),),
+    "kill_finished":            (KillReport(jobset_id="", requested=0),),
     "kill_progress":            (1, 2),
     "kill_failed":              ("사유",),
     "error_occurred":           ("오류",),

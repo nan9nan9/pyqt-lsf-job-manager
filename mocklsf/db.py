@@ -164,22 +164,24 @@ class Database:
         self.conn.commit()
 
     def update_guarded_many(self, pairs):
-        """(job, prev_stat) 쌍들을 한 트랜잭션으로 조건부 갱신 (낙관적 잠금).
+        """(변경 후 job, 읽었던 job) 쌍을 스냅샷 CAS로 갱신한다.
 
-        DB 의 현재 stat 이 prev_stat 과 같을 때만 갱신한다. 스케줄러가 tick
-        시작 시 읽은 이후 다른 프로세스(bkill/bstop 등)가 그 job 을 바꿨다면
-        stat 이 달라져 갱신이 no-op 되고, 상대의 변경이 보존된다(lost-update 방지).
-        실제 적용된 (job, prev_stat) 쌍만 반환한다. 이벤트·출력은 이 결과로 기록한다.
+        CLI가 바꾸는 실행·대기 필드를 함께 비교한다. RUN→USUSP→RUN처럼
+        상태가 돌아와도 변경된 시각을 덮지 않는다. 독립 메타데이터(job_group)
+        변경은 허용한다. 실제 적용된 쌍만 반환해 이벤트·출력의 근거로 쓴다.
         """
         if not pairs:
             return []
         columns = ("stat", "exec_host", "start_time", "finish_time", "exit_code")
+        checked = columns + ("pend_secs", "susp_since")
         assigns = ", ".join(f"{c}=?" for c in columns)
-        sql = f"UPDATE jobs SET {assigns} WHERE row_id=? AND stat=?"
+        guard = " AND ".join(f"{c} IS ?" for c in checked)  # NULL도 같은 값으로 비교
+        sql = f"UPDATE jobs SET {assigns} WHERE row_id=? AND {guard}"
         applied = []
         with self.conn:
             for j, prev in pairs:
-                vals = [getattr(j, c) for c in columns] + [j.row_id, prev]
+                vals = ([getattr(j, c) for c in columns] + [prev.row_id]
+                        + [getattr(prev, c) for c in checked])
                 if self.conn.execute(sql, vals).rowcount:
                     applied.append((j, prev))
         return applied

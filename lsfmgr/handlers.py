@@ -164,17 +164,20 @@ class JobSetHandlerService(QObject):
             return
         self._handlers.pop((jobset_id, name), None)
 
-    def rearm(self, jobset_id: str, job_keys: Iterable[str]) -> None:
+    def rearm(self, jobset_id: str, job_keys: Optional[Iterable[str]] = None) -> None:
         """[main] 지정 job들의 handler 진행 상태를 리셋 (mgr.submit 재제출 용).
         _FINISHED로 남으면 재실행에서 handler가 영영 침묵하므로 _PENDING으로
         되돌려 새 실행의 start/end 주기를 다시 돌게 한다."""
-        keys = set(job_keys)
+        keys = None if job_keys is None else set(job_keys)
         for (jsid, _name), h in self._handlers.items():
             if jsid != jobset_id:
                 continue
             with h.lock:
-                for key in keys:
-                    h.status.pop(key, None)     # → _PENDING (기본값)
+                if keys is None:
+                    h.status.clear()
+                else:
+                    for key in keys:
+                        h.status.pop(key, None)     # → _PENDING (기본값)
 
     def remove_all(self, jobset_id: str) -> None:
         """[main] jobset의 모든 handler 해제 (remove_jobset 시)."""
