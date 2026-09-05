@@ -177,6 +177,16 @@ class JobsetQuerier:
             for st in sts:
                 statuses[(st.job_id, st.array_index)] = st
                 by_id.setdefault(st.job_id, {})[st.array_index] = st
+            # 스냅샷(targets)과 조회원의 관심 등록 사이에 삭제·교체·재제출로
+            # 떨어진 id는 그쪽의 forget보다 등록이 늦어 조회원에 유령으로
+            # 남는다 — 현재 레코드와 대조해 되돌아온 id를 다시 버린다.
+            cur = self.store.get_jobs_by_keys(
+                jobset_id, [r.job_key for r in targets])
+            stale = [r.job_id for r in targets if r.job_id is not None
+                     and (r.job_key not in cur
+                          or cur[r.job_key].job_id != r.job_id)]
+            if stale:
+                self.command.forget_status(stale)
 
         # --- 2) 레코드 ↔ 조회 결과 매칭 ---
         def lookup(rec: JobRecord) -> Optional[JobStatus]:

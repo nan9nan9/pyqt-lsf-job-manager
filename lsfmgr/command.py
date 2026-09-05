@@ -187,37 +187,58 @@ def _looks_like_field_error(err_text: str) -> bool:
 
 # bkill 출력 1행: "Job <123>..." 또는 "Job <123[4]>: ..." — id와 나머지 메시지.
 _BKILL_LINE_RE = re.compile(r"Job <(\d+(?:\[\d+\])?)>[:\s]?\s*(.*)")
-# 해소 신호 — 더 kill할 필요 없음: 신호 수락 or 이미 없음/끝남.
-_BKILL_RESOLVED_MSGS = (
+# kill 신호 수락 — EXIT/killed 마킹 근거.
+_BKILL_ACCEPTED_MSGS = (
     "is being terminated", "is being signaled", "is being requeued",
     "is being killed", "in progress of being terminated",
+)
+# 이미 없음/끝남 — 재시도는 불필요하지만 이 kill이 끝낸 것은 아니다.
+_BKILL_GONE_MSGS = (
     "already finished", "has already", "no matching job", "is not found",
     "no unfinished job", "not found",
 )
 
 
-def _parse_bkill_resolved(text: str, requested: "set[str]") -> "set[str]":
-    """bkill stdout/stderr에서 '해소된'(재시도 불필요) job id/target을 뽑는다.
-    미해소(일시 장애 등)는 여기 안 들어가 호출자가 재시도한다.
+def _parse_bkill_resolved(text: str, requested: "set[str]"
+                          ) -> "Tuple[set[str], set[str]]":
+    """bkill stdout/stderr 파싱 → (해소된 target, 그중 kill 신호가 수락된 target).
+
+    해소 = 재시도 불필요: 신호 수락 또는 이미 없음/끝남. 미해소(일시 장애 등)는
+    호출자가 재시도한다. 이미 끝났다는 응답은 **수락이 아니다** — 그 job의
+    종료 상태는 조회로 반영해야지 EXIT/killed로 덮으면 정상 완료가 실패로
+    기록된다(kill 시점에 Store가 아직 PEND/RUN인 경우).
 
     requested는 이번 chunk에 **실제로 넘긴** target 집합이다 — element 응답
-    행에서 bare 부모 id를 유도할지 말지가 여기에 달렸다(아래)."""
-    resolved, unresolved = set(), set()
+    행에서 bare 부모 id를 유도할지 말지가 여기에 달렸다. 부모 전체를 요청한
+    경우에만 element 응답을 부모 판정에 집계하며, element 하나라도 미해소면
+    부모는 재시도 대상으로 남고(stdout/stderr 순서 무관), element 하나라도
+    수락됐으면 부모도 수락이다(접힌 부모 레코드는 element 전체의 합). 수락은
+    해소와 별개로 돌려준다 — 수락됐지만 미해소인 부모는 재시도 뒤 해소될 때
+    수락 이력이 살아 있어야 한다."""
+    resolved, accepted, unresolved = set(), set(), set()
     for line in text.splitlines():
         m = _BKILL_LINE_RE.search(line)
         if not m:
             continue
         jid, msg = m.group(1), m.group(2).lower()
-        outcome = (resolved if any(p in msg for p in _BKILL_RESOLVED_MSGS)
-                   else unresolved)
-        outcome.add(jid)
-        # 부모 전체를 요청한 경우에만 element 응답을 부모 판정에 집계한다.
+        if any(p in msg for p in _BKILL_ACCEPTED_MSGS):
+            buckets = (resolved, accepted)
+        elif any(p in msg for p in _BKILL_GONE_MSGS):
+            buckets = (resolved,)
+        else:
+            buckets = (unresolved,)
+        ids = {jid}
         if "[" in jid:
             parent = jid.split("[", 1)[0]
             if parent in requested:
-                outcome.add(parent)
-    # stdout/stderr의 순서와 무관하게 element 하나라도 미해소면 부모를 재시도한다.
-    return resolved - unresolved
+                ids.add(parent)
+        for bucket in buckets:
+            bucket |= ids
+    resolved -= unresolved
+    # accepted는 resolved와 교집합하지 않는다 — 이번 라운드에 부모가 형제의
+    # 실패로 미해소여도 element 수락 이력은 남아야, 재시도에서 '이미 끝남'으로
+    # 해소될 때 부모의 killed 근거가 되기 때문이다(호출자가 해소와 함께 판정).
+    return resolved, accepted
 
 
 def _parse_run_time(s: str) -> Optional[int]:
@@ -735,14 +756,15 @@ class LsfCommand:
 
     def bkill_targets_confirm(self, targets: Sequence[str],
                               on_progress: Optional[Callable[[int], None]] = None
-                              ) -> Tuple[Set[str], int, Set[str]]:
+                              ) -> Tuple[Set[str], Set[str], int, Set[str]]:
         """chunked bkill + 출력 확인 파싱.
 
-        반환: (해소된 target 집합, LSF 호출 횟수, **시간 내 반환하지 않은**
-        chunk의 target 집합).
+        반환: (해소된 target 집합, 그중 신호가 수락된 target 집합, LSF 호출
+        횟수, **시간 내 반환하지 않은** chunk의 target 집합).
         '해소'는 더 이상 kill이 필요 없다고 확인된 것 — 'Job <id> is being
         terminated'(신호 수락) 또는 already-finished/no-matching(이미 없음).
-        해소 안 된 target(일시 장애 등)은 호출자가 재시도한다.
+        해소 안 된 target(일시 장애 등)은 호출자가 재시도한다. 수락된 것만
+        "이 kill이 끝냈다"의 근거다(_parse_bkill_resolved).
 
         timeout은 **따로 돌려준다**. 그 chunk는 '안 죽었다'가 아니라 '모른다'
         이기 때문이다 — subprocess timeout은 bkill **클라이언트**를 죽일 뿐,
@@ -758,10 +780,10 @@ class LsfCommand:
         chunks = list(chunk_args(list(targets), self.config.kill_chunk_size,
                                  self.config.arg_max, self._bkill_base_len()))
         if not chunks:
-            return set(), 0, set()
+            return set(), set(), 0, set()
 
         def run_chunk(chunk: List[str]):
-            """[worker] chunk 1건 실행 → (해소된 target, timeout난 target).
+            """[worker] chunk 1건 실행 → (해소, 수락, timeout난 target).
 
             **공유 상태를 건드리지 않는다** — 자기 결과만 돌려주고 집계는
             호출 스레드가 한다. 병렬 chunk가 공유 집합에 쓰면 lock이 필요하고,
@@ -778,11 +800,13 @@ class LsfCommand:
                     "자주 나오면 kill_chunk_size를 줄이거나 "
                     "kill_timeout_s를 늘리세요: %s",
                     self.config.kill_timeout_s, len(chunk), chunk[:20])
-                return set(), set(chunk)
-            return _parse_bkill_resolved(
-                res.stdout + "\n" + res.stderr, set(chunk)), set()
+                return set(), set(), set(chunk)
+            got, acc = _parse_bkill_resolved(
+                res.stdout + "\n" + res.stderr, set(chunk))
+            return got, acc, set()
 
         resolved: Set[str] = set()
+        accepted: Set[str] = set()
         timed_out: Set[str] = set()
         processed = 0
         pool = self._bkill_pool
@@ -792,10 +816,11 @@ class LsfCommand:
         # 집계와 진행 통지는 호출 스레드에서만 수행한다.
         pending = {pool.submit(run_chunk, c): len(c) for c in chunks}
         for fut in as_completed(pending):
-            got, late = fut.result()
+            got, acc, late = fut.result()
             resolved |= got
+            accepted |= acc
             timed_out |= late
             processed += pending[fut]
             if on_progress:
                 on_progress(processed)
-        return resolved, len(chunks), timed_out
+        return resolved, accepted, len(chunks), timed_out

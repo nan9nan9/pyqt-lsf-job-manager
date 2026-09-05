@@ -214,7 +214,7 @@ def test_folded_row_cannot_judge_an_element_target(bare_mgr):
     """조회가 접힌 행(array_index=None)만 주면 element 생사는 알 수 없다 —
     '죽었다'로 접으면 살아있는 job이 재시도에서 빠져 kill을 빠져나간다."""
     task = _task(bare_mgr, [_status(1000, None, JobState.RUN)])
-    gone, _calls = task._confirm_by_query({"1000[3]"})
+    gone, _absent, _calls = task._confirm_by_query({"1000[3]"})
     assert gone == set(), f"판정 불가를 해소로 접었다: {gone}"
 
 
@@ -240,7 +240,7 @@ def test_element_target_is_judged_per_element(bare_mgr):
     내 element가 끝났으면 해소."""
     task = _task(bare_mgr, [_status(1000, 3, JobState.EXIT),
                             _status(1000, 4, JobState.RUN)])
-    gone, _c = task._confirm_by_query({"1000[3]", "1000[4]"})
+    gone, _absent, _c = task._confirm_by_query({"1000[3]", "1000[4]"})
     assert gone == {"1000[3]"}, gone
 
 
@@ -261,4 +261,4 @@ def test_query_failure_keeps_pending(bare_mgr):
     bare_mgr.command.bjobs_by_ids = boom
     from lsfmgr.killer import _KillTask
     task = _KillTask(bare_mgr.killer, jobset_id="")
-    assert task._confirm_by_query({"1000"}) == (set(), 1)
+    assert task._confirm_by_query({"1000"}) == (set(), set(), 1)

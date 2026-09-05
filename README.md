@@ -566,7 +566,9 @@ mgr.jobset(jobset_id)      # ID로 핸들 재획득
 >   세션)·비정상 EXIT은 `False`로 남습니다. `exit_code`(130/137/143)로는 구분되지
 >   않습니다 — 외부 kill도 같은 코드를 남기니까요. 실패 목록을 보여줄 때
 >   `js.failed_jobs`에서 `r.killed`를 걸러내면 "의도한 정지"와 "진짜 실패"가
->   나뉩니다. 재제출 리셋에서 `False`로 돌아갑니다.
+>   나뉩니다. 재제출 리셋에서 `False`로 돌아갑니다. kill 시점에 이미 끝나 있던
+>   job(bkill이 already finished로 응답)은 `killed`가 붙지 않고 실제 종료 상태
+>   (DONE/EXIT)가 조회로 반영됩니다.
 
 > 조회 값은 **마지막 polling 시점 스냅샷**입니다 (최대 `poll_interval_s` 지연).
 > 단 `SUBMIT_FAILED`는 submit 과정에서 직접 기록되므로 항상 정확합니다.

@@ -29,7 +29,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lsfmgr.command import (                                    # noqa: E402
-    _BKILL_RESOLVED_MSGS, _JOB_ID_RE, _LSF_TIME_FORMATS, _NO_JOB_PATTERNS,
+    _BKILL_ACCEPTED_MSGS, _BKILL_GONE_MSGS, _JOB_ID_RE, _LSF_TIME_FORMATS,
+    _NO_JOB_PATTERNS,
     LsfCommand, _parse_bkill_resolved, _parse_lsf_time, _parse_run_time,
 )
 
@@ -155,17 +156,20 @@ def check_bkill_messages(cmd, job, do_kill):
     if not do_kill:
         report(INFO, "bkill 점검 건너뜀 (--kill 을 주면 실제로 죽인다)",
                f"확인할 것: 'Job <{job}> is being terminated' 형태인가.\n"
-               f"  lsfmgr가 해소로 인정하는 문구: {_BKILL_RESOLVED_MSGS}")
+               f"  lsfmgr가 수락으로 인정하는 문구: {_BKILL_ACCEPTED_MSGS}\n"
+               f"  이미 끝남(재시도 불필요)으로 보는 문구: {_BKILL_GONE_MSGS}")
         return
     rc, out, err, dt = run(["bkill", str(job)])
     text = out + "\n" + err
-    resolved = _parse_bkill_resolved(text, {str(job)})
+    resolved, accepted = _parse_bkill_resolved(text, {str(job)})
     report(OK if str(job) in resolved else BAD,
-           f"bkill {job}: rc={rc} ({dt:.2f}s) → 해소 판정={bool(resolved)}",
+           f"bkill {job}: rc={rc} ({dt:.2f}s) → 해소={bool(resolved)} "
+           f"수락={bool(accepted)}",
            f"출력: {text.strip()[:200]}\n"
            + ("" if resolved else
               "이 문구를 lsfmgr가 못 알아본다 — kill이 '미확인'으로 오보되고\n"
-              f"kill_max_retry까지 재시도한다. 기대 문구: {_BKILL_RESOLVED_MSGS}"))
+              f"kill_max_retry까지 재시도한다. 기대 문구: "
+              f"{_BKILL_ACCEPTED_MSGS + _BKILL_GONE_MSGS}"))
 
 
 def bench_bkill(ids):

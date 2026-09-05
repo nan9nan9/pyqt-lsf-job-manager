@@ -80,6 +80,22 @@ QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_architecture_review.py 
 - kill 마킹을 한 경로로 모았다. 동일 실행·LSF ID인지 확인하고, verify/폴링이
   먼저 기록한 종료 상태와 exit code를 보존하면서 `killed=True`를 부분 갱신한다.
   verify와 마킹 결과는 job별 최종 레코드 한 건으로 합쳐 중복 발행을 막는다.
+- (후속 검토) bkill 응답을 '해소'(재시도 불필요)와 '수락'(kill 신호 접수)으로
+  나눴다. `already finished` 계열은 해소일 뿐 수락이 아니므로 EXIT/`killed`로
+  마킹하지 않고, 그런 응답이 있으면 verify 설정과 무관하게 한 번 조회해 실제
+  종료 상태(DONE/EXIT)를 Store에 반영한다. 기존에는 kill 시점에 Store가 아직
+  PEND/RUN이던 정상 완료 job이 EXIT/`KILLED`로 덮이고 terminal이라 폴링에서도
+  빠져 영구히 실패로 남았다. timeout 후 조회 확인분은 사라졌거나 EXIT면 이
+  kill이 끝낸 것으로(마킹), DONE이면 자연 종료로 본다. 접힌 배열 부모는
+  element 하나라도 수락되면 수락이다. 재검토 보완: timeout 조회의 자연 종료
+  판정은 선택한 element 행만 보고, element 수락 이력은 형제 실패로 부모가
+  미해소여도 재시도까지 유지하며(마킹은 최종 해소된 것만), JobSet 없는 ID
+  kill도 추적 레코드의 jobset을 조회해 Store를 갱신한다. 회귀: `test_killer.py`.
+- (후속 검토) 조회의 대상 스냅샷과 조회원 관심 등록 사이에 삭제·교체·재제출로
+  떨어진 job_id는 그쪽의 forget보다 등록이 늦어 콜백 조회원에 유령으로 남을
+  수 있었다(카오스 전체 실행에서 1회 관측, 단독 실행 10회 재현 실패). 조회가
+  등록 뒤 현재 레코드와 대조해 되돌아온 id를 다시 버린다. 결정적 재현:
+  `test_stale_ids.py`.
 - MockLSF 종료 대기 후에도 살아 있으면 False를 반환하고 PID 파일을 보존한다.
   CLI의 stop/restart/reset은 종료 실패 시 오류 코드 1을 반환하며, 재기동이나
   DB 초기화를 진행하지 않는다.

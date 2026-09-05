@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from lsfmgr import JobState
+from lsfmgr import JobState, LsfJobManager
 from tests.conftest import mk_jobset, submit_cmds
 
 
@@ -536,3 +536,154 @@ def test_jobset_verify_partial_query_failure_keeps_known_survivors(
     a, b = js.jobs()
     assert a.state is JobState.EXIT and a.killed      # 미확인 → 확인대로 마킹
     assert b.state is JobState.RUN and not b.killed   # 실측 생존 → 마킹 제외
+
+
+@pytest.mark.parametrize("policy", ["optimistic", "actual"])
+def test_already_finished_response_is_not_a_kill(qtbot, fake_lsf, policy):
+    """kill 시점에 이미 정상 종료된 job(Store는 아직 PEND)에 bkill이
+    'already finished'를 답하면, 이 kill이 끝낸 것이 아니다 — EXIT/killed로
+    덮지 않고 실제 종료 상태(DONE)를 조회로 반영한다. 덮으면 terminal이라
+    폴링에서도 빠져 정상 완료가 영구히 실패로 남는다."""
+    from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
+    mgr = LsfJobManager(store=InMemoryStore(),
+                        config=LsfConfig(kill_status_policy=policy),
+                        runner=fake_lsf)
+    try:
+        with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
+            js = submit_cmds(mgr, ["done 0"], auto_poll=False)
+        fake_lsf.set_all("DONE", 0)              # 실제로는 정상 종료
+        assert js.jobs()[0].state is JobState.PEND
+        with qtbot.waitSignal(mgr.kill_finished, timeout=10000) as blk:
+            mgr.kill(js)                         # verify=False(기본)
+        _, report = blk.args
+        rec = js.jobs()[0]
+        assert rec.state is JobState.DONE and not rec.killed, rec
+        assert rec.fail_reason is None
+        assert report.unconfirmed == 0 and report.errors == []
+        assert [r.job_key for r in report.changed] == ["k0"]   # 조회 반영분
+    finally:
+        mgr.shutdown()
+
+
+def test_parse_bkill_accepted_vs_gone():
+    from lsfmgr.command import _parse_bkill_resolved
+    text = ("Job <1000> is being terminated\n"
+            "Job <1001>: Job has already finished\n"
+            "Job <1002[1]> is being terminated\n"
+            "Job <1002[2]>: Job has already finished\n"
+            "Job <1003[1]>: Job has already finished\n"
+            "Job <1003[2]>: Job has already finished\n")
+    resolved, accepted = _parse_bkill_resolved(
+        text, {"1000", "1001", "1002", "1003"})
+    assert resolved >= {"1000", "1001", "1002", "1003"}
+    # element 하나라도 수락되면 부모(접힌 레코드)도 수락, 전부 이미 끝났으면 미수락
+    assert accepted & {"1000", "1001", "1002", "1003"} == {"1000", "1002"}
+
+
+# ----------------------------------------------------------------------
+# '이미 끝남' 응답과 수락 구분 — 배열·재시도·전역 호출·timeout 조합
+# ----------------------------------------------------------------------
+def _submit_one(qtbot, mgr, command="wrapper task"):
+    js = mgr.create_jobset([command], job_keys=["a"])
+    with qtbot.waitSignal(mgr.submit_finished, timeout=3000):
+        mgr.submit(js, auto_poll=False)
+    return js
+
+
+def test_timeout_origin_ignores_unselected_done_sibling(qtbot):
+    """timeout 후 조회의 자연 종료 판정은 선택한 element 행만 본다 — 선택하지
+    않은 형제의 DONE이 대상의 kill 근거를 지우면 안 된다."""
+    from lsfmgr.command import JobStatus
+    from lsfmgr.killer import _KillTask
+    from tests.fake_lsf import FakeLsf
+    mgr = LsfJobManager(runner=FakeLsf())
+    try:
+        rows = [JobStatus(1000, 3, JobState.EXIT, 130),
+                JobStatus(1000, 4, JobState.DONE, 0)]
+        mgr.command.bjobs_by_ids = lambda ids, fresh=False: (rows, set())
+        task = _KillTask(mgr.killer, jobset_id="")
+        gone, by_kill, calls = task._confirm_by_query({"1000[3]"})
+        assert gone == {"1000[3]"}
+        assert by_kill == {"1000[3]"}, (gone, by_kill, calls)
+    finally:
+        mgr.shutdown()
+
+
+def test_partial_array_acceptance_survives_retry(qtbot):
+    """첫 라운드의 element 수락 이력은 형제 실패로 부모가 미해소여도 남아,
+    재시도에서 '이미 끝남'으로 해소될 때 부모 killed의 근거가 된다."""
+    from lsfmgr.command import CommandResult
+    from tests.fake_lsf import FakeLsf
+    fake = FakeLsf()
+    rounds = []
+
+    def runner(argv, timeout, cwd=None):
+        if argv[0] != "bkill":
+            return fake(argv, timeout, cwd)
+        pid = int(argv[1])
+        rounds.append(pid)
+        if len(rounds) == 1:
+            fake.set_job(pid, "EXIT", 130, array_index=1)
+            return CommandResult(255,
+                f"Job <{pid}[1]> is being terminated\n",
+                f"Job <{pid}[2]>: Failed to send signal: temporarily unavailable\n")
+        fake.set_job(pid, "DONE", 0, array_index=2)
+        return CommandResult(255, "",
+            f"Job <{pid}[1]>: Job has already finished\n"
+            f"Job <{pid}[2]>: Job has already finished\n")
+
+    mgr = LsfJobManager(runner=runner, kill_max_retry=1, kill_retry_delay_s=.01)
+    try:
+        js = _submit_one(qtbot, mgr, "bsub -J arr[1-2] task")
+        with qtbot.waitSignal(mgr.kill_finished, timeout=3000) as result:
+            mgr.kill(js)
+        assert len(rounds) == 2
+        assert result.args[1].unconfirmed == 0
+        assert js.jobs()[0].killed, (result.args[1], js.jobs())
+    finally:
+        mgr.shutdown()
+
+
+def test_global_id_already_finished_updates_tracked_store(qtbot):
+    """JobSet 없는 ID kill도 '이미 끝남' 응답이면 추적 레코드의 실제 종료
+    상태를 Store에 반영한다(전역 직접 조회는 Store를 갱신하지 않으므로)."""
+    from lsfmgr.command import CommandResult
+    from tests.fake_lsf import FakeLsf
+    fake = FakeLsf()
+
+    def runner(argv, timeout, cwd=None):
+        if argv[0] == "bkill":
+            return CommandResult(255, "",
+                f"Job <{argv[1]}>: Job has already finished\n")
+        return fake(argv, timeout, cwd)
+
+    mgr = LsfJobManager(runner=runner)
+    try:
+        js = _submit_one(qtbot, mgr)
+        job_id = js.jobs()[0].job_id
+        fake.set_all("DONE", 0)
+        with qtbot.waitSignal(mgr.kill_finished, timeout=3000) as result:
+            mgr.kill_jobs([job_id])
+        assert result.args[1].still_alive == 0
+        rec = js.jobs()[0]
+        assert rec.state is JobState.DONE and rec.exit_code == 0, rec
+    finally:
+        mgr.shutdown()
+
+
+def test_timeout_unknown_target_keeps_consistent_return_shape(qtbot):
+    """ID로 해석할 수 없는 대상의 timeout — _confirm_by_query의 빈 분기도
+    같은 반환 형태여야 내부 오류로 끝나지 않는다."""
+    import subprocess
+    def runner(argv, timeout, cwd=None):
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    mgr = LsfJobManager(runner=runner, kill_max_retry=0)
+    try:
+        with qtbot.waitSignal(mgr.kill_finished, timeout=3000) as result:
+            mgr.kill_jobs(["bad-id"])
+        report = result.args[1]
+        assert not any("internal:" in error for error in report.errors), report
+        assert report.unconfirmed == 1
+    finally:
+        mgr.shutdown()

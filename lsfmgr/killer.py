@@ -257,23 +257,32 @@ class _KillTask(QRunnable):
 
         plan = self._make_plan()
         calls = unconfirmed = retries = 0
+        accepted: set = set()
         resolved: set = set()
         strategies: List[str] = []
         if plan.targets:
-            calls, unconfirmed, retries, resolved = self._kill_confirm(
-                plan.targets, errors)
+            calls, unconfirmed, retries, accepted, resolved = \
+                self._kill_confirm(plan.targets, errors)
             strategies.append(plan.label)
 
         # verify는 잔존을 셀 때 target 문자열로 정확 매칭한다 — job_id만으로
         # 세면 element 1개 kill에 형제 element가 잔존으로 오집계된다.
+        # '이미 끝났다'는 응답(해소됐지만 미수락)이 있으면 verify 없이도
+        # 조회한다 — 그 job은 마킹 대상이 아니라 실제 종료 상태(DONE/EXIT)를
+        # Store에 반영해야 terminal이 된다.
         still_alive: Optional[int] = None
         alive_keys: set = set()
         verify_changed: List = []
-        if self.verify:            # jobset이 없으면 직접 조회로 검증한다.
+        gone = resolved - accepted
+        if self.verify or gone:                  # jobset이 없으면 직접 조회
             still_alive, alive_keys, verify_changed = \
                 self._verify(set(plan.targets))                        # ③
+            if gone and not self.jobset_id:
+                # 전역 경로의 직접 조회는 Store를 갱신하지 않는다 — 추적
+                # 레코드가 있는 jobset은 폴링 파이프라인으로 종료 상태를 반영한다.
+                verify_changed += self._refresh_tracked()
 
-        changed = self._mark_killed(plan, resolved, alive_keys)
+        changed = self._mark_killed(plan, accepted, alive_keys)
         # verify로 terminal이 된 레코드도 갱신 배치에 포함한다.
         # 동일 job은 마킹까지 반영한 마지막 레코드만 발행한다.
         changed = list({(r.jobset_id, r.job_key): r
@@ -284,6 +293,23 @@ class _KillTask(QRunnable):
             still_alive=still_alive, unconfirmed=unconfirmed,
             kill_retries=retries, changed=changed,
             errors=errors)
+
+    def _refresh_tracked(self) -> List:
+        """전역 kill 대상 중 추적 레코드가 있는 jobset을 조회해 Store를 갱신한다.
+        반환: 전이된 레코드. 조회 실패는 보류(폴링이 이어서 반영)."""
+        k = self.killer
+        try:
+            jobset_ids = {r.jobset_id for r in self._record_pool()}
+        except Exception as e:           # noqa: BLE001 — 부기용 조회다
+            log.warning("kill 후 상태 반영용 레코드 조회 실패(무시): %r", e)
+            return []
+        changed: List = []
+        for jsid in sorted(jobset_ids):
+            try:
+                changed += list(k.querier.query(jsid, fresh=True).changed)
+            except LsfmgrError as e:
+                log.warning("kill 후 상태 반영 조회 실패: %s (%s)", jsid, e)
+        return changed
 
     def _quiesce(self, scope, errors: List[str]) -> None:
         """① kill 우선권 — barrier를 올리고 그 범위의 제출이 멎기를 기다린다.
@@ -314,19 +340,20 @@ class _KillTask(QRunnable):
             log.warning("%s: %s", msg, self.jobset_id)
             errors.append(msg)
 
-    def _mark_killed(self, plan: _KillPlan, resolved: set,
+    def _mark_killed(self, plan: _KillPlan, accepted: set,
                      alive_keys: set) -> List:
         """⑤ "내가 죽였다"를 레코드에 남긴다. 반환: 종료 상태 갱신분.
 
-        **확인된 target만** 마킹한다(errors 유무와 무관) — 미확인분은 on-LSF로
-        남아 폴링/재kill이 처리한다. verify가 실측한 생존분은 제외해 EXIT로
-        덮어 숨기지 않는다.
+        **신호가 수락된 target만** 마킹한다(errors 유무와 무관) — 미확인분은
+        on-LSF로 남아 폴링/재kill이 처리하고, '이미 끝났다'로 해소된 분은 이
+        kill이 끝낸 것이 아니라 조회가 실제 종료 상태를 반영한다. verify가
+        실측한 생존분은 제외해 EXIT로 덮어 숨기지 않는다.
 
         정책과 무관하게 killed 표식은 남긴다: optimistic은 EXIT 전이까지,
         actual은 표식만(전이는 폴링이 실측으로). 어느 쪽이든 "내가 죽였다"는
         지금만 알 수 있는 사실이다.
         """
-        if not resolved:
+        if not accepted:
             return []
         recs = plan.recs
         if recs is None:
@@ -338,7 +365,7 @@ class _KillTask(QRunnable):
                 log.warning("kill 마킹용 레코드 조회 실패(무시): %r", e)
                 return []
         killed = [r for r in recs
-                  if r.job_id is not None and plan.rec_target(r) in resolved
+                  if r.job_id is not None and plan.rec_target(r) in accepted
                   and r.job_key not in alive_keys]
         optimistic = self.killer.command.config.kill_status_policy == "optimistic"
         changed = []
@@ -438,33 +465,37 @@ class _KillTask(QRunnable):
         return sts
 
     def _kill_confirm(self, targets: List[str],
-                      errors: List[str]) -> Tuple[int, int, int, set]:
+                      errors: List[str]) -> Tuple[int, int, int, set, set]:
         """concrete-id kill — bkill 출력의 확인('is being terminated' 등)을
         보고 미확인분을 재시도한다 (submit retry와 대칭).
-        반환: (LSF 호출 횟수, 최종 미확인 수, 재시도 라운드 수, 해소된 id 집합)."""
+        반환: (LSF 호출 횟수, 최종 미확인 수, 재시도 라운드 수,
+        신호가 수락된 target 집합, 해소된 target 집합)."""
         k = self.killer
         cfg = k.command.config
         total = len(targets)
         pending = set(targets)
+        accepted_all: set = set()
         resolved_all: set = set()
         calls = 0
         attempt = 0
         while True:
             # 자식 확인 행 수가 아니라 요청한 target 중 해소된 수를 센다.
             base = total - len(pending)
-            resolved, c, timed_out = k.command.bkill_targets_confirm(
+            resolved, accepted, c, timed_out = k.command.bkill_targets_confirm(
                 sorted(pending),
                 on_progress=lambda done: self._emit_progress(
                     base + done, total))
             calls += c
             resolved_all |= resolved
+            accepted_all |= accepted
             pending -= resolved
             # timeout은 bkill 클라이언트만 중단한다. 접수된 요청이 처리됐는지 조회한 뒤 재시도한다.
             unknown = timed_out & pending
             if unknown:
-                gone, qc = self._confirm_by_query(unknown)
+                gone, by_kill, qc = self._confirm_by_query(unknown)
                 calls += qc
                 resolved_all |= gone
+                accepted_all |= by_kill
                 pending -= gone
             if not pending or attempt >= cfg.kill_max_retry:
                 break
@@ -478,12 +509,20 @@ class _KillTask(QRunnable):
                    f"(재시도 {attempt}회 후): {sorted(pending)[:20]}")
             log.error(msg)
             errors.append(msg)
-        return calls, len(pending), attempt, resolved_all
+        # 마킹 근거 = 수락 이력이 있고 **최종적으로** 해소된 target. 수락됐지만
+        # 미해소로 남은 부모(형제 element 실패)는 마킹하지 않는다 — 살아있는
+        # element를 EXIT로 덮어 폴링에서 빼면 안 된다.
+        return (calls, len(pending), attempt,
+                accepted_all & resolved_all, resolved_all)
 
-
-    def _confirm_by_query(self, targets: set) -> Tuple[set, int]:
+    def _confirm_by_query(self, targets: set) -> Tuple[set, set, int]:
         """생사 재조회로 '해소'를 판정한다 — bkill이 시간 내 반환하지 않은
-        target 전용. 반환: (죽은 것으로 확인된 target 집합, LSF 호출 수).
+        target 전용. 반환: (죽은 것으로 확인된 target 집합, 그중 이 kill이
+        끝낸 것으로 볼 target 집합, LSF 호출 수).
+
+        bkill 요청은 이미 mbatchd에 접수됐으므로, 사라졌거나 EXIT로 보이는
+        job은 방금 보낸 kill이 끝낸 것이다(마킹 근거). DONE으로 보이는
+        것만 자연 종료다 — 마킹하지 않고 조회가 상태를 반영한다.
 
         **모호하면 해소로 치지 않는다** — 여기서 잘못 "죽었다"고 접으면 그
         target은 재시도 대상에서 빠져 살아있는 job이 kill을 빠져나간다.
@@ -498,17 +537,17 @@ class _KillTask(QRunnable):
         pids = sorted({p for p in map(target_parent_id, targets)
                        if p is not None})
         if not pids:
-            return set(), 0
+            return set(), set(), 0
         try:
             # fresh — 방금 kill을 쏜 job의 생사는 캐시로 답할 수 없다
             sts, failed = self.killer.command.bjobs_by_ids(pids, fresh=True)
         except Exception as e:               # noqa: BLE001 — 부기용 조회다
             log.warning("kill timeout 후 생사 조회 실패(재시도로 넘김): %r", e)
-            return set(), 1
+            return set(), set(), 1
         rows: Dict[int, List] = {}
         for st in sts:
             rows.setdefault(st.job_id, []).append(st)
-        gone = set()
+        gone, by_kill = set(), set()
         for t in targets:
             pid = target_parent_id(t)
             if pid is None or pid in failed:
@@ -516,6 +555,7 @@ class _KillTask(QRunnable):
             mine = rows.get(pid)
             if not mine:
                 gone.add(t)                  # LSF가 그 id를 모른다 = 끝났다
+                by_kill.add(t)
                 continue
             # target 하나씩 분류한다 — 범위("id[m-n]")도 규칙 소유자
             # (classify_targets)가 그대로 해석하게 한다.
@@ -523,12 +563,18 @@ class _KillTask(QRunnable):
             if (exact or ranges) and any(st.array_index is None
                                          for st in mine):
                 continue                     # ② 접힌 행 — element 판정 불가
-            if not self._alive_in(mine, whole, exact, ranges):
+            hit = self._matching(mine, whole, exact, ranges)
+            if not any(st.state.is_on_lsf for st in hit):
                 gone.add(t)
+                # 선택한 target 행만 본다 — 선택하지 않은 형제 element의
+                # DONE이 이 target의 kill 근거를 지우면 안 된다. 전부 DONE이면
+                # 자연 종료, 하나라도 EXIT(또는 행 없음)면 이 kill이 끝낸 것.
+                if not hit or any(st.state is not JobState.DONE for st in hit):
+                    by_kill.add(t)
         if gone:
             log.info("bkill 중단분 %d건은 조회 결과 이미 죽었습니다 — "
                      "재시도하지 않습니다", len(gone))
-        return gone, 1
+        return gone, by_kill, 1
 
     def _verify(self, targets: set) -> Tuple[Optional[int], set, List]:
         """재조회로 실제 종료 확인 — 잔존을 센다.
@@ -547,9 +593,15 @@ class _KillTask(QRunnable):
             return self._verify_in_jobset(whole, exact, ranges)
         return self._verify_global(whole, exact, ranges)
 
+    @classmethod
+    def _alive_in(cls, pool, whole, exact, ranges) -> List:
+        """잔존 판정 공용 술어 — target에 매칭되는 행 중 아직 LSF에 있는 것."""
+        return [r for r in cls._matching(pool, whole, exact, ranges)
+                if r.state.is_on_lsf]
+
     @staticmethod
-    def _alive_in(pool, whole, exact, ranges) -> List:
-        """잔존 판정 공용 술어 — JobRecord/JobStatus 어느 풀에도 적용.
+    def _matching(pool, whole, exact, ranges) -> List:
+        """target 매칭 공용 술어 — JobRecord/JobStatus 어느 풀에도 적용.
 
         element/범위 target은 (job_id, array_index)로 정확 매칭한다.
         array_index=None 레코드(비array job, 또는 monitor가 array를 접은
@@ -567,7 +619,7 @@ class _KillTask(QRunnable):
             return any(r.job_id == pid and lo <= r.array_index <= hi
                        for pid, lo, hi in ranges)
 
-        return [r for r in pool if hit(r) and r.state.is_on_lsf]
+        return [r for r in pool if hit(r)]
 
     def _verify_in_jobset(self, whole, exact, ranges
                           ) -> Tuple[Optional[int], set, List]:

@@ -82,7 +82,8 @@ class KillReport:
     requested: int                       # kill 대상 job 수
     strategies: List[str] = field(default_factory=list)   # 사용된 전략 순서
     command_calls: int = 0               # 실제 LSF 호출 횟수
-    still_alive: Optional[int] = None    # verify=True일 때 재조회 후 잔존 수
+    still_alive: Optional[int] = None    # 재조회 후 잔존 수 (verify=True, 또는
+                                         # '이미 끝남' 응답으로 조회한 경우) — None=미검증
     unconfirmed: int = 0                 # 재시도 후에도 kill 확인 못 한 수
     kill_retries: int = 0                # kill 재시도 라운드 수
     changed: List = field(default_factory=list)   # optimistic 정책에서 EXIT로

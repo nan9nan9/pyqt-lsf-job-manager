@@ -236,7 +236,7 @@ def test_bkill_targets_chunked(fake_lsf):
     cmd = LsfCommand(LsfConfig(chunk_size=500,
                                kill_chunk_size=20), fake_lsf)
     ids = [_submit(cmd, f"r {i}") for i in range(45)]
-    resolved, calls, _to = cmd.bkill_targets_confirm([str(i) for i in ids])
+    resolved, _acc, calls, _to = cmd.bkill_targets_confirm([str(i) for i in ids])
     assert calls == 3
     assert resolved == {str(i) for i in ids}
     assert fake_lsf.alive_jobs() == []
@@ -244,13 +244,13 @@ def test_bkill_targets_chunked(fake_lsf):
 
 def test_bkill_no_matching_job_is_ok(cmd):
     # 이미 없는 job kill — no-match는 '해소'로 분류 (재시도 불필요)
-    resolved, calls, _to = cmd.bkill_targets_confirm(["999999"])
+    resolved, _acc, calls, _to = cmd.bkill_targets_confirm(["999999"])
     assert "999999" in resolved and calls == 1
 
 
 def test_bkill_confirm_parses_terminating(cmd, fake_lsf):
     ids = [_submit(cmd, f"r {i}") for i in range(3)]
-    resolved, calls, _to = cmd.bkill_targets_confirm([str(i) for i in ids])
+    resolved, _acc, calls, _to = cmd.bkill_targets_confirm([str(i) for i in ids])
     assert calls == 1
     assert resolved == {str(i) for i in ids}        # 전부 'is being terminated'
 
@@ -265,7 +265,7 @@ def test_bkill_resolved_parser_variants():
         "Job <105[2]> is being terminated\n"
     )
     # bare 부모 105를 **요청했을 때만** element 응답에서 부모를 유도한다
-    resolved = _parse_bkill_resolved(
+    resolved, _acc = _parse_bkill_resolved(
         text, {"101", "102", "103", "104", "105"})
     assert resolved == {"101", "102", "103", "105[2]", "105"}
     assert "104" not in resolved
@@ -279,7 +279,7 @@ def test_element_kill_does_not_resolve_the_bare_parent():
     from lsfmgr.command import _parse_bkill_resolved
     text = ("Job <1000[3]> is being terminated\n"
             "Job <1000[9]>: No matching job found\n")
-    assert _parse_bkill_resolved(text, {"1000[3]", "1000[9]"}) == {
+    assert _parse_bkill_resolved(text, {"1000[3]", "1000[9]"})[0] == {
         "1000[3]", "1000[9]"}
 
 
@@ -292,7 +292,7 @@ def test_child_failure_vetoes_parent_success(reverse, success_id):
              "Job <1000[2]>: Failed to send signal: temporarily unavailable"]
     if reverse:
         lines.reverse()
-    resolved = _parse_bkill_resolved("\n".join(lines), {"1000"})
+    resolved, _acc = _parse_bkill_resolved("\n".join(lines), {"1000"})
     assert "1000" not in resolved
     assert "1000[2]" not in resolved
 
@@ -301,7 +301,7 @@ def test_bkill_confirm_array_parent_id(cmd, fake_lsf):
     """bare 부모 id로 array kill 시 element 확인 행이 부모 pending과 매칭돼
     한 라운드에 해소된다 (불필요 재시도 없음)."""
     jid = _submit(cmd, "run.sh", name="arr[1-4]")   # array 부모 id
-    resolved, calls, _to = cmd.bkill_targets_confirm([str(jid)])
+    resolved, _acc, calls, _to = cmd.bkill_targets_confirm([str(jid)])
     assert calls == 1
     assert str(jid) in resolved                     # 부모 id 해소됨
 

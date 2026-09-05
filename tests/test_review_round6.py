@@ -72,7 +72,7 @@ def test_whole_array_kill_still_resolves_from_element_replies(qtbot, manager):
     from lsfmgr.command import _parse_bkill_resolved
     text = ("Job <1000[0]> is being terminated\n"
             "Job <1000[1]> is being terminated\n")
-    assert _parse_bkill_resolved(text, {"1000"}) == {
+    assert _parse_bkill_resolved(text, {"1000"})[0] == {
         "1000[0]", "1000[1]", "1000"}
 
 

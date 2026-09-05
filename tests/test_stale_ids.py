@@ -115,3 +115,32 @@ def test_the_matrix_covers_every_dropping_api():
     assert CANDIDATES <= covered, f"표에 없는 경로: {sorted(CANDIDATES - covered)}"
     for name in CANDIDATES:
         assert hasattr(LsfJobManager, name), f"없는 API가 표에: {name}"
+
+
+def test_query_snapshot_older_than_removal_does_not_revive_the_id(mgr, qtbot):
+    """조회는 대상 스냅샷(store) → 관심 등록(bjobs_by_ids) 순서다. 그 사이에
+    삭제 API가 id를 버리면(forget) 늦은 등록이 그것을 되돌려 유령 id가 남는다
+    — 조회가 등록 뒤 스냅샷과 현재 레코드를 대조해 되돌린 id를 다시 버린다."""
+    js, ids = _submitted(qtbot, mgr, ["a", "b"])
+    real = mgr.querier.store
+    fired = []
+
+    class SnapshotThenRemove:
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def get_jobs(self, *args, **kwargs):
+            recs = real.get_jobs(*args, **kwargs)
+            if not fired:                        # 스냅샷 직후, 등록 전에 삭제
+                fired.append(1)
+                mgr.remove_jobs(js, ["a"], force=True)
+            return recs
+
+    mgr.querier.store = SnapshotThenRemove()
+    try:
+        mgr.querier.query(js.id)                 # main 스레드에서 직접 1회
+    finally:
+        mgr.querier.store = real
+    src = mgr.command.internal_status
+    assert fired and ids[0] not in src._interest, sorted(src._interest)
+    assert ids[1] in src._interest               # 남은 job은 그대로 추적
