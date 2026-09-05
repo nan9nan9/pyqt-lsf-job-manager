@@ -136,7 +136,10 @@ def start(foreground: bool = False) -> bool:
 
 
 def stop() -> bool:
-    """데몬을 종료한다. 실행 중이 아니면 False."""
+    """데몬을 종료한다. 미실행 또는 종료 대기 시간 초과면 False.
+
+    시간 초과 시 PID 파일을 보존하므로 is_running()으로 구분할 수 있다.
+    """
     pid = _read_pid()
     if pid is None or not is_running():
         return False
@@ -149,6 +152,8 @@ def stop() -> bool:
         if not is_running():
             break
         time.sleep(0.05)
+    if is_running():
+        return False
     if os.path.exists(config.PID_PATH):
         try:
             os.remove(config.PID_PATH)

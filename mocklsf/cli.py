@@ -813,6 +813,11 @@ def cmd_bgdel(argv: List[str]) -> int:
 
 def cmd_mocklsfd(argv: List[str]) -> int:
     action = argv[0] if argv else "status"
+    if action in ("stop", "restart", "reset"):
+        stopped = daemon.stop()
+        if daemon.is_running():
+            _err("mocklsfd failed to stop; daemon is still running")
+            return 1
     if action == "start":
         fg = "-f" in argv or "--foreground" in argv
         if daemon.start(foreground=fg):
@@ -822,13 +827,12 @@ def cmd_mocklsfd(argv: List[str]) -> int:
         _out("mocklsfd is already running")
         return 0
     if action == "stop":
-        if daemon.stop():
+        if stopped:
             _out("mocklsfd stopped")
             return 0
         _out("mocklsfd is not running")
         return 0
     if action == "restart":
-        daemon.stop()
         daemon.start()
         _out("mocklsfd restarted")
         return 0
@@ -837,7 +841,6 @@ def cmd_mocklsfd(argv: List[str]) -> int:
         return 0
     if action == "reset":
         # 상태 초기화 (개발/테스트 편의).
-        daemon.stop()
         for p in (config.DB_PATH, config.DB_PATH + "-wal",
                   config.DB_PATH + "-shm"):
             try:

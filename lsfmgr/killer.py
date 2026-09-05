@@ -25,8 +25,8 @@ log = logging.getLogger("lsfmgr.kill")
 
 @dataclass
 class _KillPlan:
-    """kill 대상 계획 — 세 진입 형태(원시 id / 상태 부분 / 전체)의 차이를
-    이 다섯 값으로 접어, 실행·부기 꼬리(confirm→마킹→verify)를 한 벌로
+    """kill 대상 계획 — 원시 id·선택 key / 전체의 차이를
+    이 다섯 값으로 접어, 실행·부기 꼬리(confirm→verify→마킹)를 한 벌로
     공유한다 (v10.1).
 
     recs=None은 '레코드 풀 미조회'라는 뜻 — 원시 id 경로는 풀을 confirm
@@ -107,14 +107,13 @@ class Killer(QObject):
 
     # ------------------------------------------------------------------
     def kill_jobset(self, jobset_id: str, *,
-                    only_state: Optional[JobState] = None,
                     verify: bool = False,
                     scope: Optional[object] = None) -> bool:
         """scope: KillScope (kill 우선권, manager가 SubmitGate로 배선).
         지정 시 worker에서 scope.acquire()로 barrier를 올려 진행 중 submit을
         취소·대기하고, kill 완료까지 새 submit 시작을 막는다.
         반환: task를 실제 띄웠으면 True(shutdown 무시=False)."""
-        return self._queue_kill(jobset_id, "kill", only_state=only_state,
+        return self._queue_kill(jobset_id, "kill",
                                 verify=verify, scope=scope)
 
     def kill_jobs(self, job_ids: Optional[Sequence] = None, *,
@@ -164,7 +163,6 @@ class Killer(QObject):
 class _KillTask(QRunnable):
 
     def __init__(self, killer: Killer, *, jobset_id: str,
-                 only_state: Optional[JobState] = None,
                  job_ids: Optional[List] = None,
                  job_keys: Optional[List[str]] = None,
                  verify: bool = False,
@@ -174,7 +172,6 @@ class _KillTask(QRunnable):
         self.setAutoDelete(True)
         self.killer = killer
         self.jobset_id = jobset_id
-        self.only_state = only_state
         self.job_ids = job_ids
         self.job_keys = job_keys       # 지연 해석 대상 (worker에서 job_ids로)
         self.verify = verify
@@ -186,9 +183,8 @@ class _KillTask(QRunnable):
 
     def run(self):
         target = (self.jobset_id or f"ids={len(self.job_ids or [])}")
-        mode = (f"only={self.only_state.value}" if self.only_state
-                else ("keys" if self.job_keys is not None
-                      else ("ids" if self.job_ids is not None else "전체")))
+        mode = ("keys" if self.job_keys is not None
+                else ("ids" if self.job_ids is not None else "전체"))
         log.info("kill 착수 %s (%s)", target, mode)
 
         try:
@@ -279,12 +275,14 @@ class _KillTask(QRunnable):
 
         changed = self._mark_killed(plan, resolved, alive_keys)
         # verify로 terminal이 된 레코드도 갱신 배치에 포함한다.
-        # verify → 마킹 순서로 합쳐 중복 시 최신 레코드가 뒤에 오게 한다.
+        # 동일 job은 마킹까지 반영한 마지막 레코드만 발행한다.
+        changed = list({(r.jobset_id, r.job_key): r
+                        for r in verify_changed + changed}.values())
         return KillReport(
             jobset_id=self.jobset_id, requested=plan.requested,
             strategies=strategies, command_calls=calls,
             still_alive=still_alive, unconfirmed=unconfirmed,
-            kill_retries=retries, changed=verify_changed + changed,
+            kill_retries=retries, changed=changed,
             errors=errors)
 
     def _quiesce(self, scope, errors: List[str]) -> None:
@@ -318,7 +316,7 @@ class _KillTask(QRunnable):
 
     def _mark_killed(self, plan: _KillPlan, resolved: set,
                      alive_keys: set) -> List:
-        """⑤ "내가 죽였다"를 레코드에 남긴다. 반환: EXIT로 전이된 레코드.
+        """⑤ "내가 죽였다"를 레코드에 남긴다. 반환: 종료 상태 갱신분.
 
         **확인된 target만** 마킹한다(errors 유무와 무관) — 미확인분은 on-LSF로
         남아 폴링/재kill이 처리한다. verify가 실측한 생존분은 제외해 EXIT로
@@ -342,12 +340,32 @@ class _KillTask(QRunnable):
         killed = [r for r in recs
                   if r.job_id is not None and plan.rec_target(r) in resolved
                   and r.job_key not in alive_keys]
-        if not killed:
-            return []
-        if self.killer.command.config.kill_status_policy == "optimistic":
-            return self._mark_exited(killed)     # EXIT + killed 표식
-        self._flag_killed(killed)                # 표식만 (전이는 폴링)
-        return []
+        optimistic = self.killer.command.config.kill_status_policy == "optimistic"
+        changed = []
+        for r in killed:
+            def same_job(cur, target=r):
+                return (cur._generation == target._generation
+                        and cur.job_id == target.job_id
+                        and cur.array_index == target.array_index)
+
+            try:
+                new = None
+                if optimistic:
+                    new = self.killer.store.transition(
+                        r.jobset_id, r.job_key, JobState.EXIT,
+                        fail_reason="KILLED", killed=True,
+                        guard=lambda cur: same_job(cur) and cur.state.is_on_lsf)
+                if new is None:
+                    # verify/폴링이 먼저 종료를 관측했어도 취소 근거는 남긴다.
+                    # 관측한 상태·exit_code는 그대로 보존한다.
+                    new = self.killer.store.transition(
+                        r.jobset_id, r.job_key, None, killed=True,
+                        guard=same_job)
+            except RECORD_GONE:
+                continue
+            if new is not None and (optimistic or new.state.is_terminal):
+                changed.append(new)
+        return changed
 
     def _make_plan(self) -> _KillPlan:
         """진입 형태별 kill 계획 산출 — _run_kill의 공유 꼬리에 공급한다."""
@@ -358,14 +376,6 @@ class _KillTask(QRunnable):
             targets = [str(i) for i in self.job_ids]
             return _KillPlan(None, targets, len(targets), self._id_str,
                              "chunk")
-        if self.only_state is not None:
-            # 부분 kill — 해당 상태 job만. array element는 반드시
-            # "id[idx]" 지정(parent id면 다른 상태 element까지 전부 죽는다).
-            # (bkill -stat은 LSF 버전 의존이라 결정적 방식을 기본으로 한다)
-            recs = k.store.get_jobs(self.jobset_id, states={self.only_state})
-            targets = [self._id_str(r) for r in recs if r.job_id is not None]
-            return _KillPlan(recs, targets, len(targets), self._id_str,
-                             f"chunk(state={self.only_state.value})")
         # 전체 kill은 배열의 모든 element를 포함하도록 부모 ID로 중복 제거한다.
         # verify도 부모 ID를 사용해 kill 중 재실행된 element를 확인한다.
         k.store.get_jobset(self.jobset_id)   # 존재 검증 (없으면 예외)
@@ -402,40 +412,6 @@ class _KillTask(QRunnable):
         return self.killer.store.find_jobs(
             {pid for pid in map(target_parent_id, self.job_ids or [])
              if pid is not None})
-
-    def _mark_exited(self, recs: List) -> List:
-        """확인된 kill 대상을 EXIT로 전이 (아직 on-lsf인 것만, guard로 CAS).
-        반환: 실제 전이된 레코드."""
-        changed = []
-        for r in recs:
-            # 전역 kill은 여러 jobset에 걸칠 수 있어 레코드의 jobset_id를 사용한다.
-            # bkill 이후 삭제된 레코드는 마킹을 생략하고 성공한 kill 결과를 보존한다.
-            try:
-                new = self.killer.store.transition(
-                    r.jobset_id, r.job_key, JobState.EXIT,
-                    fail_reason="KILLED", killed=True,
-                    guard=lambda cur: cur.state.is_on_lsf)
-            except RECORD_GONE:
-                continue
-            if new is not None:
-                changed.append(new)
-        return changed
-
-    def _flag_killed(self, recs: List) -> None:
-        """actual 정책 — 상태는 그대로 두고 killed 표식만 남긴다. EXIT 전이는
-        폴링/verify가 실측으로 하되, "이 EXIT은 내가 죽인 것"이라는 근거는
-        지금(kill 수용 확인 직후)만 알 수 있으므로 여기서 기록한다.
-
-        상태를 안 바꾸려고 현재 상태를 그대로 넘기고, guard로 스냅샷 이후
-        상태가 바뀌었으면(폴링과 경합) 건너뛴다 — 표식은 부기라 유실돼도
-        kill 자체나 상태 수렴에는 영향이 없다."""
-        for r in recs:
-            try:
-                self.killer.store.transition(
-                    r.jobset_id, r.job_key, r.state, killed=True,
-                    guard=lambda cur, s=r.state: cur.state is s)
-            except RECORD_GONE:
-                continue
 
     def _verify_direct(self, whole: set, exact: set,
                        ranges: List) -> Optional[List]:
@@ -474,7 +450,8 @@ class _KillTask(QRunnable):
         calls = 0
         attempt = 0
         while True:
-            base = len(resolved_all)         # 이번 라운드 시작 시 확인분
+            # 자식 확인 행 수가 아니라 요청한 target 중 해소된 수를 센다.
+            base = total - len(pending)
             resolved, c, timed_out = k.command.bkill_targets_confirm(
                 sorted(pending),
                 on_progress=lambda done: self._emit_progress(

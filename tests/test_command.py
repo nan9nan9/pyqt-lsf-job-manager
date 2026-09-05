@@ -283,6 +283,20 @@ def test_element_kill_does_not_resolve_the_bare_parent():
         "1000[3]", "1000[9]"}
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("success_id", ["1000", "1000[1]"])
+def test_child_failure_vetoes_parent_success(reverse, success_id):
+    from lsfmgr.command import _parse_bkill_resolved
+
+    lines = [f"Job <{success_id}> is being terminated",
+             "Job <1000[2]>: Failed to send signal: temporarily unavailable"]
+    if reverse:
+        lines.reverse()
+    resolved = _parse_bkill_resolved("\n".join(lines), {"1000"})
+    assert "1000" not in resolved
+    assert "1000[2]" not in resolved
+
+
 def test_bkill_confirm_array_parent_id(cmd, fake_lsf):
     """bare 부모 id로 array kill 시 element 확인 행이 부모 pending과 매칭돼
     한 라운드에 해소된다 (불필요 재시도 없음)."""

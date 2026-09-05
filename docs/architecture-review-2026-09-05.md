@@ -1,8 +1,8 @@
 # 아키텍처 및 결함 리뷰 — 2026-09-05
 
 검토 기준은 커밋 `521db95`다. 운영 Python 35개 파일(11,806줄), `bin` 명령
-진입점, 설정·문서와 관련 테스트를 검토했다. 이 기록은 분석 결과이며, 아래
-결함의 수정은 포함하지 않는다. 같은 날짜의 기존
+진입점, 설정·문서와 관련 테스트를 검토했다. 아래 분석·재현 결과는 수정 전
+기준이며, 후속 수정 내용은 마지막 절에 기록했다. 같은 날짜의 기존
 [리뷰·수정 기록](review-2026-09-05.md) 이후 상태를 대상으로 한다.
 
 핵심 모듈 구분은 타당하지만 kill 처리와 비동기 이벤트 전달에는 구조적
@@ -39,13 +39,14 @@
 QT_QPA_PLATFORM=offscreen python -m pytest -q --tb=short -o faulthandler_timeout=60
 ```
 
-[별도 재현 코드](repro_architecture_review.py)는 기대하는 정상 동작을 assertion으로
-표현한다. 기준 커밋에서 **6개 사례 모두 실패**하며, verify 두 정책이 같은
-결함을 각각 검증하므로 결함 수는 5개다. 기본 테스트 경로인 `tests/`와 분리한
-리뷰 자료이며, 실행하려면 저장소 루트에서 명시적으로 파일을 지정한다:
+[회귀 테스트](../tests/test_architecture_review.py)는 기대하는 정상 동작을
+assertion으로 표현한다. 최초 재현 코드의 **6개 사례 모두 기준 커밋에서 실패**했고,
+verify 두 정책이 같은 결함을 각각 검증하므로 결함 수는 5개다. 수정하면서
+`docs/repro_architecture_review.py`를 기본 테스트 경로인 `tests/`로 옮기고
+관련 경합·옵션 조합을 추가했다. 개별 실행 방법:
 
 ```bash
-QT_QPA_PLATFORM=offscreen python -m pytest -q docs/repro_architecture_review.py --tb=short
+QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_architecture_review.py --tb=short
 ```
 
 | 재현 사례 | 기준 커밋의 결과 |
@@ -57,9 +58,37 @@ QT_QPA_PLATFORM=offscreen python -m pytest -q docs/repro_architecture_review.py 
 | `test_stale_poll_cannot_override_replacement_signal` | 마지막 신호의 command가 교체 전 command |
 | `test_mock_daemon_stop_does_not_claim_success_while_alive` | 반환 True, 프로세스 생존, PID 파일 삭제 |
 
-기존 테스트에는 kill 옵션 조합과 실제 Qt 큐를 거치는 교체 경합 검증을 추가할
-필요가 있다. 결함 수정 시 재현 사례를 해당 기능의 회귀 테스트로 옮길 수 있다.
-
 실행 환경은 Python 3.12.1·PyQt5 5.15.10·qtpy 2.4.3이며
 `QT_QPA_PLATFORM=offscreen`을 사용했다. 실제 LSF 클러스터 및 다른 Qt 바인딩의
 런타임 동작은 이번 검증에 포함하지 않았다.
+
+## 후속 수정
+
+- 배열 응답의 성공·미해소 결과를 모은 뒤 부모 결과를 판정한다. 자식 하나라도
+  미해소면 부모가 재시도 대상으로 남으며 stdout/stderr 순서에 영향을 받지 않는다.
+  재시도 진행률도 자식 응답 수가 아닌 요청 대상 수로 계산해 100%를 넘지 않는다.
+- `only_state`는 Manager에서 요청 시 key를 선택하는 데만 사용한다. 이후에는
+  기존 선택 key kill 경로로 제출 종료를 기다리고 ID를 해석한다. Killer의
+  중복 상태 필터 분기를 제거했다.
+- 교체·재제출마다 바뀌고 일반 상태 전이에서는 유지되는 내부 실행 식별자
+  `JobRecord._generation`을 추가했다. `job_key`는 재사용되고 `job_id`는 제출
+  전에는 없으므로 두 값만으로 늦은 결과를 구분할 수 없었다. CompletionTracker의
+  기존 token은 JobSet 단위 후처리 무장용이므로 역할을 유지한다.
+  `jobs_updated`와 조회의 `job_lost`는 같은 필터로 삭제·이전 실행의 결과를
+  버리고, 요약은 전달 시점의 Store에서 읽는다. 이미 pacer가 접수한 정상
+  재제출 전이 순서는 유지하며, 교체 시에는 해당 key의 표시 대기열을 비운다.
+- kill 마킹을 한 경로로 모았다. 동일 실행·LSF ID인지 확인하고, verify/폴링이
+  먼저 기록한 종료 상태와 exit code를 보존하면서 `killed=True`를 부분 갱신한다.
+  verify와 마킹 결과는 job별 최종 레코드 한 건으로 합쳐 중복 발행을 막는다.
+- MockLSF 종료 대기 후에도 살아 있으면 False를 반환하고 PID 파일을 보존한다.
+  CLI의 stop/restart/reset은 종료 실패 시 오류 코드 1을 반환하며, 재기동이나
+  DB 초기화를 진행하지 않는다.
+
+기존 모듈 경계를 유지하고 위 결함에 필요한 대상 선택·마킹·신호 전달만 정리했다.
+
+검증 결과:
+
+- 기본 회귀 테스트 37개 추가: 기존 1,024개를 포함한 전체 **1,061개 통과**
+  (238.19초).
+- 마지막 배열 재시도 진행률 보완 후 관련 **163개 통과** (15.47초).
+- `git diff --check` 통과.

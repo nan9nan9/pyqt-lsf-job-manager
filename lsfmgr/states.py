@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import List, Optional
+from uuid import uuid4
 
 
 class JobState(Enum):
@@ -134,6 +135,10 @@ class JobRecord:
     # 사용자 정의 JSON 직렬화 가능 dict. 라이브러리는 해석하지 않는다.
     # frozen 레코드 내부를 직접 수정하지 말고 set_user_data로 교체한다.
     user_data: Optional[dict] = None
+    # 교체·새 제출마다 바뀌는 실행 식별자. 상태 전이에서는 유지한다.
+    # job_key는 재사용되고 job_id는 제출 전에는 없으므로 늦은 신호를 구별할 수 없다.
+    _generation: str = field(default_factory=lambda: uuid4().hex,
+                             repr=False, compare=False)
 
 
 @dataclass(frozen=True)

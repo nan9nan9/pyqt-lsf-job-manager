@@ -103,7 +103,7 @@ class StatePacer(QObject):
 
     def forget(self, jobset_id: str,
                job_keys: Optional[List[str]] = None) -> None:
-        """사라진 job(remove/clear)·jobset(remove_jobset)의 보류분을 버린다.
+        """사라지거나 교체된 job·jobset의 보류분을 버린다.
         안 버리면 dwell 창(최대 dwell초) 안에 지워진 job의 전이가 뒤늦게
         발화돼, job_key로 행을 채우는 표에 삭제된 행이 되살아난다.
         job_keys=None이면 그 jobset 전체."""

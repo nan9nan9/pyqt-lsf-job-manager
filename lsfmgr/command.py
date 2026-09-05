@@ -202,21 +202,22 @@ def _parse_bkill_resolved(text: str, requested: "set[str]") -> "set[str]":
 
     requested는 이번 chunk에 **실제로 넘긴** target 집합이다 — element 응답
     행에서 bare 부모 id를 유도할지 말지가 여기에 달렸다(아래)."""
-    resolved = set()
+    resolved, unresolved = set(), set()
     for line in text.splitlines():
         m = _BKILL_LINE_RE.search(line)
         if not m:
             continue
         jid, msg = m.group(1), m.group(2).lower()
-        if any(p in msg for p in _BKILL_RESOLVED_MSGS):
-            resolved.add(jid)
-            # 부모 전체를 요청한 경우에만 element 응답을 부모 수락으로 집계한다.
-            # element 하나의 수락을 배열 전체 종료로 해석하면 안 된다.
-            if "[" in jid:
-                parent = jid.split("[", 1)[0]
-                if parent in requested:
-                    resolved.add(parent)
-    return resolved
+        outcome = (resolved if any(p in msg for p in _BKILL_RESOLVED_MSGS)
+                   else unresolved)
+        outcome.add(jid)
+        # 부모 전체를 요청한 경우에만 element 응답을 부모 판정에 집계한다.
+        if "[" in jid:
+            parent = jid.split("[", 1)[0]
+            if parent in requested:
+                outcome.add(parent)
+    # stdout/stderr의 순서와 무관하게 element 하나라도 미해소면 부모를 재시도한다.
+    return resolved - unresolved
 
 
 def _parse_run_time(s: str) -> Optional[int]:

@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Dict, List, Optional, Sequence
+from uuid import uuid4
 
 from .command import LsfCommand
 from .config import LsfConfig
@@ -375,6 +376,7 @@ class BulkSubmitter(QObject):
                     ctx.jobset_id, key, JobState.SUBMITTING,
                     job_id=None, exit_code=None, fail_reason=None,
                     fail_message=None, killed=False,
+                    _generation=uuid4().hex,
                     retry_count=0, command=self._item_command(item),
                     submit_time=None, run_time_s=None, start_time=None,
                     finish_time=None,

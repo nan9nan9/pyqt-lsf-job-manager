@@ -172,7 +172,7 @@ class LsfJobManager(QObject):
 
         self.polling = PollingService(self.querier, parent=self)
         self.polling.updated.connect(self._on_poll_updated)
-        self.polling.lost.connect(self.job_lost)
+        self.polling.lost.connect(self._on_poll_lost)
         self.polling.error.connect(self.error_occurred)
 
         self.killer = Killer(self.store, self.command, self.querier,
@@ -458,7 +458,9 @@ class LsfJobManager(QObject):
         중이면 멈추고(미착수분 CANCELLED 확정), 이미 wrapper가 돌면 job_id
         확보를 기다렸다가 죽인다. 대상 아닌 job의 제출은 계속된다.
         jobset의 제출 자체를 통째로 멈추려면 `mgr.cancel_submit(js)`를
-        먼저 부른다(취소는 되돌려지지 않으므로 순서만 지키면 된다)."""
+        먼저 부른다(취소는 되돌려지지 않으므로 순서만 지키면 된다).
+        only_state는 요청 시 대상 key를 선택하는 조건이다. 대기 중 상태가
+        바뀌어도 선택은 유지하고, 제출 완료 후 확보한 ID로 kill한다."""
         jobset_id = self._jsid(jobset_id)
         if self._shutdown_done:
             # shutdown 후 kill은 join되지 않는 worker를 만들고 kill_started만
@@ -469,7 +471,6 @@ class LsfJobManager(QObject):
             verify = self.config.verify_kill
         # 전체 kill은 None, 부분 kill은 해당 key 집합으로 barrier를 건다.
         # 기존 제출은 취소·대기하고, 이후 제출 등록은 barrier 범위에서 거부한다.
-        keys: Optional[List[str]] = None
         if only_state is not None:
             try:
                 keys = [r.job_key for r in
@@ -478,9 +479,11 @@ class LsfJobManager(QObject):
                 # jobset이 없다 — 어차피 killer가 같은 예외로 보고한다.
                 # 여기서 터뜨리면 kill_started/finished 짝이 깨진다.
                 keys = []
-        scope = self._gate.kill_scope(jobset_id, keys)
+            self._kill_selected(jobset_id, keys, verify)
+            return
+        scope = self._gate.kill_scope(jobset_id, None)
         queued = self._launch_kill(scope, lambda: self.killer.kill_jobset(
-            jobset_id, only_state=only_state, verify=verify, scope=scope))
+            jobset_id, verify=verify, scope=scope))
         if queued:
             self.kill_started.emit(jobset_id)
 
@@ -863,6 +866,8 @@ class LsfJobManager(QObject):
             # 교체분은 job_key가 유지되므로 추적 장부를 리셋해야 새 내용에
             # handler/LOST 판정이 정상 동작한다. 추가분은 장부가 없어 no-op.
             keys = [r.job_key for r in changed]
+            if self._pacer is not None:
+                self._pacer.forget(jobset_id, keys)
             self._rearm_tracking(jobset_id, keys,
                                  [before[k] for k in keys if before.get(k)])
             self._relay_jobs_changed(jobset_id, list(changed))
@@ -1271,26 +1276,40 @@ class LsfJobManager(QObject):
     def _on_poll_updated(self, jobset_id: str, summary: dict,
                          changed: list) -> None:
         """polling 결과 relay — 요약 + 변경분 batch. 이어서 등록된
-        handler를 평가한다 — Store가 방금 갱신됐으므로 handler는 최신 상태를
-        본다 (handler는 폴링 사이클에 tie돼 있음)."""
+        handler를 평가한다. Qt 큐에서 대기하는 동안 Store가 바뀔 수 있으므로
+        요약과 handler 판정은 전달 시점의 Store를 사용한다."""
         if self._shutdown_done:
             # 명시적 shutdown() 후 main 큐에 남아 있던 polling.updated —
             # 여기서 신호를 중계하거나 post_pool에 새 task를 시작하면
             # 이미 drain된 pool에 join되지 않는 스레드가 생긴다
             return
-        self.jobset_updated.emit(jobset_id, summary)
+        self._emit_summary(jobset_id)
         if changed:
             self._emit_jobs(jobset_id, changed)
         self.handlers.tick(jobset_id)
         self._completion.maybe_finish(jobset_id)
+
+    def _on_poll_lost(self, jsid: str, record: JobRecord) -> None:
+        if not self._shutdown_done and self._current_records(jsid, [record]):
+            self.job_lost.emit(jsid, record)
+
+    def _current_records(self, jsid: str, records: list) -> list:
+        """Qt 큐에서 기다린 결과 중 아직 같은 실행에 속한 레코드만 남긴다.
+
+        같은 실행의 과거 상태는 표시해야 하므로 updated_at/현재 상태로
+        거르지 않는다. 교체·재제출·삭제 전 결과만 전달 경계에서 버린다.
+        """
+        current = self.store.get_jobs_by_keys(jsid, [r.job_key for r in records])
+        return [r for r in records if r.job_key in current
+                and r._generation == current[r.job_key]._generation]
 
     def _emit_jobs(self, jsid: str, records: list) -> None:
         """jobs_updated 발화 **단일 지점** — min_state_dwell_s가 켜져 있으면
         pacer가 job별 dwell을 채운 뒤 대신 발화한다. 켜져 있어도 요약
         (jobset_updated)과 pull(get_jobs)은 늦추지 않는다 — 요약은 store에서
         바로 계산되므로, dwell 동안 배지 카운트가 표보다 앞선다(의도된 시차)."""
-        # 삭제 후 도착한 배치가 UI 행과 pacer 상태를 되살리지 않도록 버린다.
-        if not self.store.exists(jsid):
+        records = self._current_records(jsid, records)
+        if not records:
             return
         if self._pacer is None:
             self.jobs_updated.emit(jsid, records)
@@ -1337,7 +1356,7 @@ class LsfJobManager(QObject):
         """kill 완료 시 상태 반영을 update Signal로 발화. optimistic 정책이면
         EXIT로 전이된 job(report.changed)을 jobs_updated로, 그리고 요약을
         jobset_updated로 — 폴링 없이도 UI가 kill 결과를 즉시 본다.
-        (actual 정책이면 changed가 비어 요약만 나가고, 실제 EXIT는 폴링/verify로)
+        (actual 정책의 종료 전이는 폴링/verify의 관측 결과로만 발행한다.)
 
         kill_jobs(전역)는 changed가 여러 JobSet에 걸칠 수 있어 jobset별로 묶어
         발화한다."""
