@@ -21,27 +21,35 @@
 
 ---
 
-## 1. Quick Start — 3줄이면 끝
+## 1. Quick Start
+
+Qt 앱의 이벤트 루프가 실행되는 환경에서 사용합니다. 아래 `customwrapper_sub`는
+LSF에 제출하고 `Job <id>`를 출력하는 사이트의 제출 wrapper로 바꾸세요.
 
 ```python
 from lsfmgr import LsfJobManager
 
 mgr = LsfJobManager()
-js = mgr.create_jobset([f"mytool run_{i}.sp" for i in range(5000)], label="sweep")
+js = mgr.create_jobset(
+    [f"customwrapper_sub run_{i}.sp" for i in range(5000)],
+    job_keys=[f"run_{i}" for i in range(5000)], label="sweep")
+js.jobset_updated.connect(
+    lambda s: print(f"RUN={s.get('RUN', 0)} DONE={s.get('DONE', 0)}/{s['total']}"))
 mgr.submit(js)                                              # jobset 기준 제출
-js.jobset_updated.connect(lambda s: print(f"RUN={s['RUN']} DONE={s['DONE']}/{s['total']}"))
 ```
 
 이것만으로:
-- 5,000개 job이 병렬 submit되고 (worker 32, 실패 시 3회 재시도)
+- 5,000개 job이 병렬 submit되고 (worker 8, 실패 시 3회 재시도)
 - polling이 자동 시작되어 (10초 주기) 요약이 `js.jobset_updated`로 도착하고
 - 전부 끝나면 polling도 자동 중지됩니다
 - 앱 종료 시 스레드 정리(`shutdown`)도 자동입니다
 
 > **API 계약**: 제어 API(submit/kill/polling)는 전부 **즉시 반환(비동기)**,
 > 결과는 Signal로 도착합니다. 조회 프로퍼티(summary/jobs)는 **동기**지만
-> 로컬 스냅샷만 읽으므로 ms 단위입니다 (LSF 호출 없음). GUI가 멈추는
-> public API는 없습니다.
+> 로컬 스냅샷만 읽으므로 ms 단위입니다 (LSF 호출 없음).
+> `shutdown()`은 예외로, 진행 중 작업과 스레드의 종료를 기다립니다. 기본 조회
+> subprocess는 취소되며, 사용자 지정 `Runner`는 전달받은 timeout을 지켜
+> 반환해야 합니다.
 
 ---
 

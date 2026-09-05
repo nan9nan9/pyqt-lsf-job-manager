@@ -69,10 +69,7 @@ def default_row(job: Job, wide: bool = False) -> str:
     job_name = job.job_name
 
     if not wide:
-        # 폭 초과분 truncation.
-        # JOBID 는 자르지 않는다: array id('1001[10]')나 큰 job id(8자리+)를
-        # 자르면 id 자체가 깨져 앱 파싱이 실패한다. 실제 LSF 도 JOBID 는
-        # 폭을 넘겨 표시(overflow)하므로 %-7s 의 자연스러운 동작에 맡긴다.
+        # JOBID는 배열 표기와 큰 ID가 손상되지 않도록 폭을 넘어도 자르지 않는다.
         user = user[: _WIDTHS["user"]]
         queue = queue[: _WIDTHS["queue"]]
         from_host = from_host[: _WIDTHS["from_host"]]
@@ -191,10 +188,8 @@ def _field_value(job: Job, name: str) -> str:
     return "-"
 
 
-# -o 스펙 안에 섞여 들어오는 delimiter 키워드.
-#   실제 LSF:  bjobs -o "jobid stat queue delimiter='^'"
-# 작은/큰따옴표, 따옴표 없는 형태, 그리고 앞에 대시가 붙은 형태(-delimiter=)
-# 까지 허용한다. 토큰 경계(앞이 공백/시작)에서만 매칭한다.
+# -o 내부의 delimiter='^' 표기. 따옴표 유무와 -delimiter= 형식을 허용한다.
+# 다른 필드의 일부와 일치하지 않도록 토큰 경계에서만 매칭한다.
 _DELIM_RE = re.compile(
     r"""(?<!\S)-?delimiter=(?:'([^']*)'|"([^"]*)"|(\S+))""",
     re.IGNORECASE,

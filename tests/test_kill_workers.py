@@ -304,8 +304,34 @@ def test_bkill_pool_is_closed_after_the_killer(qtbot, fake_lsf):
     assert not left, left
 
 
-def test_serial_mode_creates_no_pool():
-    """kill_workers=1이면 스레드를 아예 안 만든다."""
+@pytest.mark.parametrize("workers", [1, 4])
+def test_idle_kill_pool_creates_no_threads(workers):
+    """실제 kill 전에는 직렬·병렬 모두 스레드를 만들지 않는다."""
     from lsfmgr.command import LsfCommand
-    assert LsfCommand(LsfConfig(kill_workers=1))._bkill_pool is None
-    assert LsfCommand(LsfConfig(kill_workers=4))._bkill_pool is not None
+    before = set(threading.enumerate())
+    command = LsfCommand(LsfConfig(kill_workers=workers))
+    try:
+        assert set(threading.enumerate()) <= before
+    finally:
+        command.shutdown_bkill_pool()
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+@pytest.mark.parametrize("sizes", [(1,) * 8, (1, 8, 1, 8, 1, 8)])
+def test_global_limit_includes_single_chunks(qtbot, fake_lsf, workers, sizes):
+    """단일 chunk 직접 실행과 풀 실행이 겹쳐도 같은 상한을 지킨다."""
+    runner = _WatchBkill(fake_lsf, delay=0.05)
+    mgr = LsfJobManager(config=LsfConfig(kill_workers=workers,
+                                       kill_chunk_size=2), runner=runner)
+    reports = []
+    mgr.kill_finished.connect(lambda jsid, report: reports.append(report))
+    try:
+        for i, size in enumerate(sizes):
+            # 없는 id도 no-match로 정상 해소된다 — 제출 타이밍과 독립된 검증.
+            mgr.kill_jobs(list(range(1000 + i * 10, 1000 + i * 10 + size)))
+        qtbot.waitUntil(lambda: len(reports) == len(sizes), timeout=10000)
+        assert runner.peak <= workers
+        assert runner.calls == sum((n + 1) // 2 for n in sizes)
+        assert all(not r.errors and r.unconfirmed == 0 for r in reports)
+    finally:
+        mgr.shutdown()

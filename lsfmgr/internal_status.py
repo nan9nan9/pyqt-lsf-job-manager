@@ -88,11 +88,7 @@ _TIME_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d")
 #: "값 없음"으로 볼 문자열 — REST 구현마다 null 표기가 다르다.
 _EMPTY = ("", "-", "null", "none", "nil", "n/a")
 
-#: LSF 표기가 아닌 상태 문자열의 별칭 — 확실한 것만 넣는다.
-#: 애매한 값(예: "FINISHED")은 일부러 뺐다: DONE으로 접으면 실제로 실패한
-#: job이 성공으로 보고돼 post_process가 잘못 돈다. 모르는 값은 UNKWN으로
-#: 두고 **경고를 낸다** — 조용히 넘기면 UNKWN이 non-terminal이라 폴링이
-#: 영영 안 멈추고 jobset_finished/post_process가 발화하지 않는다.
+#: 의미가 확실한 상태 별칭만 허용한다. 모호한 값은 경고 후 UNKWN으로 두어 성공 오판을 막는다.
 _STAT_ALIASES = {
     "RUNNING": JobState.RUN,
     "PENDING": JobState.PEND,
@@ -139,6 +135,8 @@ def _split_tz(text: str) -> Tuple[str, Optional[timezone]]:
     if tail == "Z":
         return body, timezone.utc
     digits = tail[1:].replace(":", "")
+    if int(digits[:2]) >= 24 or int(digits[2:]) >= 60:
+        raise ValueError("잘못된 타임존 오프셋")
     delta = timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
     return body, timezone(-delta if tail[0] == "-" else delta)
 
@@ -164,7 +162,10 @@ def parse_time(value) -> Optional[datetime]:
                 ticks / 1000.0 if len(text) == 13 else ticks)
         except (OverflowError, OSError, ValueError):
             return None
-    body, tz = _split_tz(text)
+    try:
+        body, tz = _split_tz(text)
+    except ValueError:
+        return None
     date_part, sep, time_part = body.partition("T")
     if not sep:
         date_part, _, time_part = body.partition(" ")
@@ -315,10 +316,7 @@ def parse_internal_jobs(payload, now: Optional[datetime] = None,
             out.append(st)
     dropped = len(jobs) - parsed
     if jobs and not parsed:
-        # **전멸**은 형식 불일치다(예: dataId 표기가 다른 사이트). 이걸 빈
-        # 결과로 돌려주면 정상 응답 "없음"과 구별되지 않아, 유예가 끝나는
-        # 대로 전 job이 LOST(되돌릴 수 없음)로 확정된다. 조회 장애로 올려
-        # 판단을 보류시킨다.
+        # 모든 행의 파싱 실패는 job 부재가 아닌 조회 장애다. LOST 판정을 보류한다.
         raise ValueError(
             f"internal status 응답 {len(jobs)}건을 한 건도 해석하지 못했습니다 "
             f"— 형식 불일치로 보입니다 (첫 항목 키: {sorted(jobs[0])[:8]})"
@@ -341,9 +339,11 @@ class _Entry:
 
     seen_at은 finish_time이 없는 종료 job의 만료 폴백이다. payload가
     finishTime을 안 주는 사이트에서 DONE/EXIT이 영원히 쌓이는 것을 막는다.
+    fetched_at은 조회 시작 시각(monotonic)으로 늦게 온 응답의 역전을 막는다.
     """
     status: Any
     seen_at: datetime
+    fetched_at: float
 
 
 class InternalStatusSource:
@@ -380,12 +380,7 @@ class InternalStatusSource:
         #: 건강 판정 — 마지막으로 끝난 조회의 결과 (fetcher_state()).
         self._health = FetcherState.IDLE
         self._health_at = float("-inf")          # 판정의 늦은 쓰기 술어용 시계
-        #: 이 간격 안에 다시 들어온 조회는 콜백을 다시 돌리지 않는다.
-        #: refresh_min_s=None이면 **자동** — 실제 폴링 주기의 절반을 따라간다
-        #: (note_poll_interval). 앱이 값을 명시하면 그 값을 지킨다.
-        #: "자동인가"를 따로 받지 않고 여기서 판정하는 이유: 예전엔 호출자가
-        #: 같은 config 필드에서 값과 플래그를 **각각** 유도해 넘겨, 둘이
-        #: 어긋날 수 있는 구조였다.
+        #: None이면 폴링 주기의 절반을 자동 적용하고, 명시값이 있으면 그대로 사용한다.
         self._explicit = refresh_min_s is not None
         self._refresh_min_s = (float(refresh_min_s) if self._explicit
                                else max(0.0, float(poll_interval_s)) / 2.0)
@@ -397,12 +392,7 @@ class InternalStatusSource:
         self._wait_timeout_s = max(1.0, float(wait_timeout_s))
         #: 종료 job 보존 기간 — 넘으면 원장에서 버린다.
         self._retention = timedelta(days=max(0.0, float(retention_days)))
-        #: 증분 payload에 안 온 진행 중 job의 경과시간을 매 조회마다 갱신할지
-        #: (= config.poll_runtime_updates). 꺼져 있으면 monitor가 run_time
-        #: 변화를 갱신 대상으로 보지 않으므로 그 갱신은 통째로 버려진다 —
-        #: 원장 전수 스캔 + JobStatus/_Entry 재생성을 조회마다 하는 값이
-        #: 아무 데도 안 쓰인다(2만 건 기준 조회당 37ms, 그동안 원장 lock을
-        #: 쥐고 있어 폴링 읽기가 그만큼 밀린다).
+        #: 설정이 켜진 경우에만 증분 payload에서 빠진 RUN job의 경과시간을 갱신한다.
         self._track_runtime = bool(track_runtime)
         # 원장·진행 상태·대기를 한 lock으로 묶는다 — 병합과 조회가 섞이면
         # 반쯤 병합된 원장이 보인다. 콜백은 전용 스레드에서 lock 없이 돈다.
@@ -410,11 +400,7 @@ class InternalStatusSource:
         #: job_id → {array_index: _Entry}. monitor가 array element를 집계할 수
         #: 있게 element를 따로 들고 있는다(bjobs가 element별 행을 주는 것과 동형).
         self._ledger: Dict[int, Dict[Optional[int], _Entry]] = {}
-        #: **조회 요청을 받은 적 있는 job_id**. 콜백은 유저의 전 job을 주는데
-        #: lsfmgr가 추적하는 건 그중 일부다 — 나머지까지 보관하면 원장이
-        #: '이 앱과 무관한 job'으로 부풀어 오른다(10만 건 ≈ 60MB 실측).
-        #: 조회 시점에 **병합보다 먼저** 등록하므로 갓 제출된 job도 첫 조회에서
-        #: 누락되지 않는다.
+        #: 조회 요청된 job_id만 보관한다. 첫 응답에서 누락되지 않도록 병합 전에 관심을 등록한다.
         self._interest: Set[int] = set()
         self._last_fetch_at = float("-inf")      # time.monotonic()
         self._last_prune_at = float("-inf")
@@ -438,8 +424,8 @@ class InternalStatusSource:
         ids = [int(i) for i in job_ids]
         if not ids:
             return [], set()
-        self._register_interest(ids)         # 병합 필터보다 **먼저**
-        if not self._ensure_fetched(fresh=fresh):
+        new_interest = self._register_interest(ids)  # 병합 필터보다 먼저
+        if not self._ensure_fetched(fresh=fresh or new_interest):
             # 조회 자체가 실패 — 전원 보류. monitor가 LOST로 확정하지 않는다.
             return [], set(ids)
         out: List = []
@@ -531,9 +517,11 @@ class InternalStatusSource:
     # ------------------------------------------------------------------
     # 콜백 실행 — single-flight + 인계
     # ------------------------------------------------------------------
-    def _register_interest(self, ids: Sequence[int]) -> None:
+    def _register_interest(self, ids: Sequence[int]) -> bool:
         with self._cv:
+            added = not self._interest.issuperset(ids)
             self._interest.update(ids)
+            return added
 
     def _ensure_fetched(self, *, fresh: bool) -> bool:
         """원장이 충분히 최신인지 확인하고, 아니면 콜백을 돌린다.
@@ -614,10 +602,7 @@ class InternalStatusSource:
         if remaining <= 0 or not self._cv.wait(timeout=remaining):
             log.warning("internal status 조회 대기 시간 초과(%.0fs) — "
                         "이번 사이클은 판단 보류", self._wait_timeout_s)
-            # 안 돌아오는 콜백은 조회가 **끝나지 않아** 완료 지점의 건강
-            # 판정이 영영 안 돈다 — 낡은 PRIMARY/IDLE가 남으면 앱은 조회가
-            # 멈춘 것을 모른다. 보류가 확정되는 여기서 DOWN을 기록한다.
-            # (shutdown으로 풀려나는 경로는 건강 이벤트가 아니라 제외.)
+            # 응답 없는 콜백은 완료 지점에 도달하지 않으므로 timeout 시 DOWN을 기록한다. shutdown은 제외한다.
             self._note_outcome_locked(time.monotonic(), ok=False,
                                       served_by_failover=False)
             return False
@@ -637,10 +622,7 @@ class InternalStatusSource:
         use_failover = (self._failover is not None
                         and self._primary_unreturned > 0)
         if use_failover:
-            # 주 콜백이 오래 갇혀 있으면 매 조회가 이 경로다 — 전환(첫 회)만
-            # 알리고 반복은 debug로 내린다 (failover 경로의 warning과 동일
-            # 원칙). DOWN도 강등이다 — 예비까지 실패 중이면 매 사이클
-            # '조회 실패' warning이 이미 나가고 있어 이 안내는 반복분이다.
+            # 예비 콜백 전환은 처음만 알리고, 이미 강등된 상태의 반복 안내는 debug로 남긴다.
             emit = (log.debug
                     if self._health in (FetcherState.FAILOVER,
                                         FetcherState.DOWN)
@@ -653,12 +635,7 @@ class InternalStatusSource:
     def _attempt(self, fetcher: JobStatusFetcher, now: datetime) -> List:
         """[전용 스레드] 콜백 1회 호출 + 파싱 — 실패는 예외 그대로 올린다."""
         payload = fetcher()
-        # 관심 스냅샷은 콜백이 **돌아온 뒤에** 뜬다 — 콜백 앞에서 뜨면
-        # 그 왕복(수 초) 동안 새로 제출돼 조회에 들어온 job이 파싱
-        # 필터에 걸려 버려진다. 병합은 그 job을 받아들이는데(관심
-        # 검사는 lock 아래 최신값) 파싱이 이미 지웠으니, 결과는
-        # '조회 장애'가 아니라 **미발견**이라 monitor의 LOST 스트릭이
-        # 올라간다(유예를 0으로 둔 앱에서는 곧장 LOST).
+        # 콜백 대기 중 추가된 job도 파싱하도록 반환 후 관심 집합을 캡처한다.
         with self._cv:
             keep = set(self._interest)           # 파싱 단계 필터용 스냅샷
         return parse_internal_jobs(payload, now, keep)
@@ -729,14 +706,10 @@ class InternalStatusSource:
                 self._inflight -= 1
                 try:
                     if statuses is not None:
-                        # 병합은 늦은 쓰기 술어 **밖**이다 — 조회가 늦게
-                        # 돌아왔어도 응답은 콜백이 돌아온 시점에 서버가 준
-                        # 것이라(시작 시각과 무관), 버릴 이유가 없다.
-                        self._merge_locked(statuses, now)
-                        # 성공 표식은 병합이 끝난 뒤에 찍는다 — 반쯤 병합된
-                        # 원장을 '최신'으로 광고하면 안 된다. at 비교(늦은
-                        # 쓰기 술어)인 이유: 인계된 뒤 뒤늦게 돌아온 조회가
-                        # 시계를 되돌리면 안 된다.
+                        # 증분 payload는 job별 조회 순서로 병합한다. 인계 전
+                        # 응답이 늦게 와도 더 새 조회 결과를 덮지 않는다.
+                        self._merge_locked(statuses, now, at)
+                        # 병합 완료 후에만 성공 시각을 갱신하며, 늦은 응답으로 시계를 되돌리지 않는다.
                         if at > self._last_fetch_at:
                             self._last_fetch_at = at
                         self._prune_locked(at, now)
@@ -750,10 +723,7 @@ class InternalStatusSource:
                         self._fetch_deadline = float("inf")
                         self._gen += 1
                     self._cv.notify_all()
-                    # 건강 판정은 성공·실패 **모두** 기록한다 (병합 실패
-                    # 포함). 깨우기 보증 **뒤**에 둔다 — 여기서 무슨 일이
-                    # 나도 부기·notify는 이미 끝났다. lock은 with 끝까지
-                    # 유지되므로 깨워진 대기자가 판정 전 값을 보는 일은 없다.
+                    # 부기와 notify 이후 건강 상태를 기록한다. 대기자는 이 잠금을 해제한 뒤 결과를 읽는다.
                     self._note_outcome_locked(
                         at, ok=error is None and statuses is not None,
                         served_by_failover=served_by_failover)
@@ -795,7 +765,7 @@ class InternalStatusSource:
             log.info("상태 조회가 예비 콜백으로 재개됩니다 "
                      "(주 콜백은 여전히 실패, DOWN → FAILOVER)")
 
-    def _merge_locked(self, statuses: List, now: datetime) -> None:
+    def _merge_locked(self, statuses: List, now: datetime, at: float) -> None:
         """받은 상태를 원장에 덮어쓴다 — 증분 payload면 나머지는 유지된다.
 
         추적 대상(_interest)이 아닌 job은 버린다 — 콜백이 주는 '유저의 전
@@ -807,12 +777,16 @@ class InternalStatusSource:
             if st.job_id not in self._interest:
                 skipped += 1
                 continue
-            self._ledger.setdefault(st.job_id, {})[st.array_index] = _Entry(
-                status=st, seen_at=now)
+            elems = self._ledger.setdefault(st.job_id, {})
+            previous = elems.get(st.array_index)
+            if previous is not None and previous.fetched_at > at:
+                continue
+            elems[st.array_index] = _Entry(
+                status=st, seen_at=now, fetched_at=at)
             fresh_keys.add((st.job_id, st.array_index))
         if skipped:
             log.debug("internal status: 추적 대상 아닌 job %d건 미보관", skipped)
-        if self._track_runtime:
+        if self._track_runtime and at >= self._last_fetch_at:
             self._refresh_runtimes_locked(now, fresh_keys)
 
     def _refresh_runtimes_locked(self, now: datetime, fresh_keys: set) -> None:
@@ -838,8 +812,7 @@ class InternalStatusSource:
                 if secs < 0 or secs == st.run_time_s:
                     continue
                 # seen_at은 그대로 둔다 — 만료 기준은 '실제 수신 시각'이다.
-                elems[idx] = _Entry(status=replace(st, run_time_s=secs),
-                                    seen_at=entry.seen_at)
+                elems[idx] = replace(entry, status=replace(st, run_time_s=secs))
 
     def _expired(self, entry: _Entry, now: datetime) -> bool:
         """이 항목을 버려도 되는가.

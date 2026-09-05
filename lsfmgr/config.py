@@ -2,20 +2,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
 
-#: LSF 명령 경로. 단일 프로그램은 str, bsub를 호출하는 wrapper처럼 고정 인자가
-#: 붙는 명령은 토큰 목록으로 지정한다 (예: ["customwrapper_sub", "--proj", "X"]).
-#: wrapper는 표준 bsub 옵션(-q/-J/-g/...)을 받아 bsub로 넘기고, bsub의 출력
-#: ("Job <id> ...")을 그대로 뱉으면 된다 — 파싱/추적은 bsub와 동일하다.
+#: LSF 명령은 실행 파일 문자열 또는 고정 인자를 포함한 토큰 목록으로 지정한다.
 CmdPath = Union[str, Sequence[str]]
 
-#: 상태 조회 콜백의 시그니처 — 인자 없이 호출되고, REST 응답 JSON을 그대로
-#: 돌려준다. 반환: {"jobs": [...], "count": N, ...} dict 또는 job dict 목록.
-#: 예외를 던지면 그 사이클은 '조회 장애'로 취급된다(대상 전원 판단 보류).
-#: (설정 필드의 타입이라 config가 소유한다 — internal_status에 두면
-#:  config→internal_status 순환이 생긴다.)
+#: 인자 없이 REST 응답 dict 또는 job dict 목록을 반환한다.
+#: 예외는 조회 장애로 처리하며 해당 사이클의 상태 판정을 보류한다.
 JobStatusFetcher = Callable[[], Any]
 
 #: bjobs_path 기본값 — "앱이 명시로 지정했나"를 이 값과의 비교로 판정한다
@@ -25,18 +20,8 @@ DEFAULT_BJOBS_PATH = "bjobs"
 #: min_state_dwell_s 상한(초) = 1시간. 표시 지연이 그보다 길 이유가 없다.
 MAX_STATE_DWELL_S = 3600.0
 
-#: 수치 필드의 허용 범위 — 이름 → (형변환, 하한, 상한, 하한 포함 여부).
-#: 상한 None은 없음. 하한 미포함(False)은 "초과", 즉 양수를 뜻한다.
-#:
-#: **범위 규칙의 단일 소유자**다. 예전엔 여기서 조용히 보정하고(clamp) 상위
-#: options 계층은 거부해서, 같은 값이 경로에 따라 다르게 처리됐다 —
-#: LsfConfig(chunk_size=0)이 500이 되어 오타가 묻혔다. 전부 거부로 통일한다.
-#: ※ poll_interval_s의 5~60 같은 **UX 정책 범위**는 상위 계층의 몫이다.
-#:   여기서는 구조적 불변식(양수)만 본다 — poll_interval_s=2(빠른 로컬 폴링)
-#:   같은 정당한 저수준 사용을 막지 않기 위해서다.
-#: ※ 0/음수 타임아웃은 증상이 조용하다: 전 chunk가 '조회 실패'로 귀속되고
-#:   monitor는 설계대로 판단을 보류해(LOST 확정 안 함) 폴링이 영영 상태를
-#:   못 올린 채 PEND에 고착된다. 그래서 생성 시점에 막는다.
+#: 공통 수치 범위: 이름 → (형변환, 하한, 상한, 하한 포함 여부). 상한 None은 제한 없음.
+#: 범위 밖 값은 보정하지 않고 거부한다. poll_interval_s의 5~60초 정책은 options에서 적용한다.
 NUMERIC_RANGES = {
     "workers":                  (int,   1, 64, True),
     "max_retry":                (int,   0, None, True),
@@ -64,10 +49,12 @@ def _in_range(value, name, cast, lo, hi, inclusive_lo):
     """범위 검증 + 형 정규화. 위반이면 ValueError (조용한 보정 금지)."""
     try:
         v = cast(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ValueError(
             f"{name}는 {cast.__name__} (got {value!r})") from None
-    ok = (v >= lo if inclusive_lo else v > lo) and (hi is None or v <= hi)
+    ok = ((cast is not float or math.isfinite(v))
+          and (v >= lo if inclusive_lo else v > lo)
+          and (hi is None or v <= hi))
     if not ok:
         bound = (f"{lo:g} 이상" if inclusive_lo else f"{lo:g} 초과")
         if hi is not None:
@@ -79,190 +66,85 @@ def _in_range(value, name, cast, lo, hi, inclusive_lo):
 @dataclass
 class LsfConfig:
     """LSF 명령 경로/타임아웃/chunk 등 환경 설정."""
-    # (v10: bsub_path/bgdel_path 삭제 — bsub 조립 제출·bgdel group 정리가
-    #  제거됨. 제출은 wrapper 커맨드를 그대로 실행한다.)
-    #: 조회 명령. job_status_fetcher를 주면 조회가 그 콜백으로 넘어가고
-    #: 이 값은 쓰이지 않는다 (lsfmgr/internal_status.py).
+    # job_status_fetcher가 없을 때 사용할 조회 명령.
     bjobs_path: CmdPath = DEFAULT_BJOBS_PATH
     bkill_path: CmdPath = "bkill"
 
-    #: 상태 조회 콜백. **주면** 상태 조회가 bjobs subprocess 대신 이 콜백으로
-    #: 간다(안 주면 종전대로 bjobs). 인자 없이 호출되고 REST 응답 JSON
-    #: ({"jobs": [...]})을 그대로 반환하면 된다 — 파싱·캐시·동시 호출 합치기·
-    #: 원장 만료는 라이브러리가 한다 (README §5.8).
-    #: URL·인증·**타임아웃**·재시도는 콜백의 몫이다. 안 돌아오는 콜백은
-    #: 라이브러리가 견디기만 할 뿐 되살리지 못한다.
-    #: 아래 internal_* 노브들이 이 조회원의 동작을 정한다.
+    #: bjobs 대신 사용할 상태 조회 콜백. 파싱·캐시·동시 호출 병합·만료는 라이브러리가 처리한다.
+    #: URL·인증·타임아웃·재시도는 콜백이 담당한다. 상세 계약은 README §5.8 참고.
     job_status_fetcher: Optional[JobStatusFetcher] = None
 
-    #: 상태 조회 **예비** 콜백. 주 콜백(job_status_fetcher)이 동작하지 않을 때
-    #: — 예외를 던지거나, 응답을 한 건도 해석할 수 없거나, 돌아오지 않아
-    #: 인계됐을 때 — 같은 조회를 이 콜백으로 다시 시도한다. 계약(인자 없음,
-    #: REST 응답 반환, 타임아웃은 콜백 몫)은 주 콜백과 같고, 결과는 같은
-    #: 원장에 병합된다. 매 조회는 항상 주 콜백부터 시도하므로 주 콜백이
-    #: 회복되면 자동으로 되돌아간다(주 콜백이 미회수로 잡혀 있는 동안만
-    #: 처음부터 예비로 간다 — internal_status.py). 예비까지 실패하면 종전대로
-    #: '조회 장애'(판단 보류)다. 주 콜백 없이 이 값만 주면 ValueError —
-    #: 조회가 bjobs로 가서 아무 데도 안 쓰인다 (README §5.8).
+    #: 주 콜백의 예외·파싱 실패·응답 지연 시 사용할 예비 콜백. 주 콜백과 계약이 같다.
+    #: 주 콜백이 미회수 상태일 때만 예비를 먼저 호출하며, 회복하면 주 콜백으로 복귀한다.
+    #: 양쪽 모두 실패하면 판정을 보류한다. 주 콜백 없이 단독 지정할 수 없다.
     job_status_fetcher_failover: Optional[JobStatusFetcher] = None
 
-    #: wrapper 제출의 **실행 프로그램 치환** — (glob 패턴, 대체 CmdPath).
-    #: 제출 커맨드는 문자열에 프로그램명이 박혀 있어(lsfmgr가 조립하지 않는다)
-    #: 별도 경로 노브가 없다. 이 옵션은 argv[0]의 basename이 패턴에 맞을 때
-    #: **그 프로그램만** 대체하고 나머지 인자는 그대로 둔다 — 커맨드를 하나도
-    #: 안 고치고 전 제출을 다른 실행 파일로 돌린다(mock/테스트 환경 전환).
-    #:
-    #:     test_submit_wrapper_pattern_cmd=("*_sub", "/path/to/customwrapper_sub")
-    #:     ["mytool_sub", "-q", "normal", "a.sp"]
-    #:       → ["/path/to/customwrapper_sub", "-q", "normal", "a.sp"]
-    #:
-    #: 켤지 말지는 **호출자(앱)가 정한다** — 라이브러리는 환경을 읽지 않는다.
-    #: 테스트 환경에서만 돌리려면 앱이 자기 기준(예: 환경 변수)으로 판단해 이
-    #: 옵션을 줄지 말지 고르면 된다:
-    #:
-    #:     kw = ({"test_submit_wrapper_pattern_cmd": ("*_sub", MOCK)}
-    #:           if os.environ.get("MY_TEST_MODE") else {})
-    #:     mgr = LsfJobManager(**kw)
-    #:
-    #: 대체값은 CmdPath 규약 — 토큰 목록이면 고정 인자가 앞에 붙는다.
-    #: **실행만** 바꾼다: JobRecord.command는 원본이 그대로 남아 표시·
-    #: 재제출 기준이 흔들리지 않는다(재제출 때 이 규칙이 다시 적용된다).
-    #: None(기본)이면 치환 없음.
+    #: 테스트용 실행 프로그램 치환: (argv[0] basename의 glob 패턴, 대체 CmdPath).
+    #: 예: ("*_sub", "/mock/customwrapper_sub"). 나머지 인자는 보존한다.
+    #: 토큰 목록으로 지정하면 고정 인자를 붙인다. JobRecord.command에는 원본을 보관한다.
+    #: 환경에 따른 적용 여부는 호출자가 결정하며, None이면 치환하지 않는다.
     test_submit_wrapper_pattern_cmd: Optional[Tuple[str, CmdPath]] = None
 
     submit_timeout_s: float = 30.0
     query_timeout_s: float = 120.0
     kill_timeout_s: float = 120.0
 
-    #: chunking 시 chunk당 job 수 (100~500). v10.1: 200→500 — 조회가 id chunk
-    #: 단일 경로가 되어 사이클당 bjobs 횟수가 job수/chunk_size로 직결된다
-    #: (10k job 기준 50→20회, 직렬 왕복이라 사이클 시간에 비례).
+    #: bjobs 호출당 job 수(100~500).
     chunk_size: int = 500
     arg_max: int = 131072                # 명령줄 인자 총 길이 상한 (보수적)
 
-    #: 동시에 도는 wrapper 프로세스 수 상한 (1~64). 기본 8.
-    #: **전역**이다 — submitter가 공용 QThreadPool 하나를 쓰므로 jobset을 몇 개
-    #: 동시에 제출하든 총합이 이 값을 넘지 않는다. 호출별 workers는 이 값
-    #: **아래로 낮추는** 용도다(올려도 공용 풀 크기를 못 넘는다).
-    #: 크게 잡으면 submit 호스트 CPU/RAM과 LSF master(mbatchd/eauth)를 함께
-    #: 두들겨 bsub가 간헐적으로 "User permission denied"(exit 255)로 떨어진다.
-    #: **제출 부하를 정하는 유일한 노브**다 (v11: rate_limit_per_s 삭제 —
-    #: 초당 상한은 이 값과 bsub 1회 소요로 이미 결정된다: workers/bsub_소요).
+    #: 동시 wrapper 프로세스의 manager 전체 상한(1~64).
+    #: 호출별 workers로 낮출 수 있지만, 공용 풀의 상한을 높일 수는 없다.
     workers: int = 8
     max_retry: int = 3                   # submit 재시도 횟수
-    retry_delay_s: float = 2.0           # 첫 재시도 대기 (v7 기본 "fixed:2")
+    retry_delay_s: float = 2.0           # 첫 재시도 대기(초)
     retry_backoff: float = 1.0           # >1.0이면 지수 backoff("expo")
 
-    #: bkill 1회에 실을 target 수. 조회(chunk_size)와 **따로 두는 이유**:
-    #: bjobs는 읽기라 500건도 금방 끝나지만 bkill은 job마다 mbatchd가 실제
-    #: 처리(+MC면 원격 클러스터로 전달)를 하는 쓰기라 훨씬 느리다. 한 chunk가
-    #: kill_timeout_s를 넘기면 subprocess timeout이 bkill **클라이언트**를
-    #: 중간에 죽여, 앞쪽 id만 죽고 뒤쪽은 요청조차 안 나간 채 잘린다 —
-    #: 그 상태로 재시도하면 "bkill timeout" 경고가 반복된다.
-    #: 기본 16 — MC(job forwarding) 사이트 기준으로 잡은 값이다. forward된 job의
-    #: bkill은 원격 클러스터 왕복까지 기다려 job당 수백 ms까지 가므로, chunk가
-    #: 크면 짧게 잡은 kill_timeout_s를 쉽게 넘긴다. 16이면 기본 120s에서 job당
-    #: 7.5초, 8초로 줄여 잡은 사이트에서도 job당 0.5초 여유가 남는다.
-    #: 대량 kill에서 bkill 호출 횟수가 늘지만(1000건 → 63회) 각 호출이 확실히
-    #: 완주하는 편이 잘려서 재시도하는 것보다 총 소요가 짧다.
+    #: bkill 1회에 전달할 target 수. timeout은 chunk 전체에 적용되므로
+    #: 원격 왕복이 느린 환경에서는 chunk를 줄여 요청 도중의 timeout을 피한다.
     kill_chunk_size: int = 16
-    #: **동시에 띄울 bkill 프로세스 수** (1~32). manager 전체 상한이다 —
-    #: 실행 풀을 하나 공유하므로 kill 명령이 몇 건 동시에 돌든 총합이 이 값을
-    #: 넘지 않는다(kill마다 풀을 만들면 실측 동시 16개까지 갔다).
-    #: kill_chunk_size가 "한 호출에 몇 건"이라면 이건 "그 호출을 몇 개 동시에".
-    #: MC(job forwarding) 사이트에서 bkill은 원격 클러스터 왕복을 기다리는
-    #: **지연 지배적** 작업이라, 병렬로 돌리면 대량 kill이 그만큼 빨라진다
-    #: (직렬이면 ceil(N/chunk)회를 한 줄로 세워 기다린다 — 5000건에 bkill
-    #: 1회가 3초면 313회 x 3s = 16분이 한 줄로 늘어선다).
-    #: 기본 4 — 기본 chunk(16)와 곱해 동시 64건이면 submit의 workers=8이
-    #: 거는 부하와 같은 급이다. 1로 두면 직렬(옛 동작).
-    #: ⚠ 동시에 mbatchd에 붙는 요청이 kill_workers x kill_chunk_size건이 된다 —
-    #: 더 키울 때는 submit의 workers와 같은 이유로 실측하고 올릴 것
-    #: (bkill 1회 소요는 DEBUG 로그의 `exec bkill … → rc=0 (N.NNNs)`).
+    #: 동시 bkill 프로세스의 manager 전체 상한(1~32). 1이면 직렬 실행.
+    #: 동시 대상 수는 kill_workers × kill_chunk_size이므로 서버 부하를 고려해 조정한다.
     kill_workers: int = 4
     kill_max_retry: int = 2              # kill 확인 실패 시 재시도
     kill_retry_delay_s: float = 3.0      # kill 재시도 간격 — bkill은 비동기라
                                          # 확인('is being terminated')까지 여유
-    #: kill 상태 정책
-    #: "optimistic" — bkill 'is being terminated' 확인 시 즉시 EXIT로 간주(기본).
-    #                 bkill이 비동기라 실제 종료 전이지만, kill 의도가 수락됐으니
-    #                 EXIT로 낙관 표시하고 폴링은 이 job을 더 조회하지 않는다.
-    #: "actual"     — terminated 확인만으론 상태를 안 바꾸고, 실제 LSF 상태
-    #                 (bjobs verify/폴링)로만 EXIT를 반영한다.
-    #: 어느 정책이든 kill이 수락된 job에는 JobRecord.killed 표식이 즉시 남는다
-    #: (상태 전이 시점과 무관 — "이 EXIT은 내가 죽인 것"의 근거).
+    #: optimistic: bkill 수락 시 EXIT로 표시하고 폴링 대상에서 제외한다.
+    #: actual: 수락 후에도 실제 조회 결과로만 상태를 갱신한다.
+    #: 두 정책 모두 수락된 job에 killed 표식을 남긴다.
     kill_status_policy: str = "optimistic"
 
     #: kill 후 실제 종료를 bjobs로 확인할지 (kill(verify=…)가 호출별로 덮는다).
-    #: 앱 전역 정책이라 submit() 옵션이 아니다 — 예전엔 SHARED_KEYS에 있어
-    #: submit(verify_kill=True)가 받아들여진 뒤 아무도 안 읽는 함정이었다.
+    #: 앱 전역 정책으로, submit()에는 지정할 수 없다.
     verify_kill: bool = False
 
     poll_interval_s: float = 10.0        # 기본 polling 주기
-    #: bjobs에서 안 보이는 job을 LOST로 확정하기까지 필요한 **연속** 미발견
-    #: 폴링 횟수. 1이면 즉시 확정. 제출 직후 등록 지연이나, 앱 환경이 가리키는
-    #: 클러스터와 wrapper가 실제 제출한 클러스터가 달라 한두 사이클 안 보이는
-    #: 경우에 멀쩡한 job을 LOST로 만들지 않기 위한 유예다.
+    #: LOST 확정에 필요한 연속 미발견 폴링 횟수. 1이면 즉시 확정한다.
     lost_after_missing_polls: int = 3
 
-    #: 콜백 조회원(job_status_fetcher)이 켜졌을 때 상태 스냅샷의
-    #: **최소 갱신 간격**(초).
-    #: 이 간격 안에 다시 들어온 조회는 직전 스냅샷을 재사용한다 — REST는 유저의
-    #: 전 job을 한 번에 주므로 폴링 1사이클에 콜백을 여러 번 돌릴 이유가 없다.
-    #: None(기본)이면 poll_interval_s의 절반 — 폴링 사이클마다 정확히 1회
-    #: 갱신되면서, 사이클 중간에 낀 killer verify·detect_lost는 같은 스냅샷을
-    #: 공유한다. 0이면 캐시 없음(조회마다 콜백).
-    #: ※ kill verify는 이 값과 무관하게 항상 새로 받는다(fresh 조회) — 방금
-    #:   죽인 job의 생사는 캐시로 답할 수 없다.
+    #: 콜백 캐시의 최소 갱신 간격(초). None이면 폴링 주기의 절반, 0이면 캐시 없음.
+    #: kill verify와 새 추적 대상의 최초 조회는 캐시를 건너뛴다.
     internal_refresh_min_s: Optional[float] = None
 
-    #: internal 원장의 **종료 job 보존 기간**(일). 콜백이 증분(`updatefrom`)으로
-    #: 돌면 내부 원장은 계속 누적되므로, 끝난 지(finish_time) 이만큼 지난
-    #: DONE/EXIT은 버려 메모리가 무한정 늘지 않게 한다. finish_time을 안 주는
-    #: payload면 그 항목을 마지막으로 받은 시각을 대신 쓴다.
-    #: 진행 중(PEND/RUN/...) job은 아무리 오래돼도 버리지 않는다 — 아직 조회
-    #: 대상이기 때문. 0이면 만료 없음(무한 누적 — 단기 실행 프로세스 전용).
+    #: 콜백 원장의 DONE/EXIT 보존 기간(일). finish_time이 없으면 마지막 수신 시각 기준.
+    #: 진행 중인 job은 만료하지 않으며, 0이면 종료 job도 만료하지 않는다.
     internal_retention_days: float = 14.0
 
-    #: internal 모드의 **제출 직후 LOST 유예**(초). 원장(REST 집계)이 아직
-    #: 이 job을 모르는 구간에서 미발견을 LOST 스트릭으로 세지 않는다.
-    #:
-    #: bjobs 경로의 유예(lost_after_missing_polls)와 목적이 다르다. 거기서
-    #: 미발견은 대부분 진짜 부재(purge)이고 등록 지연은 초 단위라 '연속 N회'로
-    #: 충분했다. 반면 누적 원장은 non-terminal job을 지우지 않으므로 internal
-    #: 모드의 미발견은 사실상 **항상** "아직 집계 안 됨"이다 — 이걸 회수로 세면
-    #: 폴링 주기에 따라 유예가 조용히 늘었다 줄고(주기 10초·3회=30초), 집계가
-    #: 그보다 조금만 늦어도 멀쩡한 job이 LOST(되돌릴 수 없음)로 죽는다.
-    #: 그래서 기준을 **제출 후 경과 시간**으로 잡는다 — 폴링 주기와 무관하다.
-    #:
-    #: 이 시간이 지나도 안 보이면 그때부터 정상 스트릭이 시작된다(진짜 소실은
-    #: 여전히 확정된다). 0이면 유예 없음 = bjobs 경로와 같은 판정.
-    #: 기준 시각은 JobRecord.submit_time, 없으면 updated_at.
+    #: 콜백 집계 지연을 위한 제출 후 LOST 유예(초). 기간이 지나면 미발견 횟수를 센다.
+    #: 기준은 submit_time, 없으면 updated_at이다. 0이면 별도 시간 유예가 없다.
     internal_lost_grace_s: float = 60.0
 
-    #: LSF MultiCluster(job forwarding) 정보 수집 — bjobs -o 에 source_cluster·
-    #: forward_cluster 필드를 추가해 JobRecord.source_cluster/forward_cluster 로
-    #: 채운다. MC 환경에서만 켠다(기본 꺼짐) — 미지원 LSF면 그 필드만 자동
-    #: 강등(FULL+cluster → FULL)돼 run_time 등 다른 확장 필드는 유지된다.
+    #: MultiCluster의 source_cluster·forward_cluster 수집 여부.
+    #: 미지원 시 해당 필드만 제외하고 나머지 확장 필드는 유지한다.
     collect_clusters: bool = False
 
-    #: RUN 중 run_time_s(경과 실행시간) 변화도 폴링 갱신·jobs_updated 발행
-    #: 대상에 포함할지.
-    #:
-    #: 기본 False — 켜면 **RUN job 전원이 매 폴링 재전이**된다. 5000건 기준
-    #: 사이클당 5000 transition + 5000레코드짜리 jobs_updated 1회이고(실측
-    #: 217ms), 그 배치를 받는 앱의 표 갱신이 진짜 부담이다. 상태가 그대로인
-    #: job을 매 주기 다시 그릴 이유가 없다.
-    #: 끄면 run_time_s는 **상태 전이 시점**(RUN→DONE 등)에만 반영된다 — 표의
-    #: 경과시간 열이 실시간으로 흐르지 않는다. 그 열이 꼭 필요하고 RUN이 수백
-    #: 규모라면 True로 켠다.
+    #: RUN 중 경과시간만 바뀌어도 jobs_updated를 발행할지 여부.
+    #: False이면 상태 전이 시에만 경과시간을 반영해 대량 job의 UI 갱신 비용을 줄인다.
     poll_runtime_updates: bool = False
 
-    #: pre_submit 게이트가 False를 반환(제출 거부)했을 때 submit_finished를
-    #: 발화할지. True(기본)면 게이트 거부도 submit_finished(cancelled=N)로
-    #: 마무리해 기존 완료 핸들러 하나로 다 받는다. False면 발화하지 않고
-    #: 종료 통지는 pre_submit_finished(False)만으로 한다. (게이트 예외는 이 옵션과
-    #: 무관하게 항상 error_occurred + submit_finished(failed=N)로 보고한다)
+    #: pre_submit의 False 반환 시 submit_finished(cancelled=N)를 발행할지 여부.
+    #: False이면 pre_submit_finished(False)만 발행한다. 게이트 예외는 설정과 무관하게
+    #: error_occurred와 submit_finished(failed=N)로 보고한다.
     submit_finished_on_gate_reject: bool = True
 
     #: progress/jobs_updated 발화 빈도 제한 — 이 간격 경과 OR 이 비율만큼
@@ -271,25 +153,19 @@ class LsfConfig:
     progress_min_interval_s: float = 0.5   # 최소 발화 간격(초), 0이면 시간 제한 없음
     progress_min_step_ratio: float = 0.01  # 최소 진행 비율(0~1), 0이면 매번
 
-    #: 상태 전이 **표시** 최소 간격(초) — 0(기본)이면 끔. 켜면 job별로 한 상태가
-    #: 이 시간만큼 화면에 머문 뒤에야 다음 전이가 jobs_updated로 나간다
-    #: (SUBMITTING→PEND, EXIT→SUBMITTING처럼 순식간에 지나가는 전이를 눈에
-    #: 보이게 한다). 전이는 버리지 않고 순서대로 밀린다 — 표시가 최대
-    #: (밀린 전이 수 × 이 값)만큼 store보다 늦는다. store는 늘 즉시 갱신되므로
-    #: 켜는 순간 jobs_updated에 한해 store-first/finished-last가 느슨해진다
-    #: (lsfmgr/pacer.py 참고).
+    #: job별 상태 표시 최소 간격(초). 0이면 지연 없음. Store는 즉시 갱신하되
+    #: jobs_updated는 전이 순서대로 지연되어 완료 신호보다 늦게 도착할 수 있다.
     min_state_dwell_s: float = 0.0
 
     def __post_init__(self):
         for name, (cast, lo, hi, incl) in NUMERIC_RANGES.items():
             setattr(self, name,
                     _in_range(getattr(self, name), name, cast, lo, hi, incl))
-        # retry_backoff는 여기선 숫자다(>1.0이면 지수 backoff). 같은 이름의
-        # submit()/LsfJobManager() kwarg는 'fixed:N'/'expo:N' 문자열이라 헷갈려
-        # LsfConfig에 문자열을 넘기면, 예전엔 조용히 통과하다 manager 생성 시
-        # str<=float 크래시가 났다 — 이른 시점에 명확한 에러로 잡는다.
+        # config의 retry_backoff는 숫자이며, manager/submit 옵션의 'fixed:N'·'expo:N'과 다르다.
         try:
             self.retry_backoff = float(self.retry_backoff)
+            if not math.isfinite(self.retry_backoff):
+                raise ValueError
         except (TypeError, ValueError):
             raise ValueError(
                 f"LsfConfig.retry_backoff는 숫자여야 합니다 "
@@ -334,10 +210,9 @@ class LsfConfig:
                     "예비 콜백은 아무 데도 안 쓰입니다")
         # internal 갱신 간격은 0(캐시 끔) 허용 — 음수만 막는다.
         if self.internal_refresh_min_s is not None:
-            if float(self.internal_refresh_min_s) < 0:
-                raise ValueError("internal_refresh_min_s는 0 이상 "
-                                 f"(got {self.internal_refresh_min_s!r})")
-            self.internal_refresh_min_s = float(self.internal_refresh_min_s)
+            self.internal_refresh_min_s = _in_range(
+                self.internal_refresh_min_s, "internal_refresh_min_s",
+                float, 0.0, None, True)
 
 
 def cmd_tokens(path: CmdPath) -> List[str]:
@@ -354,9 +229,3 @@ def validate_cmd_path(value, what: str) -> None:
     if not ok:
         raise ValueError(
             f"{what}는 비어있지 않은 str 또는 str 토큰 목록 (got {value!r})")
-
-# (v10: JobSpec/spec_to_json/spec_from_json 삭제 — bsub 인자 조립 제출이
-#  제거되어 옵션 템플릿·재제출 옵션 보존이 필요 없다. 제출은 wrapper
-#  커맨드 문자열/argv가 전부다.)
-
-

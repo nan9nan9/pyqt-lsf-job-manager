@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from lsfmgr import LsfConfig
 
 from lsfmgr.options import (
     BUILTIN_DEFAULTS,
@@ -10,7 +11,28 @@ from lsfmgr.options import (
     resolve_options,
     validate_options,
     SHARED_KEYS,
+    MANAGER_ONLY_KEYS,
 )
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+@pytest.mark.parametrize("key", ["submit_timeout_s", "internal_refresh_min_s",
+                                 "internal_retention_days", "workers"])
+def test_nonfinite_config_and_options_are_rejected(key, value):
+    with pytest.raises(ValueError):
+        LsfConfig(**{key: value})
+    with pytest.raises(ValueError):
+        validate_options({key: value}, allowed=SHARED_KEYS | MANAGER_ONLY_KEYS,
+                         where="manager")
+
+
+@pytest.mark.parametrize("value", ["inf", "-inf", "nan"])
+def test_nonfinite_retry_backoff_is_rejected(value):
+    with pytest.raises(ValueError):
+        LsfConfig(retry_backoff=float(value))
+    for kind in ("fixed", "expo"):
+        with pytest.raises(ValueError):
+            parse_retry_backoff(f"{kind}:{value}")
 
 
 # ----------------------------------------------------------------------

@@ -6,6 +6,8 @@ terminal이면 실행된다. pre_submit 게이트와 대칭(전자는 제출 전
 """
 from __future__ import annotations
 
+import threading
+
 from tests.conftest import mk_jobset
 from lsfmgr import JobState, LsfJobManager
 
@@ -13,6 +15,26 @@ from lsfmgr import JobState, LsfJobManager
 def _finish(manager, fake_lsf, js, state="DONE", code=0):
     fake_lsf.set_all(state, code)
     manager.query_once(js)          # 완료 감지 → post_process 발화 지점
+
+
+def test_shutdown_from_post_started_does_not_launch_work(qtbot, manager, fake_lsf):
+    ran = threading.Event()
+    stopped = []
+    js = mk_jobset(manager, ["customwrapper_sub a.sp"])
+    with qtbot.waitSignal(js.submit_finished, timeout=10000):
+        manager.submit(js, auto_poll=False, post_process=lambda recs: ran.set())
+
+    def shutdown():
+        manager.shutdown()
+        stopped.append(True)
+
+    js.post_processing_started.connect(shutdown)
+    _finish(manager, fake_lsf, js)
+    qtbot.waitUntil(lambda: bool(stopped), timeout=10000)
+    # 완료 감지 슬롯 전체가 반환된 뒤 풀을 비워, 늦게 시작된 콜백도 잡는다.
+    manager._completion._pool.waitForDone(1000)
+    assert not ran.is_set()
+    assert not manager.polling._thread.isRunning()
 
 
 # ----------------------------------------------------------------------

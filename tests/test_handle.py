@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import pytest
+import gc
+import weakref
 
 from lsfmgr import (
     InMemoryStore,
@@ -12,6 +14,52 @@ from lsfmgr import (
     LsfJobManager,
 )
 from tests.conftest import mk_jobset, submit_cmds
+
+
+def test_removed_handle_is_released_while_manager_lives(manager):
+    js = manager.create_jobset()
+    ref = weakref.ref(js)
+    manager.remove_jobset(js)
+    assert js.is_removed
+    assert not manager.can_submit(js)
+    with pytest.raises(JobSetRemovedError):
+        js.jobs()
+    del js
+    gc.collect()
+    assert ref() is None
+
+
+def test_failed_command_iteration_leaves_no_jobset(manager):
+    def broken_commands():
+        yield "mytool a"
+        raise RuntimeError("input failed")
+
+    with pytest.raises(RuntimeError, match="input failed"):
+        manager.create_jobset(broken_commands(), job_keys=["a"])
+    assert manager.list_jobsets() == []
+    with pytest.raises(TypeError):
+        manager.create_jobset(None)
+    assert manager.list_jobsets() == []
+
+
+@pytest.mark.parametrize("method", ["create_jobset", "add_jobs", "replace_jobs",
+                                    "upsert_jobs"])
+@pytest.mark.parametrize("commands", ["echo", b"echo"])
+def test_commands_must_be_a_collection(manager, method, commands):
+    js = manager.create_jobset()
+    args = () if method == "create_jobset" else (js,)
+    with pytest.raises(TypeError, match="commands"):
+        getattr(manager, method)(*args, commands, job_keys=list("abcd"))
+    assert len(manager.list_jobsets()) == 1
+    assert js.jobs() == []
+
+
+def test_can_submit_is_false_for_invalid_selection_and_shutdown(manager):
+    js = mk_jobset(manager, ["mytool a"])
+    assert manager.can_submit(js)
+    assert not manager.can_submit(js, only="k0")
+    manager.shutdown()
+    assert not manager.can_submit(js)
 
 
 # ----------------------------------------------------------------------

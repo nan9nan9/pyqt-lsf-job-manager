@@ -430,10 +430,7 @@ def cmd_bkill(argv: List[str]) -> int:
                 if j.job_name == nm and j.stat not in FINISHED_STATES:
                     _add(j)
     elif name_specs or kill_all or user_filter or queue_filter or group_filter:
-        # '0' / -J / -u / -q / -g 조합 — 지정된 필터를 모두 만족하는 미완료 job.
-        # 특히 'bkill -g <group> 0' 이나 'bkill -J name 0' 의 '0' 은 전체 kill 이
-        # 아니라 그 group/name 범위로 한정된다(실제 LSF 동작). 이 덕분에 lsfmgr
-        # killer 의 group-tier 가 해당 jobset 만 정확히 종료한다.
+        # '0'도 -J/-u/-q/-g 필터를 만족하는 미완료 job만 대상으로 삼는다.
         target_user = user_filter if user_filter else getpass.getuser()
         for j in db.all_jobs():
             if j.stat in FINISHED_STATES:
@@ -475,10 +472,8 @@ def cmd_bkill(argv: List[str]) -> int:
             _err(f"Job <{j.display_id}>: Job has already finished")
             continue
         if not _kill_reachable(j):
-            # forward 된 job 을 그 클러스터 env 없이 kill 시도 — 닿지 못한다.
-            # lsfmgr 가 '해소됨(resolved)'으로 오인하지 않게 no-match/finished
-            # 계열 문구를 피한 에러를 낸다(그래야 재시도·미확인으로 남는다).
-            # 해법: 그 클러스터 cshrc 를 source 한 뒤(bkill) 다시 시도.
+            # forward 대상 클러스터 환경이 아니면 실패한다.
+            # 미확인을 유지하도록 no-match/finished 계열 응답은 사용하지 않는다.
             _err(f"Job <{j.display_id}>: forwarded to cluster "
                  f"<{j.forward_cluster}> — source its cluster env to kill")
             rc = 255
@@ -487,7 +482,8 @@ def cmd_bkill(argv: List[str]) -> int:
         j.exit_code = 130
         j.finish_time = now
         # 스냅샷 이후 스케줄러가 방금 종료시킨 job 은 되살리지 않는다.
-        if db.update_if_stat_in(j, (PEND, RUN, SSUSP, USUSP, PSUSP)):
+        if db.update_if_stat_in(j, (PEND, RUN, SSUSP, USUSP, PSUSP),
+                               columns=("stat", "exit_code", "finish_time")):
             db.log_event(j.job_id, j.array_index, "kill", "user", ts=now)
             _out(f"Job <{j.display_id}> is being terminated")
         else:
@@ -530,7 +526,8 @@ def cmd_bstop(argv: List[str]) -> int:
             j.stat = USUSP
             j.susp_since = now
             # 스냅샷 이후 종료됐다면(스케줄러) USUSP 로 되살리지 않는다.
-            if db.update_if_stat_in(j, (RUN, SSUSP)):
+            if db.update_if_stat_in(j, (RUN, SSUSP),
+                                   columns=("stat", "susp_since")):
                 db.log_event(j.job_id, j.array_index, "suspend", "user",
                              ts=now)
             else:
@@ -540,7 +537,8 @@ def cmd_bstop(argv: List[str]) -> int:
         elif j.stat == PEND:
             j.stat = PSUSP
             j.susp_since = now
-            if db.update_if_stat_in(j, (PEND,)):
+            if db.update_if_stat_in(j, (PEND,),
+                                   columns=("stat", "susp_since")):
                 db.log_event(j.job_id, j.array_index, "suspend", "user",
                              ts=now)
             else:
@@ -571,7 +569,8 @@ def cmd_bresume(argv: List[str]) -> int:
             j.stat = RUN
             j.susp_since = 0.0
             # 스냅샷 이후 동시 변경(예: bkill→EXIT)을 되살리지 않는다.
-            if db.update_if_stat_in(j, (USUSP,)):
+            if db.update_if_stat_in(j, (USUSP,),
+                                   columns=("stat", "susp_since", "finish_time")):
                 db.log_event(j.job_id, j.array_index, "resume", "user", ts=now)
             else:
                 _err(f"Job <{j.display_id}>: Job is not in a suspended state")
@@ -581,7 +580,8 @@ def cmd_bresume(argv: List[str]) -> int:
                 j.pend_secs += (now - j.susp_since)
             j.stat = PEND
             j.susp_since = 0.0
-            if db.update_if_stat_in(j, (PSUSP,)):
+            if db.update_if_stat_in(j, (PSUSP,),
+                                   columns=("stat", "susp_since", "pend_secs")):
                 db.log_event(j.job_id, j.array_index, "resume", "user", ts=now)
             else:
                 _err(f"Job <{j.display_id}>: Job is not in a suspended state")
@@ -789,8 +789,7 @@ def cmd_bmod(argv: List[str]) -> int:
     db = Database()
     jobs, missing = _collect_by_specs(db, specs)
     for j in jobs:
-        j.job_group = group
-        db.update_job(j)
+        db.update_job_group(j.row_id, group)
     rc = 0
     for m in missing:
         _err(f"Job <{m}>: No matching job found")

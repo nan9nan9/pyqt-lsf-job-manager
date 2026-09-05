@@ -47,7 +47,7 @@ def test_ledger_expiry_with_a_future_finish_time():
     future = now + timedelta(days=30)
     e = _Entry(status=JobStatus(job_id=1, array_index=None,
                                 state=JobState.DONE, exit_code=0,
-                                finish_time=future), seen_at=now)
+                                finish_time=future), seen_at=now, fetched_at=0.0)
     print(f"finish_time 30일 미래 → 만료={src._expired(e, now)}")
     assert src._expired(e, now) is False           # 안 버린다(보수적)
     src.shutdown()
@@ -60,7 +60,7 @@ def test_ledger_expiry_with_a_far_past_seen_at():
     e = _Entry(status=JobStatus(job_id=1, array_index=None,
                                 state=JobState.DONE, exit_code=0,
                                 finish_time=None),
-               seen_at=now - timedelta(days=100))
+               seen_at=now - timedelta(days=100), fetched_at=0.0)
     assert src._expired(e, now) is True
     src.shutdown()
 

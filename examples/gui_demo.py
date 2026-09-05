@@ -334,10 +334,7 @@ class Dashboard(QWidget):
         js = self.mgr.create_jobset(
             cmds, job_keys=[f"run_{i}" for i in range(len(cmds))],
             label=label)
-        # 데모는 1초 촘촘한 폴링을 **직접** 관리한다 — auto_poll을 그대로
-        # 넘기면 착수 확정 시 라이브러리가 기본 주기(10s)로 폴링을 다시 걸어
-        # 아래 start_polling(js, 1)을 덮는다(rerun_failed와 같은 패턴).
-        # 체크박스는 "1초 폴링 켬/끔"의 의미로 유지한다.
+        # 1초 폴링은 데모에서 직접 관리한다. auto_poll이 기본 주기로 덮어쓰지 않게 한다.
         fast_poll = kw.pop("auto_poll", True)
         self.mgr.submit(js, post_process=self._summarize_results,
                         auto_poll=False, **kw)

@@ -116,21 +116,12 @@ class JobSetHandlerService(QObject):
         self._pool = QThreadPool()
         self._pool.setMaxThreadCount(MAX_HANDLER_WORKERS)
         self._handlers: Dict[Tuple[str, str], _Handler] = {}
-        # 실행 중인 (jobset_id, handler_name, job_key) — _Handler 밖에 둔다.
-        # _Handler 안에 있으면 remove_handler → add_handler 재등록 때 이 표식이
-        # 옛 객체와 함께 버려져, worker에서 아직 도는 job을 새 handler가 다시
-        # 실행한다(같은 job에 사용자 코드가 동시 2회 진입). 이름을 키에 포함해
-        # 서로 다른 handler는 여전히 독립적으로 돈다.
+        # 실행 표식은 handler 객체 밖에 보관해 삭제·재등록 중 중복 실행을 막는다.
+        # 키는 (jobset_id, handler_name, job_key)이며 서로 다른 handler는 독립 실행한다.
         self._inflight: set = set()
         self._inflight_lock = threading.Lock()
-        # 실행 대기 큐 + 그 큐를 비우는 worker 수.
-        # **job 1건당 QRunnable 1개를 pool에 넣지 않는다** — QThreadPool.start는
-        # 이 바인딩에서 건당 ~180us라(pool 크기와 무관, 선형) tick이 main
-        # 스레드에서 그 비용을 job 수만큼 문다: RUN 5000건이면 폴링 사이클마다
-        # ~1.1초, 2만 건이 한꺼번에 종료되면 4.4초 GUI 정지였다(실측).
-        # 어차피 동시 실행은 MAX_HANDLER_WORKERS로 묶여 있어 나머지는 큐에서
-        # 대기할 뿐이므로, 큐에 넣는 일은 main에서 O(1)로 하고 worker가 꺼내
-        # 돈다 — pool.start 호출은 tick당 최대 worker 수만큼이다.
+        # 작업은 큐에 모으고 제한된 수의 worker가 꺼내 실행한다.
+        # job마다 QThreadPool.start를 호출하는 GUI 스레드 비용을 피한다.
         self._queue: deque = deque()
         self._queue_lock = threading.Lock()
         self._draining = 0                   # 도는 drain worker 수
@@ -251,10 +242,8 @@ class JobSetHandlerService(QObject):
         if rec.state.is_terminal and not in_end:
             h.status[rec.job_key] = _FINISHED
             return
-        # 아직 시작 state에 안 왔고 종료도 아니면 대기.
-        # (_RUNNING은 start를 벗어나도 계속 돈다 — start_states는
-        # "켜는 조건"이지 "도는 구간"이 아니다. resubmit 리셋 레코드는
-        # rearm()이 _PENDING으로 되돌려 이 규칙으로 다시 대기한다)
+        # start_states는 실행 시작 조건이다. 시작 후에는 그 상태를 벗어나도 계속 실행한다.
+        # 재제출은 rearm에서 _PENDING으로 되돌린다.
         if st == _PENDING and not in_start and not in_end:
             return
         final = in_end
@@ -263,10 +252,7 @@ class JobSetHandlerService(QObject):
         with self._queue_lock:
             self._queue.append((h, rec, final))
 
-    # ------------------------------------------------------------------
-    # inflight 표식 — handler 객체 수명과 분리 (재등록에도 새지 않는다).
-    # lock 순서는 항상 h.lock → _inflight_lock (역순 취득 경로 없음).
-    # ------------------------------------------------------------------
+    # inflight는 handler 수명과 독립적이다. 잠금 순서는 h.lock → _inflight_lock.
     def _inflight_key(self, h: "_Handler", job_key: str):
         return (h.jobset_id, h.name, job_key)
 

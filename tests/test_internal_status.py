@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 import pytest
@@ -44,6 +45,72 @@ def _source(fetcher, **kw):
     kw.setdefault("refresh_min_s", 0.0)
     kw.setdefault("wait_timeout_s", 5.0)
     return InternalStatusSource(fetcher, **kw)
+
+
+@pytest.mark.parametrize("suffix", ["+99:00", "-24:00", "+01:99"])
+def test_invalid_optional_timezone_does_not_discard_status(suffix):
+    text = "2026-08-08T12:00:01" + suffix
+    assert parse_time(text) is None
+    (status,) = parse_internal_jobs(_payload(_job(1, startTime=text)))
+    assert status.state is JobState.RUN
+    assert status.start_time is None
+
+
+def test_new_interest_fetches_even_when_other_jobs_are_cached():
+    calls = []
+
+    def fetch():
+        calls.append(True)
+        return _payload(_job(1), _job(2))
+
+    src = _source(fetch, refresh_min_s=60.0)
+    try:
+        src.statuses_by_ids([1])
+        statuses, failed = src.statuses_by_ids([2])
+        assert not failed
+        assert [st.job_id for st in statuses] == [2]
+        assert len(calls) == 2
+        src.statuses_by_ids([1, 2])
+        assert len(calls) == 2
+    finally:
+        src.shutdown()
+
+
+def test_late_response_preserves_newer_status_and_merges_disjoint_jobs():
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def fetch():
+        calls.append(True)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(5)
+            return _payload(_job(1, "PEND"), _job(2, "PEND"))
+        return _payload(_job(1, "RUN"))
+
+    src = _source(fetch, refresh_min_s=60.0)
+    first = threading.Thread(target=src.statuses_by_ids, args=([1, 2],))
+    first.start()
+    try:
+        assert entered.wait(2)
+        with src._cv:
+            src._fetch_deadline = 0.0  # 시간 경과만 대체; 실제 콜백은 겹쳐 실행
+        statuses, failed = src.statuses_by_ids([1, 2], fresh=True)
+        assert not failed
+        assert [(st.job_id, st.state) for st in statuses] == [(1, JobState.RUN)]
+        run_time = statuses[0].run_time_s
+        release.set()
+        with src._cv:
+            assert src._cv.wait_for(lambda: src._inflight == 0, timeout=2)
+        statuses, failed = src.statuses_by_ids([1, 2])
+        assert not failed
+        assert [(st.job_id, st.state) for st in statuses] == [
+            (1, JobState.RUN), (2, JobState.PEND)]
+        assert statuses[0].run_time_s == run_time
+    finally:
+        release.set()
+        first.join(5)
+        src.shutdown()
 
 
 # ----------------------------------------------------------------------
@@ -284,8 +351,8 @@ def test_terminal_without_finish_time_expires_by_seen_at():
     # 매 폴링 전수 스캔을 피하려고 60초 게이트가 걸려 있다)
     with src._cv:
         entry = src._ledger[1][None]
-        src._ledger[1][None] = type(entry)(
-            status=entry.status, seen_at=datetime.now() - timedelta(days=20))
+        src._ledger[1][None] = replace(
+            entry, seen_at=datetime.now() - timedelta(days=20))
         src._last_prune_at = float("-inf")
     src.invalidate()
     src.statuses_by_ids([2])                 # 아무 조회나 — 갱신 시 청소된다

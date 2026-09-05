@@ -48,17 +48,11 @@ class CompletionTracker:
 
     def __init__(self, mgr):
         self._mgr = mgr
-        # post_process — jobset이 전원 terminal에 도달하면 1회 실행되는
-        # 후처리 콜백. submit(post_process=fn)으로 등록되며 실제 무장은 착수
-        # 확정(confirm) 시점에 보류분에서 승격된다. 완료 감지(maybe_finish)
-        # 에서 worker로 실행, post_processing_*로 통지.
+        # 착수 확정 시 무장하고 전원 terminal 도달 시 한 번 실행할 후처리 콜백.
         self._post_process: Dict[str, Callable] = {}
         self._pool = QThreadPool(mgr)
         self._pool.setMaxThreadCount(2)
-        # jobset_finished 1회 latch — 전원 terminal을 이미 통지한 jobset.
-        # 완료 감지가 다시 non-terminal을 보면(재제출/add_jobs로 job 추가)
-        # 자동 해제되고, 착수 확정(confirm)에서도 명시적으로 푼다 — 폴링
-        # 없이 곧장 전원 SUBMIT_FAILED로 끝나는 사이클도 새로 통지되도록.
+        # 완료 통지 latch. non-terminal 관측 또는 새 사이클 착수 확정 시 해제한다.
         self._finished_latch: Set[str] = set()
         # 제출 사이클별 보류 무장분 (무장/폐기 규칙은 _PendingArm docstring)
         self._pending_arm: Dict[str, _PendingArm] = {}
@@ -139,18 +133,11 @@ class CompletionTracker:
         if not self._all_terminal(recs):
             self._finished_latch.discard(jobset_id)   # 다시 활성 — 재무장
             return
-        # 무장 해제는 **jobset_finished 발화보다 먼저** 한다(순서 고정).
-        # 그 slot에서 곧장 재제출하는 GUI 패턴이 흔한데, submit이 부르는
-        # stage()가 _post_process를 비운다 — 뒤로 미루면 방금 도달한 완료의
-        # 후처리가 새 사이클의 접수에 지워져 영영 실행되지 않는다
-        # (회귀 가드: test_post_process_survives_resubmit_from_slot).
+        # 완료 슬롯의 재제출이 현재 후처리를 지우지 않도록 신호 발행 전에 꺼내 둔다.
         fn = self._post_process.pop(jobset_id, None)  # 한 번만
         if all(r.killed for r in recs):
-            # 전원이 내 kill로 끝났다(EXIT는 bkill, CANCELLED는 제출 취소 —
-            # 둘 다 killed 표식을 단다) — 사용자가 스스로 끝낸 완료라 통지하지
-            # 않는다(latch만). kill 완료 시점에 걸러지는 경우(mute_after_kill)
-            # 와 달리, 이 판정은 EXIT가 나중에 확인돼도(actual 정책·verify·
-            # 폴링 수렴) 레코드 표식만으로 성립한다.
+            # 전원이 이 manager의 kill로 끝난 경우 자동 완료 통지를 생략한다.
+            # actual 정책으로 나중에 종료가 확인되어도 killed 표식으로 판정한다.
             self._finished_latch.add(jobset_id)
         if jobset_id not in self._finished_latch:
             try:
@@ -163,14 +150,14 @@ class CompletionTracker:
         if fn is None:
             return
         if mgr._shutdown_done:
-            # jobset_finished slot이 그 자리에서 shutdown한 경우 — 이미 drain된
-            # pool에 join되지 않는 스레드를 만들지 않는다.
-            # ※ 여기서 is_active(재제출)까지 막지는 않는다. 이 실행은 전원
-            #   terminal에 **도달했으므로** post_process는 실행돼야 한다
-            #   (콜백은 위에서 뜬 recs 스냅샷만 쓴다). 새 사이클의 무장은
-            #   보류분(stage)이 따로 들고 있어 서로 간섭하지 않는다.
+            # 종료된 pool에는 작업을 추가하지 않는다.
+            # 재제출은 현재 완료의 후처리를 막지 않는다. 이 콜백은 이전 실행의 스냅샷을 사용한다.
             return
         mgr.post_processing_started.emit(jobset_id)
+        if mgr._shutdown_done:
+            # started의 직접 연결 슬롯에서도 shutdown할 수 있다. 그 슬롯이
+            # 풀을 정리한 뒤에는 새 후처리 작업을 접수하지 않는다.
+            return
         self._pool.start(_PostProcessTask(mgr, jobset_id, fn, recs))
 
     def mute_after_kill(self, jobset_id: str) -> None:

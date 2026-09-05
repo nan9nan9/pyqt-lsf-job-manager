@@ -44,18 +44,12 @@ JOB_OUT_DIR = os.path.join(MOCKLSF_HOME, "jobout")
 # 클러스터 구성
 # ---------------------------------------------------------------------------
 
-# 클러스터/마스터 호스트 이름. 실제 LSF 출력의 FROM_HOST 등에 쓰인다.
-# MOCKLSF_CLUSTER 는 "이 프로세스의 클러스터 컨텍스트"이기도 하다 — forward job
-# kill 시 그 클러스터 cshrc 를 source 하면 이 값이 forward_cluster 로 바뀌어
-# bkill 이 그 job 에 닿는다(아래 MultiCluster 절 참고).
+# 클러스터/마스터 호스트 이름. MOCKLSF_CLUSTER는 forward job kill의 현재 클러스터이기도 하다.
 CLUSTER_NAME = os.environ.get("MOCKLSF_CLUSTER", "mockcluster")
 MASTER_HOST = os.environ.get("MOCKLSF_MASTER", "mockmaster")
 
-# ---------------------------------------------------------------------------
-# MultiCluster (job forwarding) 시뮬레이션
-# ---------------------------------------------------------------------------
-# forward 대상 원격 클러스터 이름들 (콤마 구분). 비어 있으면 MC 꺼짐(포워딩 없음).
-#   예: MOCKLSF_FORWARD_CLUSTERS="cluster_b,cluster_c"
+# MultiCluster forwarding 대상(콤마 구분). 빈 값이면 비활성.
+# 예: MOCKLSF_FORWARD_CLUSTERS="cluster_b,cluster_c"
 FORWARD_CLUSTERS = _env_list("MOCKLSF_FORWARD_CLUSTERS")
 # job 하나가 forward 될 확률(0~1). MC 켜졌을 때만 의미. 기본 0.5.
 FORWARD_RATE = _env_float("MOCKLSF_FORWARD_RATE",
@@ -146,10 +140,7 @@ def ensure_home():
     os.makedirs(JOB_OUT_DIR, exist_ok=True)
     if FORWARD_CLUSTERS:
         os.makedirs(CLUSTER_ENV_DIR, exist_ok=True)
-        # mock 명령(bkill 등)이 있는 bin/ — 실제 LSF cshrc.lsf 가 LSF_BINDIR 를
-        # PATH 에 넣듯, source 시 mock bin 을 PATH 앞에 둬 bare `bkill` 이
-        # 이 bin 의 bkill 로 해석되게 한다(lsfmgr 는 envpath 로 `... && bkill`
-        # 를 실행 — PATH 의 bkill 을 쓴다).
+        # 클러스터 환경을 source하면 bare bkill이 mock 명령을 가리키도록 bin을 PATH 앞에 둔다.
         mock_bin = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin")
         for cluster in FORWARD_CLUSTERS:

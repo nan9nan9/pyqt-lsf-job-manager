@@ -19,13 +19,8 @@ class InMemoryStore(JobSetStore):
         self._jobsets: Dict[str, JobSetRecord] = {}
         # jobset_id → {job_key → JobRecord}
         self._jobs: Dict[str, Dict[str, JobRecord]] = {}
-        # jobset_id → {state.value → 개수}. summary()를 전수 스캔 없이 답하려고
-        # **증분으로** 유지한다. 스캔판은 O(job수)라 대량 제출 중 main 스레드가
-        # 그 값을 물었다(2만 건 실측: 호출당 15ms × 104회 = 1.6s, 게다가 그동안
-        # store lock을 쥐고 있어 worker 전이까지 밀렸다).
-        # 개수가 0이 된 상태는 키를 지운다 — "0인 상태는 키 자체가 없다"는
-        # 요약 계약(README §5.5)을 카운트 단계에서 지킨다.
-        # ※ 레코드 쓰기는 반드시 _put_rec/_drop_rec만 거친다.
+        # 상태별 개수를 증분 관리해 summary의 전수 스캔을 피한다. 0인 상태는 키를 제거한다.
+        # 집계 일관성을 위해 레코드 쓰기는 _put_rec/_drop_rec을 거친다.
         self._counts: Dict[str, Dict[str, int]] = {}
 
     # ------------------------------------------------------------------

@@ -68,7 +68,8 @@ def test_timeout_is_confirmed_by_query_not_by_reissuing_bkill(qtbot, fake_lsf):
         mgr.shutdown()
 
 
-def test_timeout_with_a_still_alive_job_keeps_retrying(qtbot, fake_lsf):
+@pytest.mark.parametrize("state", [JobState.PEND, JobState.UNKWN, JobState.ZOMBI])
+def test_timeout_with_a_still_alive_job_keeps_retrying(qtbot, fake_lsf, state):
     """반대 방향 — 조회에서 아직 살아있으면 재시도는 그대로 일어나야 한다.
     (timeout을 무조건 '죽었다'로 접으면 진짜 미처리분이 묻힌다)"""
     class _AlwaysTimeout:
@@ -91,6 +92,7 @@ def test_timeout_with_a_still_alive_job_keeps_retrying(qtbot, fake_lsf):
     try:
         with qtbot.waitSignal(mgr.submit_finished, timeout=10000):
             js = submit_cmds(mgr, ["mytool a.sp"], auto_poll=False)
+        fake_lsf.set_all(state.value)
         with qtbot.waitSignal(mgr.kill_finished, timeout=20000) as blk:
             mgr.kill(js)
         rpt = blk.args[1]
@@ -98,7 +100,8 @@ def test_timeout_with_a_still_alive_job_keeps_retrying(qtbot, fake_lsf):
             f"재시도가 {runner.bkill_calls}회 — 살아있으면 kill_max_retry까지 "
             f"다시 쏴야 한다")
         assert rpt.unconfirmed == 1 and rpt.errors
-        assert js.jobs()[0].state is JobState.PEND   # 죽지 않았으니 그대로
+        assert js.jobs()[0].state is not JobState.EXIT
+        assert not js.jobs()[0].killed
     finally:
         mgr.shutdown()
 

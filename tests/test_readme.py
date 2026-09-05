@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
 
 from lsfmgr import (
     JobState,
@@ -11,18 +12,28 @@ from tests.conftest import submit_cmds
 
 
 # ----------------------------------------------------------------------
-# §1 Quick Start — 3줄 그대로
+# §1 Quick Start — 문서의 코드 블록 자체를 실행
 # ----------------------------------------------------------------------
-def test_quickstart_verbatim(qtbot, fake_lsf, config):
+def test_quickstart_verbatim(qtbot, fake_lsf, config, monkeypatch):
+    import lsfmgr
+
+    text = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+    code = text.split("```python\n", 1)[1].split("```", 1)[0]
     mgr = LsfJobManager(config=config, runner=fake_lsf)
+    monkeypatch.setattr(lsfmgr, "LsfJobManager", lambda: mgr)
+    lines = []
+    namespace = {"print": lines.append}
     try:
-        lines = []
-        js = submit_cmds(mgr, [f"mytool run_{i}.sp" for i in range(50)])
-        js.jobset_updated.connect(
-            lambda s: lines.append(
-                f"RUN={s.get('RUN', 0)} DONE={s.get('DONE', 0)}/{s['total']}"))
-        qtbot.waitUntil(lambda: len(lines) >= 1, timeout=10000)
-        assert lines[0].endswith("/50")
+        with qtbot.waitSignal(mgr.submit_finished, timeout=30000):
+            exec(compile(code, "README.md", "exec"), namespace)
+        js = namespace["js"]
+        assert js.summary == {"total": 5000, "PEND": 5000}
+        # 상태 키가 없는 제출 직후와 실제 완료 모두 문서의 슬롯을 통과한다.
+        assert "RUN=0 DONE=0/5000" in lines
+        fake_lsf.set_all("DONE")
+        with qtbot.waitSignal(js.jobset_finished, timeout=10000):
+            mgr.query_once(js)
+        assert "RUN=0 DONE=5000/5000" in lines
     finally:
         mgr.shutdown()
 

@@ -74,21 +74,10 @@ class _SubmitContext:
     #: job별 실패 로그 표본기 — 대량 실패 시 로그 폭주를 접는다(사이클 단위)
     log_sampler: LogSampler = field(default_factory=LogSampler)
     cancel_event: threading.Event = field(default_factory=threading.Event)
-    # RLock인 이유(리뷰 M2): finished/progress는 순서 보장을 위해 이 lock을
-    # 쥔 채 발화된다. worker 발화는 queued라 무해하지만, main 스레드 발화
-    # 경로(born-cancelled 정산·QTimer 재시도 확정·shutdown drain)는 슬롯이
-    # direct로 실행돼, 슬롯이 progress_snapshot()/cancel_submit() 같은
-    # lock-보유 API를 pull하면 비재진입 Lock에선 같은 스레드 재획득으로
-    # 영구 데드락(GUI freeze)이 났다. RLock은 같은 스레드 재진입만 허용해
-    # 이 계열을 없애고 cross-thread 배타는 그대로 유지한다.
+    # 잠금 아래 발행한 신호의 direct 슬롯이 snapshot/cancel API로 재진입할 수 있어 RLock을 쓴다.
     lock: threading.RLock = field(default_factory=threading.RLock)
-    #: 재시도 원장 전용 lock — **ctx.lock과 겹치지 않는다**.
-    #: ctx.lock은 순서 보장을 위해 worker가 신호를 발화하는 동안에도 쥐고
-    #: 있어(‑> _emit_progress) 대량 제출에서 상시 혼잡하다. 재시도 원장까지
-    #: 거기 얹으면 main 스레드의 _on_retry_requested가 매번 그 혼잡을 기다린다
-    #: — 2000건 재시도 폭풍 실측에서 main이 lock 대기로만 628ms를 썼다.
-    #: 원장은 카운터와 원자적일 이유가 없으므로 따로 잠근다.
-    #: 중첩 취득 없음(원장 lock을 쥔 채 ctx.lock을 잡는 경로가 없다).
+    #: 재시도 원장은 진행 카운터와 독립적으로 잠근다.
+    #: 신호 발행 중 ctx.lock 경합을 피하며, 두 잠금은 중첩 취득하지 않는다.
     retry_lock: threading.Lock = field(default_factory=threading.Lock)
     started_at: float = field(default_factory=time.monotonic)
     done: int = 0
@@ -108,10 +97,7 @@ class _SubmitContext:
     # manager가 발급한 제출 사이클 token — records_reset/gate_rejected에 실어
     # 돌려준다 (낡은 신호가 새 사이클의 보류분을 건드리지 못하게)
     arm_token: object = None
-    #: **job 단위** 취소 지시 (선택 kill 전용) — cancel_event가 사이클 전체를
-    #: 멈추는 것과 달리, 여기 담긴 key만 제출을 포기한다. 나머지 job의 제출은
-    #: 그대로 진행된다. 한 번 담기면 사이클이 끝날 때까지 지우지 않는다 —
-    #: 지우면 pool/QTimer에 남은 잔여 task가 kill 뒤에 그 job을 되살린다.
+    #: 선택 kill로 취소한 key. 잔여 task가 재제출하지 않도록 사이클 종료까지 유지한다.
     cancelled_keys: set = field(default_factory=set)
     #: 지금 **제출 시도 구간에 들어가 있는** key — SUBMITTING 전이 직전에
     #: 등록하고 task 종료(성공/실패/취소/예외)에서 해제한다. 선택 kill의
@@ -158,10 +144,7 @@ class _SubmitTask(QRunnable):
 
     def _run(self):
         sub, ctx = self.submitter, self.ctx
-        # 취소 판정과 제출 구간 진입(inflight)을 **한 임계구역에서** 한다 —
-        # 갈라 놓으면 cancel_jobs가 '판정을 막 통과한' task를 놓치고
-        # quiesce_jobs는 inflight가 비어 즉시 통과해, 그 job이 kill이 끝난
-        # 뒤에 제출을 마쳐 LSF에 살아남는다(선택 kill 유출).
+        # 취소 판정과 inflight 등록을 원자적으로 묶어 kill의 대기 범위에서 빠지는 제출을 막는다.
         if not sub._enter_inflight(ctx, self.job_key):
             sub._task_cancelled(ctx, self.job_key)
             return
@@ -178,11 +161,7 @@ class _SubmitTask(QRunnable):
             # 리셋 배치가 이미 발행했고, 거기에 또 얹으면 대량 제출에서
             # job 수만큼 중복 레코드가 흐른다.
             sub._note_transition(ctx, starting)
-        # 이 사이클의 동시 제출 상한 — 호출별 workers가 전역보다 낮을 때만
-        # 실제로 막는다. 취소를 보며 기다려 kill이 슬롯 대기에 갇히지 않는다.
-        # (v11: 초당 상한 rate_limit_per_s는 삭제됐다 — 공용 풀에서 그 대기가
-        #  worker 슬롯을 물고 있어 다른 jobset을 굶겼고, 전역 workers가
-        #  생기면서 실효도 사라졌다. 초당 ≈ workers / bsub 1회 소요.)
+        # 호출별 workers가 전역 상한보다 낮으면 추가 제한한다. 슬롯 대기 중에도 취소를 확인한다.
         if not ctx.slots.acquire(self._cancelled):
             sub._task_cancelled(ctx, self.job_key)
             return
@@ -233,10 +212,8 @@ class BulkSubmitter(QObject):
     error = Signal(str, str)                  # jobset_id, message
     jobs_changed = Signal(str, list)          # jobset_id, [JobRecord] 전이 배치
     started = Signal(str)                     # jobset_id — 게이트 통과 후 제출 착수
-    # 착수 확정/무산 — manager의 보류 무장분(_pending_arm) 처리 전용 내부 신호.
-    # records_reset: 레코드 리셋 완료(=이 사이클의 제출 착수 확정).
-    # gate_rejected: 게이트가 착수 없이 종료(거부/예외/통과 직후 취소/shutdown).
-    # 두 번째 인자는 manager가 발급한 사이클 token — 낡은 신호 식별용.
+    # records_reset은 착수 확정, gate_rejected는 착수 전 종료를 알린다.
+    # 두 번째 인자의 사이클 token으로 manager가 낡은 무장 신호를 구별한다.
     records_reset = Signal(str, object)       # jobset_id, arm_token
     gate_rejected = Signal(str, object)       # jobset_id, arm_token
     pre_submit_started = Signal(str)               # jobset_id — pre_submit 게이트 시작
@@ -253,12 +230,7 @@ class BulkSubmitter(QObject):
         self.store = store
         self.command = command
         self.config = config or command.config
-        # 동시 제출 상한은 **전역**이다 — 제출 사이클(=진행 중인 jobset)마다
-        # 풀을 새로 만들면 jobset 3개 동시 제출에 wrapper가 8이 아니라 24개
-        # 뜬다. workers를 낮게 잡아 eauth/mbatchd 과부하를 막으려는 사이트에서
-        # 그 보호가 동시 제출 수만큼 무력화된다(8코어 실측: 동시 64개면 GUI
-        # main 최대 지연 193ms, 전역 8이면 40ms).
-        # worker_limit는 manager가 해석한 실효 workers(①config + ②manager kwarg).
+        # manager의 실효 workers를 공용 풀 상한으로 사용해 여러 jobset의 동시 제출도 제한한다.
         self._workers = max(1, int(self.config.workers if worker_limit is None
                                    else worker_limit))
         self._pool = QThreadPool(self)          # 제출(bsub) 전용
@@ -304,27 +276,14 @@ class BulkSubmitter(QObject):
         ctx = self._new_context(jobset_id, [k for k, _item in keyed], options)
         ctx.arm_token = arm_token
         if ctx.cancel_event.is_set():
-            # born-cancelled (kill barrier 중 시작) — 아래 리셋은 기존
-            # job_id/이력을 소거하는 파괴적 연산이라, 시작 전 취소면 레코드를
-            # 아예 건드리지 않고 전원 취소로 정산한다 (원상 유지).
-            # _gate_reject가 같은 일(cancelled=total 일괄 + finished 1회 +
-            # _drop_ctx)을 O(1)로 한다 — 건당 _count 루프는 대형 재제출에서
-            # main 스레드가 O(N)회 lock/신호 발화를 하게 되므로 금지.
-            #
-            # started/finished 짝: born-cancelled는 게이트를 통째로 건너뛰므로
-            # pre_submit_* 신호도, _launch_cycle의 started도 나가지 않는다. 그대로면
-            # 아무 착수 신호 없이 finished(cancelled)만 나가 started↔finished를
-            # 쌍으로 세는 구독자(스피너/제출버튼 게이팅)의 카운터가 음수로
-            # 내려간다. 게이트가 실행되지 않아 순서 충돌이 없으니 finished 직전에
-            # started를 내 최소 짝(started→finished)을 맞춘다.
+            # barrier로 시작 전 취소된 경우 기존 job_id/이력을 리셋하지 않고 일괄 정산한다.
+            # 게이트 신호가 없으므로 started → finished(cancelled) 짝을 직접 발행한다.
             self._safe_emit(self.started, jobset_id)
             self._gate_reject(ctx, finish=True)
             return False
         if pre_submit is None:
-            # v10.1(리뷰 M1): 비게이트 착수도 worker에서 — N건 store 리셋 +
-            # task 생성이 main(GUI) 스레드를 O(N) 블록하지 않게(실측
-            # 10k에서 ~1s). 예외 래핑은 게이트 경로(_GateTask.run)와 동일
-            # 목적 — 착수가 죽어도 ctx를 미완으로 두지 않는다.
+            # 대량 레코드 리셋과 task 생성을 worker에서 수행해 GUI를 막지 않는다.
+            # 착수 예외도 완료로 정산한다.
             def _launch_guarded():
                 try:
                     self._launch_cycle(ctx, keyed)
@@ -367,21 +326,13 @@ class BulkSubmitter(QObject):
         with ctx.lock:
             already_finished = ctx.finished
         if already_finished:
-            # 전 키 리셋 실패(전멸) — ②의 계상이 이미 finished를 확정했다.
-            # 여기서 무장 신호를 내면 끝난 사이클에 rearm/post_process 무장이
-            # 잔존해 다음 폴링이 옛 terminal 레코드에 오발화한다(리뷰 B2).
+            # 리셋 단계에서 완료된 사이클에는 handler·후처리를 무장하지 않는다.
             self._safe_emit(self.gate_rejected, ctx.jobset_id, ctx.arm_token)
             return
         self._safe_emit(self.records_reset, ctx.jobset_id, ctx.arm_token)  # ④
         for i, task in enumerate(tasks):                               # ⑤
-            # 우선순위 = **jobset 안의 순번**. 공용 풀은 우선순위가 같으면
-            # 선착순이라, 큰 jobset을 통째로 밀어 넣으면 뒤에 온 작은
-            # jobset이 그 400건 뒤에 전부 줄선다(실측: 400건 뒤의 5건이
-            # 1.07s 대기, 단독이면 0.013s). 순번을 우선순위로 주면 "모든
-            # jobset의 1번 → 모든 jobset의 2번 → …" 순으로 집행돼 그 자체가
-            # 라운드 로빈이 된다(같은 실측 0.09s). jobset **안**의 순서는
-            # 우선순위가 순번대로 내려가므로 그대로 보존된다.
-            # 계약은 test_submit_fairness가 지킨다.
+            # jobset 내 순번을 우선순위로 써 여러 jobset의 작업을 교대로 실행한다.
+            # 큰 jobset 뒤에 들어온 작은 jobset의 대기를 줄이면서 각 집합 내부 순서는 보존한다.
             self._pool.start(task, -i)
         if not launch:
             # 띄운 task가 0건 — 완료를 여기서 직접 확정한다(게이트 경로의
@@ -405,16 +356,8 @@ class BulkSubmitter(QObject):
         """
         with ctx.lock:
             blocked = set(ctx.cancelled_keys)
-        # 리셋으로 사라질 옛 job_id를 조회원 원장에서도 버린다 — 레코드에서
-        # 지우기만 하면 그 id는 아무도 조회하지 않는데 원장·관심 집합에는
-        # 영영 남는다(종료 상태로 마지막에 보인 것만 보존기간 뒤 정리되고,
-        # 진행 중으로 보였던 것은 만료 대상이 아니라 영구히 남았다).
-        # **이 사이클이 리셋할 key만** 본다 — jobset 전체를 훑으면 only=
-        # 재제출에서 대상 아닌 RUN job의 원장 항목까지 버려지는데, 증분
-        # payload는 안 바뀐 job을 다시 보내지 않으므로 그 job이 미발견으로
-        # 몰려 LOST(되돌릴 수 없음)로 확정될 수 있다. 리셋 대상의 forget은
-        # 항상 안전하다 — 그 id는 리셋으로 정말 죽는 id다.
-        # (get_jobs_by_keys는 jobset 소실 시 빈 dict — 예외 방어 불필요)
+        # 이번에 리셋할 key의 옛 job_id만 조회원에서 제거한다.
+        # 다른 RUN job을 제거하면 증분 응답에 다시 오지 않아 LOST로 오판할 수 있다.
         cycle_keys = [key for key, _item in keyed if key not in blocked]
         stale_ids = [r.job_id for r in
                      self.store.get_jobs_by_keys(ctx.jobset_id,
@@ -613,13 +556,8 @@ class BulkSubmitter(QObject):
         if ctx is None:
             return
         ctx.cancel_event.set()
-        # QTimer 대기 중인 재시도도 **지금** 포기 확정한다 — 그대로 두면 각
-        # backoff 타이머가 만료돼야 fire()가 취소를 보고 확정하므로, expo
-        # backoff가 긴 job 하나에 finished가 분 단위로 밀리고 그동안
-        # is_active=True라 편집/재제출/remove_jobset이 전부 막힌다
-        # (kill 경로 _cancel_scope가 같은 이유로 함께 부른다).
-        # 취소 이후에 새로 등록되는 재시도는 _on_retry_requested가 대기 없이
-        # 즉시 포기하므로 이 한 번이면 전부 덮인다.
+        # 재시도 타이머 만료를 기다리지 않고 취소를 확정한다.
+        # 이후 도착하는 재시도 요청도 _on_retry_requested에서 즉시 포기한다.
         self._abort_retries_ctx(ctx, reason="CANCELLED")
 
     def shutdown(self) -> None:
@@ -633,10 +571,7 @@ class BulkSubmitter(QObject):
         # 공용 풀 — 사이클별로 join할 것이 없다(착수/게이트도 함께 비운다)
         self._coord.waitForDone(-1)
         self._pool.waitForDone(-1)
-        # QTimer 대기 중인 재시도는 이벤트 루프가 곧 끝나면 영영 발화하지
-        # 않는다 — 원장 잔류분을 여기서 확정해야 RETRY_WAIT가 비terminal로
-        # 잔존하지 않고 finished도 발행된다.
-        # waitForDone 이후에는 원장에 새 항목이 추가되지 않는다.
+        # worker 종료 후 남은 재시도를 정산한다. 이벤트 루프 종료 뒤에는 타이머가 발화하지 않는다.
         for ctx in contexts:
             with ctx.retry_lock:
                 entries = list(ctx.pending_retries.values())
@@ -726,13 +661,7 @@ class BulkSubmitter(QObject):
         with ctx.lock:
             job_cancelled = job_key in ctx.cancelled_keys
         if job_cancelled:
-            # 선택 kill이 이 job을 겨냥한 사이(제출 시도 중) 실패가 돌아왔다 —
-            # 재시도를 걸면 kill이 끝난 뒤에도 backoff가 만료될 때까지
-            # RETRY_WAIT(활성)로 남아 can_submit이 막히고 kill이 덜 끝난
-            # 것처럼 보인다(_cancel_scope의 원장 비우기는 등록 전이라 못
-            # 잡는다). 취소 판정을 조금만 먼저 통과했을 때와 같은 결과
-            # (CANCELLED + killed 표식)로 바로 확정한다 — 타이밍에 따라
-            # 최종 상태가 갈리지 않는다.
+            # 제출 중 선택 취소된 job은 재시도하지 않고 CANCELLED/killed로 확정한다.
             self._task_cancelled(ctx, job_key)
             return
         if (getattr(err, "retryable", True) and attempt < ctx.options.max_retry
@@ -866,10 +795,7 @@ class BulkSubmitter(QObject):
             if self._shutdown or ctx.cancel_event.is_set():
                 self._finalize_retry(ctx, entry, "CANCELLED")
                 return
-            # 재시도는 **끼어들기**다 — 우선순위 0은 어느 jobset의 1번과도
-            # 같은 자리라 대기 중인 후속분보다 앞선다. 우연이 아니라 결정이다:
-            # 이 job은 이미 RETRY_WAIT로 backoff를 기다린 뒤라 여기서 또 줄
-            # 뒤로 보내면 재시도가 지연을 두 번 먹는다.
+            # backoff를 이미 기다린 재시도는 후속 작업보다 먼저 실행한다.
             self._pool.start(entry.make_task(), 0)
 
         if self._shutdown or ctx.cancel_event.is_set():
@@ -969,10 +895,7 @@ class BulkSubmitter(QObject):
 
     def _emit_progress(self, ctx: _SubmitContext,
                        progress: bool = True) -> None:
-        # 발화(progress·jobs_changed)를 ctx.lock 안에서 수행한다 — drain과 emit이
-        # 원자적이어야, 다른 worker 스레드의 _finish_if_done가 그 사이에 끼어들어
-        # finished를 마지막 per-job jobs_changed보다 먼저 post하는 경합을 막는다
-        # (worker→main은 queued connection이라 lock 중 emit은 post만 한다).
+        # drain과 신호 발행을 같은 잠금으로 묶어 finished가 마지막 jobs_changed를 앞서지 않게 한다.
         with ctx.lock:
             if ctx.finished:
                 return                   # 최종 flush는 _finish_if_done 담당
@@ -995,25 +918,14 @@ class BulkSubmitter(QObject):
             ctx.finished = True
             batch, ctx.changed_buffer = ctx.changed_buffer, []
             report = self._make_report(ctx)     # _gate_reject/_fail과 동일 구성
-            # 마지막 progress는 반드시 (total, total) — 계약(README §6.1).
-            # _count는 _emit_progress → _finish_if_done 순서지만, 마지막 1건을
-            # 계상한 worker가 _emit_progress에 들어가기 **전에** 다른 worker의
-            # _finish_if_done이 done==total을 보고 finished를 세우면, 그
-            # _emit_progress가 `if ctx.finished: return`으로 빠져 최종 통지가
-            # 통째로 유실된다(진행바가 49/50에서 멈춘 채 완료). 여기서 낸다.
-            # force 경로(게이트 거부 등)는 done<total일 수 있어 제외한다.
+            # 다른 worker가 마지막 progress보다 먼저 완료를 감지할 수 있어 최종 (total, total)을 보장한다.
+            # force 완료는 done < total일 수 있으므로 제외한다.
             if ctx.done >= ctx.total:
                 self.progress.emit(ctx.jobset_id, ctx.total, ctx.total)
-            # 마지막 전이분 flush → finished 를 같은 lock 안에서 순서대로 발화.
-            # 모든 per-job jobs_changed도 ctx.lock 안에서 발화되므로, 락이
-            # 직렬화해 finished가 반드시 마지막 per-job jobs_changed 뒤에
-            # post된다 — UI가 완료 통지 시점에 전 job 갱신을 이미 받도록 보장.
+            # 마지막 상태 배치와 finished를 같은 잠금 안에서 순서대로 발행한다.
             if batch:                    # throttle 잔여 마지막 전이분
                 self.jobs_changed.emit(ctx.jobset_id, batch)
-            # 완료 로그는 finished **발화 전에** — 발화는 worker→main queued라,
-            # 뒤에 두면 신호를 받은 main이 로그가 찍히기 전에 먼저 깨어난다
-            # (완료 통지를 보고 로그를 읽는 쪽에서 완료 라인이 비어 보인다).
-            # kill 경로(killer.py 'kill 완료')와 같은 순서.
+            # 완료 신호 수신자가 로그를 바로 읽을 수 있도록 먼저 기록한다.
             breakdown = ("" if not ctx.fail_reasons else
                          " — 실패 사유: " + ", ".join(
                              f"{r} {n}건" for r, n in
@@ -1063,10 +975,7 @@ class BulkSubmitter(QObject):
             if ctx.finished:
                 return
             ctx.finished = True
-            # 이미 계상된 단위(리셋 중 소실/barrier 거부분)는 각자 분류를
-            # 유지하고 **남은 단위만** 일괄 확정한다 — total로 덮어쓰면
-            # 부분 계상 뒤 착수가 죽었을 때 failed+cancelled 합이 total을
-            # 넘는 보고서가 된다.
+            # 이미 정산한 단위의 분류를 보존하고 남은 수량만 확정한다.
             remaining = ctx.total - ctx.done
             ctx.done = ctx.total
             if failed:
@@ -1097,10 +1006,7 @@ class BulkSubmitter(QObject):
         """게이트/착수 예외 — 실패 확정. 리셋됐지만 착수 못 한 SUBMITTING
         레코드를 SUBMIT_FAILED로 되돌려 고착을 막고(비게이트 착수 예외
         대비), error + finished + gate_rejected(무장 정리)로 마무리한다."""
-        # 리셋만 되고 착수 못 한 SUBMITTING 레코드 un-stick — 안 하면 재제출
-        # 가드(활성 job)에 걸려 jobset이 잠긴다. **CAS guard**: 그새 실행 중
-        # task가 SUBMITTING→PEND로 옮겼으면 되돌리지 않는다(실행 중 bsub를
-        # SUBMIT_FAILED로 덮으면 그 LSF job이 고아가 된다).
+        # 착수하지 못한 SUBMITTING만 해제한다. 이미 PEND가 된 작업은 CAS로 보호한다.
         stuck = []
         try:
             recs = self.store.get_jobs(ctx.jobset_id)
@@ -1189,5 +1095,4 @@ class _GateTask(QRunnable):
             return
         if ctx.total == 0:                           # 빈 제출 — 직접 마무리
             sub._finish_if_done(ctx, force=True)
-
 

@@ -55,19 +55,12 @@ class Killer(QObject):
         self.querier = querier
         self._pool = QThreadPool()
         self._pool.setMaxThreadCount(4)
-        # 진행 중 kill의 pull 스냅샷 — jobset_id → kill별 slot([done,total])
-        # 리스트. 같은 jobset에 kill이 겹칠 수 있으므로(예: 선택 kill 직후
-        # 전체 kill) 단일 엔트리 덮어쓰기가 아니라 kill 1건당 slot 1개를
-        # 등록·해제한다 — 먼저 끝난 kill이 진행 중인 다른 kill의 등록을
-        # 지우지 못한다. worker(update)와 조회 스레드(snapshot)가 공유.
+        # jobset별 진행 slot 목록. 겹친 kill을 각각 등록·해제하며 worker와 조회 스레드가 공유한다.
         self._active: Dict[str, List[List[int]]] = {}
         self._active_lock = threading.Lock()
         self._shutdown = False
-        # _shutdown 체크와 _pool.start를 원자화한다 — 없으면 kill 스레드가
-        # _shutdown=False를 읽은 직후 shutdown()이 _shutdown=True + waitForDone
-        # 으로 pool을 비워버린 뒤 task가 start돼 아무도 join 못 하는 worker가
-        # 뜬다. shutdown()도 이 락 아래에서 플래그를 세운다.
-        # 락 순서: _shutdown_lock → _active_lock(_reg) (역순 금지).
+        # shutdown 판정과 pool.start를 원자화해 종료 이후 task 추가를 막는다.
+        # 잠금 순서는 _shutdown_lock → _active_lock이며 역순 취득하지 않는다.
         self._shutdown_lock = threading.Lock()
 
     def is_active(self, jobset_id: str) -> bool:
@@ -280,14 +273,13 @@ class _KillTask(QRunnable):
         still_alive: Optional[int] = None
         alive_keys: set = set()
         verify_changed: List = []
-        if self.verify:            # jobset 없어도 직접 조회로 검증 (v10.3)
+        if self.verify:            # jobset이 없으면 직접 조회로 검증한다.
             still_alive, alive_keys, verify_changed = \
                 self._verify(set(plan.targets))                        # ③
 
         changed = self._mark_killed(plan, resolved, alive_keys)
-        # verify가 전이시킨 레코드도 합류시킨다 — 그 job은 이후 폴링(_ON_LSF만
-        # 조회)에도 마킹(is_on_lsf guard)에도 안 잡혀 행 갱신이 영구 유실됐다
-        # (리뷰 M5). verify → 마킹 순서라 중복 시 최신 것이 뒤에 온다.
+        # verify로 terminal이 된 레코드도 갱신 배치에 포함한다.
+        # verify → 마킹 순서로 합쳐 중복 시 최신 레코드가 뒤에 오게 한다.
         return KillReport(
             jobset_id=self.jobset_id, requested=plan.requested,
             strategies=strategies, command_calls=calls,
@@ -374,10 +366,8 @@ class _KillTask(QRunnable):
             targets = [self._id_str(r) for r in recs if r.job_id is not None]
             return _KillPlan(recs, targets, len(targets), self._id_str,
                              f"chunk(state={self.only_state.value})")
-        # 전체 kill — 살아있는 전 job. array element는 parent id 1개로
-        # 전체가 죽으므로 bare id로 dedupe하고, rec→target 매핑도 bare id
-        # (verify가 kill 창에 rerun(bsub -r)으로 되살아난 element까지
-        # 잔존으로 잡는 근거이기도 하다).
+        # 전체 kill은 배열의 모든 element를 포함하도록 부모 ID로 중복 제거한다.
+        # verify도 부모 ID를 사용해 kill 중 재실행된 element를 확인한다.
         k.store.get_jobset(self.jobset_id)   # 존재 검증 (없으면 예외)
         recs = [r for r in k.store.get_jobs(self.jobset_id)
                 if r.state.is_on_lsf]
@@ -418,11 +408,8 @@ class _KillTask(QRunnable):
         반환: 실제 전이된 레코드."""
         changed = []
         for r in recs:
-            # r.jobset_id 사용 — kill_jobs 전역 검색은 대상이 여러 JobSet에
-            # 걸칠 수 있어 self.jobset_id(빈 값)로는 안 된다.
-            # 마킹은 bkill **이후**의 부기다 — 그 사이 main 스레드가 레코드/
-            # jobset을 지웠다고 이미 성공한 kill이 internal 오류로 오보되면
-            # 안 된다(find_jobs와 같은 소실 방어).
+            # 전역 kill은 여러 jobset에 걸칠 수 있어 레코드의 jobset_id를 사용한다.
+            # bkill 이후 삭제된 레코드는 마킹을 생략하고 성공한 kill 결과를 보존한다.
             try:
                 new = self.killer.store.transition(
                     r.jobset_id, r.job_key, JobState.EXIT,
@@ -495,10 +482,7 @@ class _KillTask(QRunnable):
             calls += c
             resolved_all |= resolved
             pending -= resolved
-            # 시간 내 반환하지 않은 chunk는 '안 죽었다'가 아니라 '모른다'다 —
-            # bkill 클라이언트만 죽었을 뿐 접수된 요청은 처리된다. 그대로
-            # 재-bkill하면 이미 죽은 job에 kill을 두 번 더 쏘면서 매 라운드
-            # 같은 timeout 경고가 반복된다. 조회로 먼저 걸러낸다.
+            # timeout은 bkill 클라이언트만 중단한다. 접수된 요청이 처리됐는지 조회한 뒤 재시도한다.
             unknown = timed_out & pending
             if unknown:
                 gone, qc = self._confirm_by_query(unknown)
@@ -533,7 +517,7 @@ class _KillTask(QRunnable):
              판정할 수 없다(_alive_in이 element target에 접힌 행을 안 거는
              것과 같은 이유).
         그 외에는 잔존 술어(_alive_in)를 그대로 쓴다: 살아있지 않으면
-        (부재·종료·ZOMBI) 더 kill할 필요가 없다."""
+        (부재·종료) 더 kill할 필요가 없다. UNKWN/ZOMBI는 확인 보류다."""
         pids = sorted({p for p in map(target_parent_id, targets)
                        if p is not None})
         if not pids:
@@ -606,9 +590,7 @@ class _KillTask(QRunnable):
             return any(r.job_id == pid and lo <= r.array_index <= hi
                        for pid, lo, hi in ranges)
 
-        return [r for r in pool
-                if hit(r) and r.state.is_on_lsf
-                and r.state not in (JobState.UNKWN, JobState.ZOMBI)]
+        return [r for r in pool if hit(r) and r.state.is_on_lsf]
 
     def _verify_in_jobset(self, whole, exact, ranges
                           ) -> Tuple[Optional[int], set, List]:
@@ -625,7 +607,11 @@ class _KillTask(QRunnable):
             return None, set(), []
         alive = self._alive_in(k.store.get_jobs(self.jobset_id),
                                whole, exact, ranges)
-        return len(alive), {r.job_key for r in alive}, list(qr.changed)
+        # 조회가 실패한 job은 생존이 아니라 미확인이다 — 생존으로 세면
+        # 확인된 kill의 EXIT/killed 마킹까지 빠진다(_verify_direct와 같은 규칙).
+        known = [r for r in alive if r.job_id not in qr.query_failed]
+        still_alive = len(known) if len(known) == len(alive) else None
+        return still_alive, {r.job_key for r in known}, list(qr.changed)
 
     def _verify_global(self, whole, exact, ranges
                        ) -> Tuple[Optional[int], set, List]:

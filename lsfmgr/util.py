@@ -63,13 +63,8 @@ class EmitThrottler:
             return False
 
 
-# ----------------------------------------------------------------------
-# 활동 원장 헬퍼 — "jobset_id → 항목 리스트"의 identity 기준 추가/제거.
-# killer(kill별 진행 slot)와 lifecycle.SubmitGate(submit 활동)가 공유한다.
-# caller가 자신의 lock을 쥔 채 호출한다(각자 다른 lock/공유 상태라 lock은 주입
-# 안 함). list.remove(equality)는 겹친 항목의 값이 우연히 같으면([0,0] 등)
-# 남의 항목을 지우므로 반드시 identity(is)로 제거한다.
-# ----------------------------------------------------------------------
+# jobset별 활동 원장의 추가·제거. 호출자가 잠금을 보유해야 한다.
+# 값이 같은 별개 활동을 구별하도록 equality 대신 identity로 제거한다.
 def ledger_add(table: dict, key: str, item) -> None:
     """dict-of-lists에 항목 추가 (caller가 lock 보유)."""
     table.setdefault(key, []).append(item)
@@ -106,10 +101,7 @@ class LogSampler:
     def __init__(self, limit: int = 20):
         self.limit = max(1, int(limit))
         self._n: dict = {}
-        #: 한도를 막 넘긴 부류 — 접힘 통지를 아직 안 낸 것. 카운트 값 비교
-        #: (n == limit+1)로 판정하면 allow/just_folded 두 lock 획득 사이에
-        #: 다른 스레드의 allow가 끼어들어(n이 limit+2로) 통지가 유실된다 —
-        #: 넘긴 순간을 여기 적어 두고 읽는 쪽이 지우면 정확히 1회다.
+        #: 한도 초과 순간을 기록하고 읽을 때 제거해, 동시 호출에도 접힘 통지를 한 번만 낸다.
         self._folded_pending: set = set()
         self._lock = threading.Lock()
 

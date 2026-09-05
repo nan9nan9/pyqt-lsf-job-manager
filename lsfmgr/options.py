@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import math
 
 from .config import NUMERIC_RANGES, _in_range, validate_cmd_path
 from dataclasses import dataclass, fields
@@ -15,24 +16,14 @@ from typing import Any, Dict, Optional, Tuple
 
 log = logging.getLogger("lsfmgr.options")   # 모듈 로거 (코드베이스 관례)
 
-# ----------------------------------------------------------------------
-# 옵션 카탈로그 — 적용 계층별 키 집합 (§1.2 표와 1:1)
-# ----------------------------------------------------------------------
-#: ②(manager)·③(call) 공통 튜닝 옵션
+# manager·call 공통 옵션
 SHARED_KEYS = frozenset({
     "workers", "max_retry", "retry_backoff",
     "poll_interval_s", "auto_poll",
     "submit_timeout_s",
 })
-#: 제거된 옵션 — 받으면 TypeError 대신 경고 후 무시 (기존 앱 하위 호환).
-#: script_dir: array dispatch 제거(v9)로 무용.
-#: queue/resource_req/output_dir/default_queue/lsf_group_root/bsub_path/
-#: bgdel_path: bsub 인자 조립 제출·group 부착물 제거(v10)로 무용 —
-#: 제출 옵션은 wrapper 커맨드 문자열에 직접 쓴다.
-#: bhist_path: bhist 조회(LOST 판정 fallback·상세 원문) 제거(v10.3)로 무용.
-#: label/tags/description: submit이 jobset을 만들던 시절(v9 이전)의 메타
-#: 인자 — jobset 메타는 create_jobset 인자다. 받아서 검증만 하고 아무도
-#: 읽지 않던 함정이라 경고-무시로 강등.
+#: 제거된 옵션은 기존 앱 호환을 위해 경고 후 무시한다.
+#: 제출 옵션은 wrapper 커맨드에, jobset 메타데이터는 create_jobset에 지정한다.
 DEPRECATED_KEYS = frozenset({
     "script_dir",
     "queue", "resource_req", "output_dir",
@@ -94,7 +85,7 @@ def parse_retry_backoff(value: str) -> Tuple[str, float]:
     except (ValueError, AttributeError):
         raise ValueError(
             f"retry_backoff 형식 오류: {value!r} — 'fixed:N' 또는 'expo:N'")
-    if kind not in ("fixed", "expo") or not (base >= 0):
+    if kind not in ("fixed", "expo") or not (math.isfinite(base) and base >= 0):
         # not(base>=0): 음수뿐 아니라 NaN도 거른다 — NaN이 통과하면
         # retry_delay_s가 NaN이 되어 QTimer ms 인자로 흘러든다
         raise ValueError(
@@ -109,11 +100,7 @@ BUILTIN_DEFAULTS: Dict[str, Any] = {
 }
 
 
-# ----------------------------------------------------------------------
-# 검증 — 옵션별 검증기 레지스트리 (선언적).
-# 새 옵션은 키 집합(SHARED/MANAGER_ONLY)과 여기 한 줄이면 끝난다 —
-# if-체인 시절엔 분기 추가를 빠뜨리면 검증 없이 통과했다.
-# ----------------------------------------------------------------------
+# 옵션 검증기: 새 옵션은 허용 키 집합과 검증기에 함께 등록한다.
 def _float_in(lo: float, hi: float):
     label = f"{lo:g}~{hi:g}"
 
@@ -139,10 +126,7 @@ def _opt_float_min(lo: float = 0.0):
     def check(key: str, value: Any) -> Optional[float]:
         if value is None:
             return None
-        v = float(value)
-        if v < lo:
-            raise ValueError(f"{key}는 {lo:g} 이상 또는 None (got {value})")
-        return v
+        return _in_range(value, key, float, lo, None, True)
     return check
 
 
@@ -157,11 +141,8 @@ def _cmd_path(key: str, value: Any) -> Any:
     return value
 
 
-#: key → 검증기(key, value) -> 정규화 값. 없는 키는 무검증 통과
-#: (test_submit_wrapper_pattern_cmd는 LsfConfig.__post_init__가 구조 검증).
-#: 수치 필드 검증기는 **config.NUMERIC_RANGES에서 파생**한다 — 범위 숫자를
-#: 두 곳에 적으면 어긋난다(실제로 그랬다: LsfConfig는 조용히 보정, 여기는
-#: 거부). 표에 없는 것(불리언·경로·열거·문자열 형식)만 아래에 손으로 쓴다.
+#: 수치 검증기는 config.NUMERIC_RANGES에서 파생한다. 나머지 형식은 아래에서 정의한다.
+#: 검증기 없는 값은 통과하며, wrapper 치환 구조는 LsfConfig에서 검증한다.
 def _range_check(name: str):
     cast, lo, hi, incl = NUMERIC_RANGES[name]
 

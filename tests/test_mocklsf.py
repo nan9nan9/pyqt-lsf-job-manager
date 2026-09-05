@@ -8,8 +8,96 @@ import os
 import sys
 import tempfile
 import time
+import pytest
+import subprocess
+import textwrap
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX daemon")
+def test_daemon_start_reaps_intermediate_child(tmp_path):
+    code = textwrap.dedent("""
+        import os
+        from mocklsf import daemon
+        try:
+            assert daemon.start()
+            try:
+                os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                pass
+            else:
+                raise AssertionError('unreaped intermediate child')
+        finally:
+            daemon.stop()
+    """)
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=15,
+        env={**os.environ, "MOCKLSF_HOME": str(tmp_path)})
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("operation,initial", [
+    ("bmod", "RUN"), ("bkill", "PEND"), ("bstop", "RUN"),
+    ("bresume", "USUSP"), ("scheduler", "PEND"),
+])
+def test_concurrent_updates_preserve_other_fields(tmp_path, monkeypatch,
+                                                   operation, initial):
+    _, submit, schedmod, dbmod = _fresh_env(str(tmp_path))
+    from mocklsf import cli
+    database, other = dbmod.Database(), dbmod.Database()
+    try:
+        opts, cmd = submit.parse_args(["sleep", "100"])
+        jobs, _, _ = submit.build_jobs(database.next_job_id(), opts, cmd)
+        jobs[0].stat = initial
+        database.insert_jobs(jobs)
+        job_id = jobs[0].job_id
+
+        def concurrent_change():
+            job = other.jobs_by_id(job_id)[0]
+            job.job_group = "/new-group"
+            if operation == "bmod":
+                job.stat = "EXIT"
+                job.exit_code = 130
+            elif operation == "bkill":
+                job.stat = "RUN"
+                job.start_time = 1234.0
+                job.exec_host = "hostA"
+            other.update_job(job)
+
+        if operation == "scheduler":
+            original_update = database.update_guarded_many
+
+            def interleaved_update(pairs):
+                concurrent_change()
+                original_update(pairs)
+
+            monkeypatch.setattr(database, "update_guarded_many", interleaved_update)
+            schedmod.Scheduler(database).tick(time.time() + 1)
+        else:
+            original_collect = cli._collect_by_specs
+
+            def interleaved_collect(db, specs):
+                snapshot = original_collect(db, specs)
+                concurrent_change()
+                return snapshot
+
+            monkeypatch.setattr(cli, "_collect_by_specs", interleaved_collect)
+            args = ["-g", "/new-group"] if operation == "bmod" else []
+            assert getattr(cli, "cmd_" + operation)(args + [str(job_id)]) == 0
+
+        result = database.jobs_by_id(job_id)[0]
+        assert result.job_group == "/new-group"
+        if operation == "bmod":
+            assert result.stat == "EXIT" and result.exit_code == 130
+        elif operation == "bkill":
+            assert result.stat == "EXIT" and result.start_time == 1234.0
+            assert result.exec_host == "hostA"
+        else:
+            assert result.stat == ("USUSP" if operation == "bstop" else "RUN")
+    finally:
+        database.close()
+        other.close()
 
 
 def _fresh_env(tmp):

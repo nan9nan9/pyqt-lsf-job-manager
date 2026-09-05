@@ -13,7 +13,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 from .command import JobStatus, LsfCommand
 from .errors import JobSetNotFoundError, LsfmgrError
@@ -26,7 +26,7 @@ from .store.base import JobSetStore
 
 log = logging.getLogger("lsfmgr.monitor")
 
-#: 관측값이 None이면 저장값을 보존하는 병합 대상 확장 필드 (리뷰 M6)
+#: 관측값이 None이면 저장값을 보존하는 확장 필드.
 _PRESERVE_ON_NONE = ("run_time_s", "start_time", "finish_time")
 
 
@@ -58,6 +58,7 @@ class QueryResult:
     changed: Tuple[JobRecord, ...] = ()      # 이번 조회로 상태가 바뀐 레코드
     lost: Tuple[JobRecord, ...] = ()         # 이번 조회로 LOST 전이된 레코드
     checked: int = 0                         # 조회 대상(is_on_lsf)이었던 job 수
+    query_failed: FrozenSet[int] = frozenset()   # 조회 실패로 판단을 보류한 job_id
 
 
 class JobsetQuerier:
@@ -66,19 +67,11 @@ class JobsetQuerier:
     def __init__(self, store: JobSetStore, command: LsfCommand):
         self.store = store
         self.command = command
-        # jobset → {job_key: 연속 미발견 횟수}. 살아있는 jobset의 job_key는
-        # 사이클마다 통째로 갈아끼워(발견되면 자연히 사라짐) 정리가 필요 없다.
-        # 다만 **jobset 자체가 사라지면**(remove_jobset) 그 jobset으로는
-        # 다시 query()가 안 불려 항목이 영영 남는다 — manager가 소멸 지점에서
-        # forget()으로 지운다 (pacer.forget과 같은 계약).
+        # jobset별 연속 미발견 횟수. jobset 삭제 시 manager가 forget으로 제거한다.
         self._missing_streak: Dict[str, Dict[str, int]] = {}
         self._streak_lock = threading.Lock()
-        # query() 직렬화 — jobset별. 호출자가 둘이다(폴링 스레드 + killer
-        # verify 워커). 같은 jobset을 동시에 조회하면 스트릭의
-        # read-modify-write(_pop_streaks → 계산 → _set_streaks)가 겹쳐
-        # 유실/이중 증가한다 — '연속 N회 미발견' 유예(LOST 안전장치 ②)가
-        # 흔들린다. 서로 다른 jobset의 병행 조회는 그대로 둔다.
-        # 쓰는 동안만 항목이 산다 — _serialized_query가 스스로 치운다.
+        # 같은 jobset의 폴링·verify를 직렬화해 미발견 횟수의 유실·이중 증가를 막는다.
+        # 잠금 항목은 조회가 사용하는 동안만 유지한다.
         self._query_locks: Dict[str, "_QLock"] = {}
 
     def _pop_streaks(self, jobset_id: str) -> Dict[str, int]:
@@ -86,13 +79,8 @@ class JobsetQuerier:
             return self._missing_streak.pop(jobset_id, {})
 
     def _set_streaks(self, jobset_id: str, streaks: Dict[str, int]) -> None:
-        # 조회는 스트릭을 꺼내(_pop_streaks) 계산하고 여기서 되쓴다. 그 사이에
-        # jobset이 지워졌다면 되쓰기가 forget을 무효로 만든다 — 버린다.
-        # exists 검사는 반드시 streak lock **안**이다: 밖에 두면 "검사 통과 →
-        # main이 store 삭제 + forget → 되쓰기" 순서에서 지워진 jobset의
-        # 스트릭이 되살아나 치울 주인 없이 영영 남는다(remove_jobset은
-        # forget을 한 번만 부른다). 안에 두면 forget(같은 lock)이 되쓰기
-        # 뒤에 와서 지우거나, store 삭제가 먼저라 되쓰기가 거부된다.
+        # 삭제와 늦은 조회의 경합에서 스트릭이 되살아나지 않도록
+        # 존재 확인과 되쓰기를 forget과 같은 잠금 아래 수행한다.
         with self._streak_lock:
             if not self.store.exists(jobset_id):
                 return
@@ -171,22 +159,12 @@ class JobsetQuerier:
     def _query_serialized(self, jobset_id: str, *,
                           fresh: bool = False) -> QueryResult:
         self.store.get_jobset(jobset_id)     # 존재 검증 (없으면 예외)
-        # 조회 대상(is_on_lsf)만 store 단에서 걸러 가져온다 — 대다수가
-        # terminal인 대형 jobset에서 매 사이클 terminal 레코드까지 재구성해
-        # 나르던 비용을 줄인다 (InMemory는 상태 필터만, SQL 백엔드를
-        # 다시 붙인다면 (jobset_id,state) 인덱스 전제).
+        # Store에서 진행 중인 job만 가져와 terminal 레코드의 반복 조회를 피한다.
         targets = self.store.get_jobs(jobset_id, states=_ON_LSF)
         if not targets:
             return QueryResult(jobset_id, self.store.summary(jobset_id))
 
-        # --- 1) job_id chunked 조회 — 유일한 조회 수단 (v10) ---
-        # group/name 부착물 조회는 제거됐다: wrapper 제출 job은 부착물로
-        # 커버되지 않고, explicit id 조회는 -a 없이도 CLEAN_PERIOD 내 종료
-        # job을 보여주므로 id chunk가 모든 제출 경로를 균일하게 덮는다.
-        # 조회 수단 실패("장애")와 "job이 LSF에 없음"은 반드시 구분한다 —
-        # 장애를 없음으로 오판하면 LSF 순단 1회에 전원 LOST(terminal) 확정됨.
-        # bjobs_by_ids는 chunk 단위 실패 격리형(예외 대신 실패 id 집합 반환) —
-        # 실패 chunk의 job만 판단을 보류하고 성공 chunk는 정상 반영한다.
+        # 1) 명시적 job_id를 chunk로 조회한다. 실패 chunk는 job 부재로 보지 않고 판단을 보류한다.
         statuses: Dict[Tuple[int, Optional[int]], JobStatus] = {}
         # by_id는 array_index별 최신값만 유지 — _aggregate_elements가 stale
         # 행을 섞어 folded 레코드를 잘못된 terminal로 확정하지 않게 한다.
@@ -218,11 +196,7 @@ class JobsetQuerier:
                     return _aggregate_elements(rec, list(elems.values()))
             return None
 
-        # --- 3) 상태 반영 + bjobs 미발견분은 LOST 판정 ---
-        # 이 사이클은 시작 시점 스냅샷(targets) 기반이고 bjobs 왕복 동안 수 초가
-        # 흐른다 — 그 사이 레코드가 바뀌었으면(재제출(submit)의 리셋→재제출 등)
-        # 스냅샷 기준 갱신이 새 job_id/상태를 옛 값으로 되돌린다. guard(CAS)로
-        # "스냅샷과 동일할 때만" 전이시키고, 밀린 갱신은 다음 사이클에 맡긴다.
+        # 3) 스냅샷과 같은 레코드만 CAS로 갱신해 조회 중 재제출된 job을 보호한다.
         def unchanged(rec: JobRecord):
             return lambda cur: (cur.job_id == rec.job_id
                                 and cur.state is rec.state)
@@ -266,7 +240,8 @@ class JobsetQuerier:
                       len(missing))
 
         return QueryResult(jobset_id, self.store.summary(jobset_id),
-                           tuple(changed), tuple(lost), len(targets))
+                           tuple(changed), tuple(lost), len(targets),
+                           frozenset(bjobs_failed))
 
     def _judge_missing(self, jobset_id: str, missing: List[JobRecord],
                        bjobs_failed: set, unchanged) -> list:
@@ -296,10 +271,7 @@ class JobsetQuerier:
         now = datetime.now()
         for rec in missing:
             if rec.job_id is None or rec.job_id in bjobs_failed:
-                # job_id 없는 레코드는 id 조회로 확인 자체가 불가하고,
-                # bjobs chunk가 실패한 사이클도 근거가 없다.
-                # LSF 순단이면 다음 사이클에 복구되고, 진짜 소실이면
-                # 장애 해소 후 사이클에서 확정된다.
+                # ID가 없거나 조회가 실패한 job은 부재를 확정할 근거가 없으므로 보류한다.
                 deferred.append(rec.job_key)
                 continue
             if _within_submit_grace(rec, now, submit_grace):
@@ -438,21 +410,15 @@ class _PollWorker(QObject):
         self._timers: Dict[str, QTimer] = {}
         self._in_progress: set = set()       # 중복 polling 방지
         self._idle_counts: Dict[str, int] = {}   # 활동 없음 연속 사이클 수
-        #: stop_all 완료(타이머 정리)를 shutdown이 quit 전에 확인하는 신호
-        self.stopped_event = threading.Event()
 
     @Slot(str, float)
     def start_polling(self, jobset_id: str, interval_s: float) -> None:
+        if QThread.currentThread().isInterruptionRequested():
+            return
         ms = timer_ms(interval_s)        # int32 clamp — 근거는 qt.timer_ms
         cur = self._timers.get(jobset_id)
         if cur is not None and cur.interval() == ms:
-            # 같은 주기로 이미 돌고 있다 — 재시작하지 않는다.
-            # 아래가 매번 타이머를 갈아끼우고 즉시 1회 조회까지 하므로,
-            # 그냥 두면 start_polling을 자주 부르는 경로(job 편집마다 부르는
-            # _resume_polling_if_watchable)가 ① 편집 1회당 bjobs 1회를 쏘고
-            # ② interval을 계속 리셋해 주기 tick이 영영 안 오게 하며
-            # ③ _idle_counts를 지워 auto-stop 조건 ②가 성립하지 않게 만든다.
-            # 즉시 갱신이 필요하면 poll_now(query_once)가 따로 있다.
+            # 같은 주기의 재요청은 타이머·유휴 횟수를 유지한다. 즉시 조회는 poll_now를 사용한다.
             return
         self.stop_polling(jobset_id)
         timer = QTimer(self)                 # 소속: polling 스레드
@@ -474,15 +440,14 @@ class _PollWorker(QObject):
     def stop_all(self) -> None:
         for jsid in list(self._timers):
             self.stop_polling(jsid)
-        # 타이머 deleteLater를 폴링 스레드에서 즉시 처리한다 — 이 슬롯이
-        # 이 스레드에서 실행되므로 여기서 flush하지 않으면, 이벤트 루프가
-        # quit된 뒤 타이머가 다른 스레드에서 파괴돼 Qt 위반(killTimer from
-        # another thread)이 난다. DeferredDelete만 골라 보내 재진입은 없다.
+        # QThread.finished에서 폴링 스레드 안에서 호출된다. 타이머도 같은
+        # 스레드에서 파괴한다. DeferredDelete만 처리하므로 재진입은 없다.
         QCoreApplication.sendPostedEvents(None, DEFERRED_DELETE)
-        self.stopped_event.set()             # shutdown이 quit 전에 대기
 
     @Slot(str)
     def _poll(self, jobset_id: str) -> None:
+        if QThread.currentThread().isInterruptionRequested():
+            return
         if jobset_id in self._in_progress:   # 중복 폴링 방지
             return
         self._in_progress.add(jobset_id)
@@ -553,7 +518,6 @@ class PollingService(QObject):
     _req_start = Signal(str, float)
     _req_stop = Signal(str)
     _req_poll = Signal(str)
-    _req_stop_all = Signal()
 
     def __init__(self, querier: JobsetQuerier,
                  parent: Optional[QObject] = None):
@@ -568,7 +532,7 @@ class PollingService(QObject):
         self._req_start.connect(self._worker.start_polling)
         self._req_stop.connect(self._worker.stop_polling)
         self._req_poll.connect(self._worker._poll)
-        self._req_stop_all.connect(self._worker.stop_all)
+        self._thread.finished.connect(self._worker.stop_all)
         self._thread.start()
 
     def start_polling(self, jobset_id: str, interval_s: float = 10.0) -> None:
@@ -585,15 +549,11 @@ class PollingService(QObject):
         """timer 정지 + 스레드 graceful 종료 (좀비 스레드 금지, §4)."""
         if not self._thread.isRunning():
             return
-        # stop_all이 폴링 스레드에서 타이머를 정지·삭제한 뒤에 quit해야
-        # 타이머가 그 스레드에서 파괴된다. quit을 먼저 하면 stop_all이
-        # 루프 종료로 실행되지 못해 타이머가 main 스레드에서 파괴된다.
-        # (mid-query 등으로 stop_all이 안 돌면 타임아웃 후 그대로 진행 —
-        # requestInterruption+quit+wait의 기존 안전망으로 폴백, 행 없음)
-        self._worker.stopped_event.clear()
-        self._req_stop_all.emit()
-        self._worker.stopped_event.wait(5.0)
+        # 큐에 남은 start/poll을 막고 실행 중 조회를 취소한다. 주입 Runner는
+        # 자신의 timeout을 지켜 반환해야 한다 — 임의 Python 코드는 강제로
+        # 중단할 수 없으므로, 끝나기 전에 스레드 정리 완료로 간주하지 않는다.
         self._thread.requestInterruption()
+        self._worker.querier.command.shutdown_status_source()
+        # finished 슬롯의 타이머 정리까지 끝난 뒤 wait가 반환한다.
         self._thread.quit()
-        if not self._thread.wait(10000):
-            log.error("polling 스레드 종료 대기 초과")
+        self._thread.wait()

@@ -1,12 +1,56 @@
 """LsfCommand 단위 테스트 — mock runner 주입 (Qt 불필요)."""
 from __future__ import annotations
 
+import os
+import sys
+
 import pytest
 
 from lsfmgr.command import CommandResult, LsfCommand, chunk_args
 from lsfmgr.config import LsfConfig
 from lsfmgr.errors import ArgMaxExceededError, SubmitError
 from lsfmgr.states import JobState
+
+
+@pytest.mark.parametrize("style", ["legacy", "positional", "keyword", "kwargs"])
+def test_runner_cwd_call_conventions(style, tmp_path):
+    seen = []
+
+    def record(argv, timeout, cwd):
+        seen.append((argv, timeout, cwd))
+        return CommandResult(0, "Job <123> is submitted", "")
+
+    def keyword(argv, timeout, *, cwd=None):
+        return record(argv, timeout, cwd)
+
+    def kwargs(argv, timeout, **kw):
+        return record(argv, timeout, kw["cwd"])
+
+    runners = {"legacy": lambda argv, timeout: record(argv, timeout, None),
+               "positional": record, "keyword": keyword, "kwargs": kwargs}
+    command = LsfCommand(LsfConfig(), runners[style])
+    try:
+        assert command.run_submit(["mytool"], cwd=str(tmp_path)) == 123
+        assert len(seen) == 1
+        assert seen[0][2] == (None if style == "legacy" else str(tmp_path))
+    finally:
+        command.shutdown_bkill_pool()
+
+
+def test_runner_body_type_error_is_not_retried():
+    calls = []
+
+    def runner(argv, timeout, *, cwd=None):
+        calls.append(argv)
+        raise TypeError("runner bug")
+
+    command = LsfCommand(LsfConfig(), runner)
+    try:
+        with pytest.raises(TypeError, match="runner bug"):
+            command.run_submit(["mytool"])
+        assert len(calls) == 1
+    finally:
+        command.shutdown_bkill_pool()
 
 
 @pytest.fixture
@@ -107,6 +151,31 @@ def test_bjobs_empty_result(cmd):
     out, failed = cmd.bjobs_by_ids([999999])
     assert out == []
     assert failed == set()
+
+
+@pytest.mark.parametrize("delay", [0, 5])
+def test_default_query_runner_success_and_timeout(tmp_path, delay):
+    """취소 가능한 기본 runner도 정상 출력과 조회 timeout 계약을 보존한다."""
+    marker = tmp_path / "query.pid"
+    code = ("import os, pathlib, sys, time; "
+            "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); "
+            f"time.sleep({delay}); print('123;RUN;-')")
+    cmd = LsfCommand(LsfConfig(query_timeout_s=1, bjobs_path=[
+        sys.executable, "-c", code, str(marker)]))
+    try:
+        statuses, failed = cmd.bjobs_by_ids([123])
+        if delay:
+            assert statuses == []
+            assert failed == {123}
+        else:
+            assert [(s.job_id, s.state) for s in statuses] == [(123, JobState.RUN)]
+            assert not failed
+        if os.name == "posix":
+            with pytest.raises(ChildProcessError):
+                os.waitpid(int(marker.read_text()), os.WNOHANG)
+    finally:
+        cmd.shutdown_status_source()
+        cmd.shutdown_bkill_pool()
 
 
 def test_bjobs_array_elements(cmd, fake_lsf):

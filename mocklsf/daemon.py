@@ -92,6 +92,7 @@ def start(foreground: bool = False) -> bool:
         # 백그라운드로 fork (double fork 로 세션 분리).
         pid = os.fork()
         if pid > 0:
+            os.waitpid(pid, 0)  # 세션 분리용 중간 자식을 회수한다.
             # 부모: 손자가 PID 파일을 쓸 때까지 락을 유지한 채 대기.
             # (여기서 락을 놓으면 경쟁 프로세스가 중복 데몬을 띄울 수 있다.)
             for _ in range(100):

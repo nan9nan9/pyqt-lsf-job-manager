@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import threading
 import time
+import os
+import sys
+import subprocess
 from datetime import datetime
 
 import pytest
@@ -18,6 +21,82 @@ from lsfmgr.states import JobRecord, JobSetRecord
 from tests.conftest import submit_cmds
 
 EXPECTED = (LsfmgrError, ValueError, TypeError)
+
+
+def test_shutdown_before_qapplication_exists():
+    result = subprocess.run(
+        [sys.executable, "-c",
+         "from lsfmgr import LsfJobManager; "
+         "mgr = LsfJobManager(); mgr.shutdown(); "
+         "assert not mgr.polling._thread.isRunning()"],
+        capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+
+
+def test_shutdown_cancels_real_query_and_reaps_process(qtbot, tmp_path):
+    """실제 bjobs 클라이언트가 오래 걸려도 종료 시 취소·회수한다."""
+    marker = tmp_path / "query.pid"
+    code = ("import os, pathlib, sys, time; "
+            "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); "
+            "time.sleep(60); print('123;RUN;-')")
+    mgr = LsfJobManager(config=LsfConfig(
+        bjobs_path=[sys.executable, "-c", code, str(marker)]))
+    js = mgr.create_jobset(["wrapper"], job_keys=["a"])
+    mgr.store.transition(js.id, "a", JobState.PEND, job_id=123)
+    try:
+        mgr.start_polling(js, 5)
+        qtbot.waitUntil(lambda: marker.exists() and bool(marker.read_text()),
+                        timeout=5000)
+        pid = int(marker.read_text())
+        t0 = time.monotonic()
+        mgr.shutdown()
+        assert time.monotonic() - t0 < 5
+        assert not mgr.polling._thread.isRunning()
+        assert mgr.polling._worker._timers == {}
+        if os.name == "posix":
+            with pytest.raises(ChildProcessError):
+                os.waitpid(pid, os.WNOHANG)  # 종료만 한 좀비도 남아서는 안 된다
+        # 취소를 job 부재로 해석하지 않고, 종료 뒤 새 프로세스도 띄우지 않는다.
+        assert js.jobs()[0].state is JobState.PEND
+        marker.unlink()
+        assert mgr.command.bjobs_by_ids([123]) == ([], {123})
+        assert not marker.exists()
+    finally:
+        mgr.shutdown()
+        mgr.polling._thread.wait(65000)
+
+
+def test_shutdown_waits_for_custom_runner_beyond_old_deadline(qtbot):
+    """주입 Runner가 기존 15초 종료 예산보다 늦게 반환해도 반드시 join."""
+    from lsfmgr.command import CommandResult
+
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def runner(argv, timeout, cwd=None):
+        entered.set()
+        release.wait(20)
+        finished.set()
+        return CommandResult(0, "123;RUN;-", "")
+
+    mgr = LsfJobManager(runner=runner)
+    js = mgr.create_jobset(["wrapper"], job_keys=["a"])
+    mgr.store.transition(js.id, "a", JobState.PEND, job_id=123)
+    timer = threading.Timer(16, release.set)
+    try:
+        mgr.query_once(js)
+        assert entered.wait(5)
+        timer.start()
+        mgr.shutdown()
+        assert finished.is_set()
+        assert not mgr.polling._thread.isRunning()
+        assert mgr.polling._worker._timers == {}
+    finally:
+        release.set()
+        timer.cancel()
+        mgr.shutdown()
+        mgr.polling._thread.wait(5000)
 
 
 def test_no_public_api_misbehaves_after_shutdown(qtbot, fake_lsf):

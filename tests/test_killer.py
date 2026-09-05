@@ -492,3 +492,47 @@ def test_global_verify_does_not_mark_surviving_array_exited(qtbot, manager,
     report = blk.args[1]
     assert report.still_alive == 1                   # element 1이 살아남음
     assert manager.get_jobs(js.id)[0].state is JobState.RUN   # EXIT 금지
+
+
+def test_jobset_verify_query_failure_is_unverified_not_alive(qtbot, manager,
+                                                             fake_lsf):
+    """verify 조회가 실패한 job은 '생존'이 아니라 '미확인'이다 — 생존으로
+    세면 bkill이 수락한 job의 EXIT/killed 마킹까지 빠져, 다음 폴링이 EXIT를
+    실측해도 '내가 죽였다'는 근거가 사라진다(직접 조회 경로의 None과 동일 규칙)."""
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        js = submit_cmds(manager, ["v 0", "v 1"], auto_poll=False)
+    fake_lsf.set_all("RUN")
+    fake_lsf.fail_all_queries = True          # bkill은 성공, verify 조회만 장애
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blk:
+        manager.kill(js, verify=True)
+    _, report = blk.args
+    assert fake_lsf.alive_jobs() == []        # bkill 자체는 수락됨
+    assert report.still_alive is None         # 조회 장애 = 미검증
+    assert all(r.state is JobState.EXIT and r.killed for r in js.jobs())
+
+
+def test_jobset_verify_partial_query_failure_keeps_known_survivors(
+        qtbot, manager, fake_lsf):
+    """chunk 일부만 실패하면 조회된 생존자는 생존으로 마킹에서 제외하고,
+    조회가 실패한 job만 미확인(=bkill 확인대로 마킹)으로 둔다. 잔존 수는
+    미검증(None)."""
+    with qtbot.waitSignal(manager.submit_finished, timeout=10000):
+        js = submit_cmds(manager, ["p 0", "p 1"], auto_poll=False)
+    fake_lsf.set_all("RUN")
+    a, b = js.jobs()
+    orig_bkill = fake_lsf._do_bkill
+
+    def bkill_but_b_survives(args):          # b는 수락 직후 rerun으로 되살아남
+        res = orig_bkill(args)
+        fake_lsf.jobs[str(b.job_id)].stat = "RUN"
+        return res
+    fake_lsf._do_bkill = bkill_but_b_survives
+    fake_lsf.bjobs_fail_ids = {a.job_id}     # a의 chunk만 조회 실패
+    manager.command.config.chunk_size = 1    # a·b를 다른 chunk로 분리
+    with qtbot.waitSignal(manager.kill_finished, timeout=10000) as blk:
+        manager.kill(js, verify=True)
+    _, report = blk.args
+    assert report.still_alive is None        # 미확인이 섞였다
+    a, b = js.jobs()
+    assert a.state is JobState.EXIT and a.killed      # 미확인 → 확인대로 마킹
+    assert b.state is JobState.RUN and not b.killed   # 실측 생존 → 마킹 제외

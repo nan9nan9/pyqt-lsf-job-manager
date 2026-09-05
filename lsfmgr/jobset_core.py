@@ -43,8 +43,6 @@ def generate_jobset_id() -> str:
 class JobSetManager:
 
     def __init__(self, store: JobSetStore):
-        # (v10.1: LsfCommand/config 의존 제거 — LSF 호출이 전부 사라져
-        #  이 계층은 선언대로 순수 Store 연산이다)
         self.store = store
         # JobSetRecord read-modify-write 직렬화 — Store는 개별 연산만
         # 원자적이므로, intended_count 갱신처럼 "읽고-고쳐-쓰는" 경로가 겹치면
@@ -156,10 +154,7 @@ class JobSetManager:
                     jobset_id=jobset_id, job_keys=busy)
             _warn_orphans(jobset_id, olds, f"{policy}_jobs")
 
-            # 적용 — 교체는 **제자리**(update_job)로 한다. delete+add로 하면
-            # 그 job이 목록 끝으로 밀려, 키는 같은데 get_jobs() 순서가 바뀐다
-            # — 순서로 렌더링하는 표에서는 행이 점프해 "교체해도 행이
-            # 이어진다"는 계약이 깨진다.
+            # 교체는 제자리 갱신으로 get_jobs의 행 순서를 보존한다.
             changed: List[JobRecord] = []
             for rec, old in plan:
                 if old is not None:
@@ -254,13 +249,8 @@ class JobSetManager:
         candidates = [r for r in records if r.job_id is None
                       and r.state is JobState.SUBMITTING]
 
-        # guard(CAS): 스냅샷 이후 submit 재시도가 job_id를 채웠으면(정상 PEND)
-        # LOST 확정을 건너뛴다 — 살아있는 레코드를 덮어쓰지 않는다.
-        #
-        # 건별 transition이 아니라 transition_many로 **한 번에** 넘긴다:
-        # 건별이면 store lock을 job 수만큼 잡았다 놓는데, 이 호출은 GUI
-        # 스레드에서 동기로 도는 [sync] API라 폴링/제출 worker와 lock을
-        # 다투는 동안 그대로 화면이 멈춘다(5000건 부하 실측 875ms).
+        # 스냅샷 이후 job_id가 채워진 레코드는 CAS로 보호한다.
+        # GUI의 잠금 경합을 줄이도록 전이를 일괄 적용한다.
         if not candidates:
             return []
         def _still(rec):
@@ -280,11 +270,7 @@ class JobSetManager:
         수 없으므로 caller가 결과를 기록해야 하면 이 값을 쓴다.
         (v10: bgdel group 정리 제거 — 부착물이 생성되지 않으므로 정리할
         group도 없다.)"""
-        # 이 클래스의 다른 JobSetRecord 접근 경로와 같이 _meta_lock 아래에서
-        # 검사-후-삭제를 한 덩어리로 처리한다. 지금은 JobSetRecord 갱신이 전부
-        # main 스레드(manager 공개 API)라 경합이 없지만, 여기만 lock 밖이면
-        # 갱신 하나가 off-main으로 옮겨지는 순간 "terminal 검사 통과 → 그 사이
-        # 새 job 추가/전이 → 삭제"로 살아있는 job이 조용히 사라진다.
+        # 메타데이터 검사와 삭제를 같은 잠금 아래 수행한다.
         with self._meta_lock:
             js = self.store.get_jobset(jobset_id)
             records = self.store.get_jobs(jobset_id)

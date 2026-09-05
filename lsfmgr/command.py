@@ -24,8 +24,7 @@ from .config import DEFAULT_BJOBS_PATH, LsfConfig, cmd_tokens
 from .errors import ArgMaxExceededError, LsfCommandError, SubmitError
 from .internal_status import FetcherState, InternalStatusSource
 from .states import LSF_STAT_MAP, JobState, JobStatus  # noqa: F401
-# JobStatus는 states로 옮겼다(순환 제거) — 기존 import 경로
-# `from lsfmgr.command import JobStatus`는 그대로 쓸 수 있게 재수출한다.
+# 기존 import 경로 호환을 위해 JobStatus를 재수출한다.
 
 log = logging.getLogger("lsfmgr.command")
 
@@ -37,12 +36,9 @@ class CommandResult:
     stderr: str
 
 
-# runner 시그니처: (argv, timeout_s, cwd) -> CommandResult
-# cwd: 제출(bsub/wrapper) 시 subprocess를 실행할 작업 디렉토리(None=부모 cwd).
-# 커스텀 runner를 주입하는 경우 이 3번째 인자를 받아야 한다(하위호환 계약 변경).
-# **thread-safe여야 한다** — 제출은 workers개, kill은 kill_workers개 스레드에서
-# 동시에 부른다(조회도 폴링/verify가 겹칠 수 있다). 공유 가변 상태를 두려면
-# runner 쪽에서 잠글 것.
+# runner: (argv, timeout_s, cwd) → CommandResult. cwd=None은 부모 작업 디렉토리.
+# cwd는 위치/키워드 인자로 받으며, 구 2인자 runner는 cwd를 무시한다.
+# 제출·kill·조회에서 동시에 호출되므로 runner는 thread-safe해야 한다.
 Runner = Callable[[Sequence[str], float, Optional[str]], CommandResult]
 
 
@@ -56,35 +52,70 @@ def default_runner(argv: Sequence[str], timeout: float,
     return CommandResult(proc.returncode, proc.stdout, proc.stderr)
 
 
+class _QueryRunner:
+    """조회 subprocess 수명 관리. 종료와 프로세스 생성을 같은 락으로 묶는다.
+
+    shutdown은 실행 중 클라이언트를 kill하고, 호출 스레드가 communicate/
+    wait로 회수한다. 제출·bkill 프로세스는 이 취소 범위에 포함하지 않는다.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._closed = False
+        self._processes: set = set()
+
+    def __call__(self, argv, timeout, cwd=None) -> CommandResult:
+        with self._lock:
+            if self._closed:
+                raise LsfCommandError("상태 조회원이 종료되었습니다")
+            proc = subprocess.Popen(list(argv), stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True, cwd=cwd)
+            self._processes.add(proc)
+        try:
+            with proc:
+                try:
+                    stdout, stderr = proc.communicate(timeout=timeout)
+                except BaseException:
+                    proc.kill()
+                    proc.wait()
+                    raise
+                return CommandResult(proc.returncode, stdout, stderr)
+        finally:
+            with self._lock:
+                self._processes.discard(proc)
+
+    def shutdown(self) -> None:
+        with self._lock:
+            self._closed = True
+            for proc in self._processes:
+                proc.kill()
+
+
 def _adapt_runner(runner: Runner) -> Runner:
     """cwd 인자가 추가되기 전(구 2-arg (argv, timeout)) runner를 하위호환으로
     감싼다 — cwd를 못 받는 runner면 cwd를 무시하는 어댑터로 래핑해, 계약 확장이
     기존 주입 runner를 깨지 않게 한다(cwd 미지원 runner는 work_dir을 못 지키지만
     TypeError로 죽는 대신 조용히 부모 cwd에서 실행된다)."""
     try:
-        params = inspect.signature(runner).parameters
+        signature = inspect.signature(runner)
     except (ValueError, TypeError):
         return runner            # 시그니처 조사 불가(빌트인 등) — 그대로 3-arg 시도
-    kinds = [p.kind for p in params.values()]
-    positional = sum(1 for k in kinds
-                     if k in (inspect.Parameter.POSITIONAL_ONLY,
-                              inspect.Parameter.POSITIONAL_OR_KEYWORD))
-    flexible = (inspect.Parameter.VAR_POSITIONAL in kinds
-                or inspect.Parameter.VAR_KEYWORD in kinds
-                or "cwd" in params)
-    if positional >= 3 or flexible:
-        return runner            # cwd 수용 가능
-    return lambda argv, timeout, cwd=None: runner(argv, timeout)
+    try:
+        signature.bind([], 1.0, None)
+    except TypeError:
+        try:
+            signature.bind([], 1.0, cwd=None)
+        except TypeError:
+            signature.bind([], 1.0)
+            return lambda argv, timeout, cwd=None: runner(argv, timeout)
+        return lambda argv, timeout, cwd=None: runner(argv, timeout, cwd=cwd)
+    return runner
 
 
 _JOB_ID_RE = re.compile(r"Job <(\d+)>")
 _ARRAY_ID_RE = re.compile(r"^(\d+)(?:\[(\d+)\])?$")
 
-# ----------------------------------------------------------------------
-# kill/verify target 문자열 문법 — "id" / "id[idx]" / "id[m-n]".
-# 해석은 여기 한 곳이 소유한다 (killer가 공유) — 문자열 슬라이싱이 여러
-# 모듈에 흩어져 표기 변화에 제각기 깨지는 것을 막는다.
-# ----------------------------------------------------------------------
+# kill/verify 공통 target 문법: "id" / "id[idx]" / "id[m-n]".
 _TARGET_RE = re.compile(r"^(\d+)(?:\[(\d+)(?:-(\d+))?\])?$")
 
 
@@ -134,10 +165,8 @@ _LSF_TIME_FORMATS = ("%Y-%m-%d %H:%M:%S", "%b %d %H:%M:%S %Y",
                      "%b %d %H:%M %Y", "%b %d %H:%M:%S", "%b %d %H:%M")
 
 
-# bjobs -o가 확장 필드/옵션을 못 알아볼 때의 stderr 신호. 가장 확실한 건 LSF가
-# 되돌려주는 '필드명 자체'이고(대부분 에러에 echo됨), 그 외 format/field 류
-# 특정 문구를 보조로 쓴다. "unknown host"/"invalid ..." 같은 일시장애 문구가
-# 오판되지 않도록 광범위 단독 단어("unknown"/"invalid"/"no such")는 제외한다.
+# 확장 필드/옵션 오류만 포맷 강등 대상으로 삼는다.
+# 일시 장애를 오인하지 않도록 "unknown" 같은 포괄적인 단독 단어는 제외한다.
 _BJOBS_FIELD_ERR = ("run_time", "start_time", "finish_time",
                     "source_cluster", "forward_cluster",
                     "unknown field", "bad field", "field name", "illegal",
@@ -181,16 +210,8 @@ def _parse_bkill_resolved(text: str, requested: "set[str]") -> "set[str]":
         jid, msg = m.group(1), m.group(2).lower()
         if any(p in msg for p in _BKILL_RESOLVED_MSGS):
             resolved.add(jid)
-            # bare 부모 id로 array를 kill하면 LSF는 element별("1000[0]")로
-            # 확인 행을 낸다 — 부모 pending("1000")과 매칭되게 부모도 해소 처리
-            # (kill 요청이 그 job에 수락됐다는 의미). 안 하면 불필요 재시도.
-            #
-            # **부모를 실제로 요청했을 때만** 유도한다. 안 그러면 element
-            # 하나만 겨냥한 kill("1000[3]")의 응답이 bare "1000"까지 해소로
-            # 만들고, JobRecord는 array_index가 늘 None이라(집계 레코드)
-            # 그 레코드가 target "1000"으로 매칭돼 job 전체가 EXIT로 찍힌다
-            # — LSF에선 나머지 element가 멀쩡히 도는데 앱에는 죽은 것으로
-            # 보인다(폴링 대상에서도 빠져 영영 안 고쳐진다).
+            # 부모 전체를 요청한 경우에만 element 응답을 부모 수락으로 집계한다.
+            # element 하나의 수락을 배열 전체 종료로 해석하면 안 된다.
             if "[" in jid:
                 parent = jid.split("[", 1)[0]
                 if parent in requested:
@@ -279,6 +300,10 @@ class LsfCommand:
         # 구 2-arg runner도 받아들인다(계약 확장 하위호환) — 아래 _run은 항상
         # cwd를 3번째 인자로 넘기므로, cwd 미지원 runner는 어댑터로 감싼다.
         self.runner = _adapt_runner(runner or default_runner)
+        self._query_runner = (_QueryRunner()
+                              if runner is None or runner is default_runner
+                              else self.runner)
+        self._status_shutdown = threading.Event()
         # 치환은 '무엇이 실제로 실행되는지'를 바꾼다 — 실수로 켠 채 운영에
         # 제출하는 일이 없도록 INFO로 1회 남긴다 (per-job 원문은 _run의 DEBUG).
         if self.config.test_submit_wrapper_pattern_cmd is not None:
@@ -297,23 +322,13 @@ class LsfCommand:
         # 동시에 시도할 수 있다 — 무락 증가면 같은 필드 오류에 이중 강등돼
         # FULL을 건너뛰고 CORE로 떨어진다. 사용한 인덱스 기준 CAS로 1단만.
         self._bjobs_fmt_lock = threading.Lock()
-        # bkill 실행 풀 — **manager당 하나**를 재사용한다. kill 호출마다 새로
-        # 만들면 kill_workers가 kill 1건의 상한일 뿐이라, 동시에 kill이 여러 건
-        # 돌면 그 배수만큼 bkill이 뜬다(실측: Killer 풀 4인데 동시 6개 —
-        # quiesce 중 releaseThread로 슬롯을 반납해 4보다 많은 kill이 chunk
-        # 단계에 겹친다). workers를 전역으로 만든 것과 같은 이유다.
-        # ThreadPoolExecutor는 생성 시 스레드를 만들지 않는다(첫 submit에 생성)
-        # — kill을 안 쓰는 앱은 비용이 0이다.
-        self._bkill_pool: Optional[ThreadPoolExecutor] = None
-        if self.config.kill_workers > 1:
-            self._bkill_pool = ThreadPoolExecutor(
-                max_workers=self.config.kill_workers,
-                thread_name_prefix="lsfmgr-bkill")
+        # manager 전체가 공용 풀을 사용해 동시 kill 호출도 같은 상한을 지킨다.
+        # executor는 첫 작업 제출 전에는 스레드를 생성하지 않는다.
+        self._bkill_pool: Optional[ThreadPoolExecutor] = ThreadPoolExecutor(
+            max_workers=self.config.kill_workers,
+            thread_name_prefix="lsfmgr-bkill")
         self._warn_if_kill_budget_is_tight()
-        # --- 조회원 선택: 앱 콜백 / bjobs subprocess ---
-        # 갈림은 **job_status_fetcher 하나뿐**이다 — 주면 콜백, 안 주면 bjobs.
-        # 위쪽(monitor/killer)은 bjobs_by_ids 계약만 보므로 어느 쪽이든 flow가
-        # 같다. 이 판정은 생성 시점 1회로 끝난다(조회마다 다시 보지 않는다).
+        # 조회원은 생성 시 선택하며 양쪽 모두 bjobs_by_ids 계약을 따른다.
         self._internal: Optional[InternalStatusSource] = None
         if self.config.job_status_fetcher is not None:
             self._internal = InternalStatusSource(
@@ -346,10 +361,7 @@ class LsfCommand:
                     "지정되어 상태 조회는 콜백으로 합니다",
                     self.config.bjobs_path)
 
-    #: bkill target 1건당 이 정도 예산도 없으면 경고한다. 근거: bkill은 job마다
-    #: mbatchd 왕복이고 MC면 원격 클러스터 왕복까지 더해진다 — 로컬 단일
-    #: 클러스터도 job당 수~수십 ms, MC면 수백 ms까지 간다. 기본 설정
-    #: (120s / 100건 = 1.2s)은 넉넉히 통과한다.
+    #: bkill timeout을 target 수로 나눈 예산이 이 값보다 작으면 경고한다.
     _KILL_BUDGET_WARN_S = 0.1
 
     def _warn_if_kill_budget_is_tight(self) -> None:
@@ -404,8 +416,14 @@ class LsfCommand:
             pool.shutdown(wait=True)
 
     def shutdown_status_source(self) -> None:
-        """콜백 조회원 종료 — 대기 중인 폴링/verify 스레드를 즉시 풀어 준다.
-        (bjobs 경로면 no-op)"""
+        """새 조회를 막고 콜백 대기/기본 bjobs 클라이언트를 취소한다.
+
+        주입 Runner는 강제로 중단하지 않는다. 그 호출의 반환·타임아웃까지
+        polling/killer 종료 단계가 기다린다.
+        """
+        self._status_shutdown.set()
+        if isinstance(self._query_runner, _QueryRunner):
+            self._query_runner.shutdown()
         if self._internal is not None:
             self._internal.shutdown()
 
@@ -419,7 +437,7 @@ class LsfCommand:
         return sum(len(t) + 1 for t in cmd_tokens(path))
 
     def _run(self, argv: Sequence[str], timeout: float,
-             cwd: Optional[str] = None) -> CommandResult:
+             cwd: Optional[str] = None, *, query: bool = False) -> CommandResult:
         """**모든** LSF subprocess(wrapper 제출/bjobs/bkill)가
         지나는 단일 실행 funnel. 여기서 DEBUG 로깅을 한다 — 실제로 어떤
         명령이 어느 스레드에서 어떤 cwd로 실행되고 얼마나 걸려 무슨 결과가
@@ -440,7 +458,8 @@ class LsfCommand:
                   tname, prog, " ".join(map(str, argv)), cwd, timeout)
         t0 = time.monotonic()
         try:
-            res = self.runner(argv, timeout, cwd)
+            runner = self._query_runner if query else self.runner
+            res = runner(argv, timeout, cwd)
         except Exception as e:               # noqa: BLE001 — 로깅 후 그대로 전파
             log.debug("[%s] exec %s 실패 (%.3fs): %r",
                       tname, prog, time.monotonic() - t0, e)
@@ -450,11 +469,7 @@ class LsfCommand:
                   res.stdout[:500], res.stderr[:500])
         return res
 
-    # ------------------------------------------------------------------
-    # 제출 — wrapper 커맨드를 '그대로' 실행하고 'Job <id>' 만 파싱
-    # (v10: bsub 인자 조립 경로(bsub()/-q/-J/-g)는 삭제 — 제출은 전부
-    #  wrapper 경유. lsfmgr는 어떤 제출 인자도 조립하지 않는다.)
-    # ------------------------------------------------------------------
+    # 제출: wrapper 인자를 조립하지 않고 실행한 뒤 Job <id>를 파싱한다.
     def _apply_wrapper_pattern(self, argv: Sequence[str]) -> List[str]:
         """test_submit_wrapper_pattern_cmd 적용 — argv[0]의 basename이 패턴에 맞으면
         **프로그램 토큰만** 대체하고 나머지 인자는 그대로 둔다. 규칙이 없으면
@@ -515,25 +530,12 @@ class LsfCommand:
                 stdout=res.stdout, retryable=False)
         return int(m.group(1))
 
-    # ------------------------------------------------------------------
-    # bjobs — 조회 (전략별 변형)
-    # ------------------------------------------------------------------
-    # CORE: 상태 추적의 최소 단위 필수 3필드.
-    # FULL: CORE + 실행시간/위치 확장 필드. 사이트가 확장 필드를 거부하면
-    #       bjobs 전체가 rc≠0로 죽는다 — 그러면 폴링이 아무 상태도 못 걷어
-    #       job이 PEND(제출 직후 상태)에 고착된다. 그래서 필드 오류로 실패하면
-    #       한 단계씩 자동 강등한다(그 필드만 포기).
-    # FULL_MC: FULL + MultiCluster forwarding 필드. collect_clusters=True일 때만
-    #       맨 앞 단계로 쓰고, 미지원 사이트면 FULL로 강등돼 run_time 등은 유지된다.
-    # v10.2: -json → -noheader + delimiter=';' 복귀 (사용자 결정). 폭 지정은
-    # 두지 않는다 — LSF는 폭 미지정 시 필드별 **기본 폭으로 truncation**할 수
-    # 있으므로, 잘림이 관측되면 그 필드에만 폭을 준다.
+    # bjobs 포맷: CORE(필수 필드), FULL(실행시간), FULL_MC(cluster 정보).
+    # 필드 미지원 오류에만 FULL_MC → FULL → CORE 순서로 강등한다.
+    # 출력은 -noheader와 세미콜론 구분자를 사용한다.
     _DELIM = "delimiter=';'"
-    # job_name은 요청하지 않는다 — 파서가 쓰지 않고, 이 필드를 넣으면 조회
-    # 결과가 통째로 비는 사이트가 있다(실환경 관측). 되살리지 말 것.
-    # exec_cwd도 요청하지 않는다 (v10.4) — 작업 디렉토리는 제출 요청값
-    # JobRecord.submit_cwd로 본다. 되살리지 말 것
-    # (회귀 가드: tests/test_bjobs_no_exec_cwd.py).
+    # job_name은 일부 사이트에서 조회 실패를 유발하므로 요청하지 않는다.
+    # 작업 디렉토리는 exec_cwd 조회 대신 JobRecord.submit_cwd를 사용한다.
     _CORE_FIELDS = "jobid stat exit_code"
     _FULL_FIELDS = _CORE_FIELDS + " run_time start_time finish_time"
     _BJOBS_CORE_FMT = f"{_CORE_FIELDS} {_DELIM}"
@@ -542,19 +544,13 @@ class LsfCommand:
                           f"{_DELIM}")
 
     def _bjobs(self, selector: List[str]) -> List[JobStatus]:
-        # -a를 붙이지 않는다 — explicit job id를 주면 LSF는 -a 없이도
-        # CLEAN_PERIOD 내 종료 job을 보여준다. CLEAN_PERIOD 밖(purge)만
-        # LOST 판정으로 넘어간다. (v10: 조회는 id 기반뿐 — group/name
-        # 조회는 제거됐다. 되살릴 때는 -a 오염 문제를 다시 고려할 것.)
+        # 명시적 job ID 조회는 -a 없이 CLEAN_PERIOD 내 종료 job을 포함한다.
         def run(fmt: str) -> CommandResult:
             argv = cmd_tokens(self.config.bjobs_path) + [
                 "-noheader", "-o", fmt] + selector
             return self._run_query(argv)
 
-        # 확장 필드/옵션 오류로 보이면 다음 포맷 단계로 영구 강등 후 재시도한다.
-        # 강등 후 재시도가 또 필드 오류면 계속 내려간다(FULL+MC → FULL → CORE) —
-        # 한 호출에서 지원 가능한 단계까지 도달해, MC·run_time을 둘 다 거부하는
-        # 사이트도 즉시 살아난다. 일시 장애(필드 오류 아님)는 강등 없이 전파.
+        # 필드 오류에만 지원 가능한 포맷까지 강등하며, 일시 장애는 그대로 전파한다.
         while True:
             used_idx = self._bjobs_fmt_idx
             try:
@@ -648,10 +644,14 @@ class LsfCommand:
         행을 그대로 출력**한다. 이 결과를 버리면 살아있는 job이 '부재'로
         오인돼 통째로 LOST 확정된다(실환경 관측 버그) — 반드시 stdout을
         파싱해야 한다. 없는 id는 행이 없으니 자연히 미발견으로 남는다."""
+        if self._status_shutdown.is_set():
+            raise LsfCommandError("상태 조회원이 종료되었습니다")
         try:
-            res = self._run(argv, timeout)
+            res = self._run(argv, timeout, query=True)
         except subprocess.TimeoutExpired:
             raise LsfCommandError(f"{argv[0]} timeout")
+        if self._status_shutdown.is_set():
+            raise LsfCommandError("상태 조회원이 종료되었습니다")
         if res.returncode != 0:
             msg = (res.stderr + res.stdout).lower()
             if not any(p in msg for p in _NO_JOB_PATTERNS):
@@ -721,10 +721,7 @@ class LsfCommand:
                 forward_cluster=forward_cluster))
         return out
 
-    # ------------------------------------------------------------------
-    # bkill — id chunk 단독 (v10: group/name/array tier 삭제 — 부착물이
-    # 더 이상 생성되지 않으므로 전략 자체가 성립하지 않는다)
-    # ------------------------------------------------------------------
+    # bkill: 명시적 target을 chunk로 나누어 실행한다.
     def _bkill_argv(self, chunk: Sequence[str]) -> List[str]:
         """bkill 실행 argv — shell 미경유라 array target("1000[2]")의 대괄호가
         globbing으로 뭉개질 일이 없다.
@@ -788,30 +785,16 @@ class LsfCommand:
         timed_out: Set[str] = set()
         processed = 0
         pool = self._bkill_pool
-        if pool is None or len(chunks) == 1:
-            done_iter = ((run_chunk(c), len(c)) for c in chunks)
-            for (got, late), n in done_iter:
-                resolved |= got
-                timed_out |= late
-                processed += n
-                if on_progress:
-                    on_progress(processed)
-        else:
-            # 집계·진행 통지는 **호출 스레드**에서 한다(as_completed).
-            # ① Qt 신호(kill_progress)를 Qt가 모르는 순수 파이썬 스레드에서
-            #    쏘지 않는다 — 이 라이브러리의 다른 발화 지점은 전부 main이나
-            #    QThread(Pool) 위다. 여기만 예외를 만들 이유가 없다.
-            # ② 집계가 단일 스레드라 공유 집합용 lock이 아예 필요 없고,
-            #    진행 누적이 자연히 단조증가한다(진행바 되감김 불가).
-            # 풀은 **공용**이라 동시에 도는 kill이 몇 건이든 bkill 총수가
-            # kill_workers를 넘지 않는다(자기 future만 기다리므로 남의 kill을
-            # 기다리지는 않는다).
-            pending = {pool.submit(run_chunk, c): len(c) for c in chunks}
-            for fut in as_completed(pending):
-                got, late = fut.result()
-                resolved |= got
-                timed_out |= late
-                processed += pending[fut]
-                if on_progress:
-                    on_progress(processed)
+        if pool is None:
+            raise LsfCommandError("bkill 실행 풀이 종료되었습니다")
+        # 모든 chunk가 공용 풀을 거치므로 동시 호출도 같은 상한을 지킨다.
+        # 집계와 진행 통지는 호출 스레드에서만 수행한다.
+        pending = {pool.submit(run_chunk, c): len(c) for c in chunks}
+        for fut in as_completed(pending):
+            got, late = fut.result()
+            resolved |= got
+            timed_out |= late
+            processed += pending[fut]
+            if on_progress:
+                on_progress(processed)
         return resolved, len(chunks), timed_out

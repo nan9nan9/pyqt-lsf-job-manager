@@ -168,7 +168,7 @@ def test_graceful_degradation_without_attachments(qtbot, manager, fake_lsf,
 # ----------------------------------------------------------------------
 # shutdown: polling 타이머는 폴링 스레드에서 정리돼야 한다 (cross-thread
 # killTimer 위반 금지). start_polling 직후 즉시 shutdown 하는 경합에서도
-# stop_all이 quit 전에 완료돼 타이머가 그 스레드에서 파괴된다.
+# finished 슬롯에서 타이머가 그 스레드에서 파괴된다.
 # ----------------------------------------------------------------------
 def test_polling_shutdown_cleans_timers_in_thread(qtbot, manager, fake_lsf,
                                                   capfd):
@@ -180,7 +180,6 @@ def test_polling_shutdown_cleans_timers_in_thread(qtbot, manager, fake_lsf,
     manager.shutdown()
 
     # stop_all이 실행돼 타이머를 폴링 스레드에서 정지·삭제했어야 한다
-    assert worker.stopped_event.is_set()
     assert worker._timers == {}
     assert not manager.polling._thread.isRunning()
     # C 레벨(qWarning) stderr에 cross-thread 위반이 없어야 한다

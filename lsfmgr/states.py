@@ -55,10 +55,7 @@ class JobState(Enum):
 
 _TERMINAL = frozenset({
     JobState.DONE, JobState.EXIT, JobState.SUBMIT_FAILED, JobState.LOST,
-    # CANCELLED가 terminal인 이유: 이 job의 제출은 끝났다(LSF에 도달하지
-    # 못한 채로). non-terminal로 두면 폴링이 영영 안 멈추고 jobset_finished/
-    # post_process가 발화하지 않아, kill 뒤 jobset이 '끝나지 않은' 채로
-    # 남는다. terminal이지만 is_inactive이므로 재제출은 그대로 가능하다.
+    # CANCELLED는 제출이 끝난 terminal 상태이며 재제출할 수 있다.
     JobState.CANCELLED,
 })
 #: 실패로 분류되는 상태. CANCELLED는 **의도한 중단**이라 여기 없다 —
@@ -109,27 +106,17 @@ class JobRecord:
     job_id: Optional[int]            # SUBMIT_FAILED 등 미확보 시 None
     array_index: Optional[int]       # array element면 인덱스, 아니면 None
     jobset_id: str
-    #: job의 키 — jobset 안에서 유일한 **논리 정체성**이다. 앱이 직접
-    #: 정하며(create_jobset/add_jobs의 job_keys) **필수**다 — 라이브러리가
-    #: 대신 지어주지 않는다. 재제출·교체에도 유지되므로 GUI 표의 행
-    #: 정체성이 되고, replace_jobs가 교체 대상을 찾는 기준이며
-    #: remove_jobs·set_user_data·submit(only=)의 ref다.
-    #: LSF에 -J로 부착되지 않으므로 형식 제약은 없다.
+    #: 앱이 지정하는 jobset 내 고유 키. 재제출·교체에도 유지되며 선택·편집의 기준이다.
+    #: LSF의 -J 이름으로 전달하지 않는다.
     job_key: str
     state: JobState
     fail_reason: Optional[str] = None    # "NO_JOBID_PARSED"|"BSUB_TIMEOUT"|...
-    # 실패 진단 원문 — UI가 "왜 실패했나"를 그대로 보여주는 용도.
-    # SUBMIT_FAILED/RETRY_WAIT에서 bsub/wrapper 실행의 stderr/stdout(터미널
-    # 메시지)이 저장된다. EXIT의 원인은 저장하지 않는다 — 필요 시점에
-    # (v10.3: bhist 원문 온디맨드 조회는 삭제 — 상세는 이 레코드 필드로)
+    # SUBMIT_FAILED/RETRY_WAIT의 wrapper stdout·stderr 진단 원문. EXIT 원인은 수집하지 않는다.
     fail_message: Optional[str] = None
     retry_count: int = 0
     exit_code: Optional[int] = None
-    #: 이 매니저의 kill 요청으로 종료된 job인지 — mgr.kill()/kill_jobs()가
-    #: bkill 수용을 확인한 대상에 표시한다. 자연 종료·외부 bkill(관리자/다른
-    #: 세션)·비정상 EXIT은 이 경로를 안 타므로 False로 남는다. "EXIT인데 내가
-    #: 죽인 게 아니다"를 가르는 **유일한 근거** — exit_code(130/137/143)는
-    #: 외부 kill과 구분되지 않는다. 재제출 리셋에서 False로 되돌아간다.
+    #: 이 manager의 bkill 수락 또는 제출 취소 표식. 외부 kill과 자연 종료에는 설정하지 않는다.
+    #: 재제출 시 False로 리셋한다.
     killed: bool = False
     submit_time: Optional[datetime] = None
     command: str = ""                # retry 재submit용
@@ -141,19 +128,11 @@ class JobRecord:
     # LSF MultiCluster(job forwarding) — collect_clusters=True일 때 폴링이 채운다
     source_cluster: Optional[str] = None     # 제출(로컬) 클러스터
     forward_cluster: Optional[str] = None    # 포워딩된 실행(원격) 클러스터
-    # 제출 시 subprocess를 실행할 작업 디렉토리(create_jobset의 work_dir(s)
-    # 요청값). None이면 부모(GUI) 프로세스의 cwd에서 실행(스레드 안전 —
-    # os.chdir 같은 프로세스 전역 변경 금지). job 단위 속성이라 교체/재제출
-    # 에도 보존된다.
-    # v10.4: 관측값 working_dir(bjobs exec_cwd) 삭제 — RUN 이후에야 채워지는
-    # 데다 이 값과 사실상 같은 경로를 가리켜 헷갈리기만 했다. 작업 디렉토리는
-    # 이 필드 하나로 본다. exec_cwd 조회를 되살리지 말 것.
+    # 제출 subprocess의 작업 디렉토리. None이면 부모 cwd를 사용한다.
+    # 프로세스 전역 os.chdir 대신 subprocess의 cwd 인자로 전달한다.
     submit_cwd: Optional[str] = None
-    # --- 사용자 데이터 (GUI 직접 제어용) ---
-    # user_data: 사용자 정의 데이터(dict, JSON 직렬화 가능해야 함) — 실제
-    # run command 등 GUI가 임의 정보를 싣는 용도. 라이브러리는 해석하지
-    # 않고 보존만 한다. frozen 레코드 안의 dict이므로 내용을 제자리에서
-    # 고치지 말고 set_user_data로 교체할 것.
+    # 사용자 정의 JSON 직렬화 가능 dict. 라이브러리는 해석하지 않는다.
+    # frozen 레코드 내부를 직접 수정하지 말고 set_user_data로 교체한다.
     user_data: Optional[dict] = None
 
 

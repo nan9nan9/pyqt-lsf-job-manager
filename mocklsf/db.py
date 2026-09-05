@@ -147,6 +147,12 @@ class Database:
         self.conn.execute(f"UPDATE jobs SET {assigns} WHERE row_id=?", vals)
         self.conn.commit()
 
+    def update_job_group(self, row_id: int, group: str):
+        """bmod는 상태 스냅샷을 되쓰지 않고 group만 변경한다."""
+        self.conn.execute("UPDATE jobs SET job_group=? WHERE row_id=?",
+                          (group, row_id))
+        self.conn.commit()
+
     def update_many(self, jobs: List[Job]):
         """여러 job 을 한 트랜잭션으로 갱신 (스케줄러용)."""
         if not jobs:
@@ -166,26 +172,27 @@ class Database:
         """
         if not pairs:
             return
-        assigns = ", ".join(f"{c}=?" for c in _COLUMNS)
+        columns = ("stat", "exec_host", "start_time", "finish_time", "exit_code")
+        assigns = ", ".join(f"{c}=?" for c in columns)
         sql = f"UPDATE jobs SET {assigns} WHERE row_id=? AND stat=?"
-        rows = [[getattr(j, c) for c in _COLUMNS] + [j.row_id, prev]
+        rows = [[getattr(j, c) for c in columns] + [j.row_id, prev]
                 for j, prev in pairs]
         self.conn.executemany(sql, rows)
         self.conn.commit()
 
-    def update_if_stat_in(self, job: Job, allowed) -> bool:
+    def update_if_stat_in(self, job: Job, allowed, *, columns) -> bool:
         """DB 의 현재 stat 이 allowed 집합에 있을 때만 job 을 갱신.
 
         bkill/bstop 같은 사용자 명령이, 읽은 뒤 쓰기 전에 스케줄러가 그 job 을
         종료시켰다면(예: RUN→DONE) 이미 끝난 job 을 되살리지 않도록 막는다.
-        갱신이 실제로 일어났으면 True.
+        호출자가 변경한 columns만 쓴다. 갱신이 실제로 일어났으면 True.
         """
         allowed = list(allowed)
-        assigns = ", ".join(f"{c}=?" for c in _COLUMNS)
+        assigns = ", ".join(f"{c}=?" for c in columns)
         marks = ", ".join("?" for _ in allowed)
         sql = (f"UPDATE jobs SET {assigns} "
                f"WHERE row_id=? AND stat IN ({marks})")
-        vals = [getattr(job, c) for c in _COLUMNS] + [job.row_id] + allowed
+        vals = [getattr(job, c) for c in columns] + [job.row_id] + allowed
         cur = self.conn.execute(sql, vals)
         self.conn.commit()
         return cur.rowcount > 0
