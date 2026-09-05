@@ -90,9 +90,11 @@ class Scheduler:
                 j.stat = new_stat
                 changed.append((j, prev))
 
-        # 종료된 job 을 반영하고, 남은 active 로 슬롯 재계산.
-        still_active = [j for j in active if j.stat in ACTIVE_STATES]
+        # 종료가 거부됐다면 여전히 슬롯을 점유한다. 저장 후 실제 active로 계산한다.
+        self._apply_transitions(changed, now)
+        still_active = self.db.jobs_in_states(list(ACTIVE_STATES))
         used = self._active_by_host(still_active)
+        changed = []
 
         # 2) PEND -> RUN dispatch.
         pend = self.db.jobs_in_states([PEND])
@@ -125,7 +127,10 @@ class Scheduler:
             changed.append((j, PEND))  # PEND 였던 job 만 dispatch 대상
             dispatched += 1
 
-        # 경쟁 갱신으로 거부된 전이는 이벤트와 bpeek 출력에도 남기지 않는다.
+        self._apply_transitions(changed, now)
+
+    def _apply_transitions(self, changed, now: float):
+        """실제 저장된 전이만 이벤트와 bpeek 출력으로 발행한다."""
         for j, prev in self.db.update_guarded_many(changed):
             if prev == PEND:
                 self.db.log_event(j.job_id, j.array_index, "dispatch",

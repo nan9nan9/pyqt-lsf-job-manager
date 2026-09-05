@@ -28,7 +28,8 @@ from tests.fake_lsf import FakeLsf
 
 
 def _streaks(mgr, jsid):
-    return dict(mgr.querier._missing_streak.get(jsid, {}))
+    return {key: entry[1]
+            for key, entry in mgr.querier._missing_streak.get(jsid, {}).items()}
 
 
 def _vanish_all(fake):

@@ -121,36 +121,40 @@ class StatePacer(QObject):
         큐를 안고 있으면 그 전이는 GUI에 영영 안 나타난다."""
         self._timer.stop()
         self._dwell = 0.0                 # 이후 push는 전부 즉시 통과
-        queued, self._queue = self._queue, {}
-        batches: Dict[str, List[JobRecord]] = {}
-        for (jsid, _job_key), recs in queued.items():
-            # 같은 job의 밀린 전이는 마지막 것만 — 종료 시점엔 중간 과정을
-            # 보여줄 화면 시간이 없다. 최종 상태가 맞게 남는 것이 유일한 목표.
-            batches.setdefault(jsid, []).append(recs[-1])
-        for jsid, recs in batches.items():
-            self._safe_emit(jsid, recs)
+        self._drain(flush=True)
         self._shown.clear()
 
     # ------------------------------------------------------------------
     # 배출
     # ------------------------------------------------------------------
-    def _drain(self) -> None:
+    def _drain(self, *, flush: bool = False) -> None:
         """dwell이 찬 job마다 큐에서 **1건씩** 꺼내 발화 — 같은 tick의 배출은
-        jobset별 한 배치로 합친다(대량이어도 신호 폭주 없음)."""
+        jobset별 한 배치로 합친다. 종료(flush) 시에는 마지막 상태만 전달한다.
+
+        다른 jobset의 slot이 forget/교체할 수 있어, 레코드는 해당 jobset을
+        발화하기 직전에 큐에서 꺼낸다. 미리 꺼낸 배치는 forget으로 취소할 수 없다.
+        """
         now = time.monotonic()
-        batches: Dict[str, List[JobRecord]] = {}
-        for key in list(self._queue):
-            shown = self._shown.get(key)
-            if shown is not None and now - shown[1] < self._dwell - _DUE_TOLERANCE_S:
-                continue                  # 아직 머무는 중
-            q = self._queue[key]
-            rec = q.pop(0)
-            if not q:
-                del self._queue[key]
-            self._shown[key] = (rec.state, now)
-            batches.setdefault(key[0], []).append(rec)
-        for jsid, recs in batches.items():
-            self._safe_emit(jsid, recs)
+        batches: Dict[str, list] = {}
+        for key in self._queue:
+            batches.setdefault(key[0], []).append(key)
+        for jsid, keys in batches.items():
+            recs = []
+            for key in keys:
+                q = self._queue.get(key)
+                if not q:                 # 앞선 slot에서 삭제됨
+                    continue
+                shown = self._shown.get(key)
+                if (not flush and shown is not None
+                        and now - shown[1] < self._dwell - _DUE_TOLERANCE_S):
+                    continue
+                rec = q[-1] if flush else q.pop(0)
+                if flush or not q:
+                    del self._queue[key]
+                self._shown[key] = (rec.state, now)
+                recs.append(rec)
+            if recs:
+                self._safe_emit(jsid, recs)
         self._reschedule(now)
 
     def _reschedule(self, now: float) -> None:

@@ -67,8 +67,9 @@ class JobsetQuerier:
     def __init__(self, store: JobSetStore, command: LsfCommand):
         self.store = store
         self.command = command
-        # jobset별 연속 미발견 횟수. jobset 삭제 시 manager가 forget으로 제거한다.
-        self._missing_streak: Dict[str, Dict[str, int]] = {}
+        # jobset → key → (실행 식별자, 연속 미발견 횟수).
+        # forget보다 새 실행의 조회가 먼저 와도 옛 실행의 유예를 물려받지 않는다.
+        self._missing_streak: Dict[str, Dict[str, Tuple[str, int]]] = {}
         self._streak_lock = threading.Lock()
         # 같은 jobset의 폴링·verify를 직렬화해 미발견 횟수의 유실·이중 증가를 막는다.
         # 잠금 항목은 조회가 사용하는 동안만 유지한다.
@@ -77,16 +78,21 @@ class JobsetQuerier:
         self._id_queries: Dict[int, int] = {}
         self._id_query_lock = threading.Lock()
 
-    def _pop_streaks(self, jobset_id: str) -> Dict[str, int]:
+    def _pop_streaks(self, jobset_id: str) -> Dict[str, Tuple[str, int]]:
         with self._streak_lock:
             return self._missing_streak.pop(jobset_id, {})
 
-    def _set_streaks(self, jobset_id: str, streaks: Dict[str, int]) -> None:
-        # 삭제와 늦은 조회의 경합에서 스트릭이 되살아나지 않도록
-        # 존재 확인과 되쓰기를 forget과 같은 잠금 아래 수행한다.
+    def _set_streaks(self, jobset_id: str,
+                     streaks: Dict[str, Tuple[str, int]]) -> None:
+        # 삭제·교체 전 조회가 스트릭을 되살리지 않도록 실행 확인과
+        # 되쓰기를 forget과 같은 잠금 아래 수행한다. 대상 key만 읽는다.
         with self._streak_lock:
-            if not self.store.exists(jobset_id):
-                return
+            if streaks:
+                current = self.store.get_jobs_by_keys(jobset_id, list(streaks))
+                streaks = {key: entry for key, entry in streaks.items()
+                           if key in current
+                           and current[key]._generation == entry[0]
+                           and current[key].state.is_on_lsf}
             if streaks:
                 self._missing_streak[jobset_id] = streaks
             else:
@@ -313,7 +319,7 @@ class JobsetQuerier:
         waiting: List[str] = []              # ③ 유예 중 (미발견이지만 미확정)
         lost_specs: list = []
         prev = self._pop_streaks(jobset_id)
-        cur: Dict[str, int] = {}
+        cur: Dict[str, Tuple[str, int]] = {}
         grace = max(1, self.command.config.lost_after_missing_polls)
         submit_grace = self._submit_grace_s()
         now = datetime.now()
@@ -327,8 +333,9 @@ class JobsetQuerier:
                 # (올리면 유예가 끝나는 순간 이미 쌓인 회수로 즉시 LOST가 된다)
                 young.append(rec.job_key)
                 continue
-            n = prev.get(rec.job_key, 0) + 1
-            cur[rec.job_key] = n
+            generation, count = prev.get(rec.job_key, (None, 0))
+            n = count + 1 if generation == rec._generation else 1
+            cur[rec.job_key] = (rec._generation, n)
             if n < grace:
                 waiting.append(rec.job_key)
                 continue
@@ -350,11 +357,7 @@ class JobsetQuerier:
         if waiting:
             log.warning("bjobs 미발견 %d건 — LOST 유예 중(연속 %d회 필요): "
                         "id=%s", len(waiting), grace,
-                        _brief([f"{k}({cur[k]}회)" for k in waiting]))
-        if lost_specs:
-            log.warning("LOST 확정 %d건 — 연속 %d회 bjobs 미발견: %s",
-                        len(lost_specs), grace,
-                        _brief([spec[0] for spec in lost_specs]))
+                        _brief([f"{k}({cur[k][1]}회)" for k in waiting]))
         return lost_specs
 
 

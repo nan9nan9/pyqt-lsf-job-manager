@@ -67,7 +67,8 @@ def test_zero_query_timeout_would_stall_polling_silently():
 # 정리 훅을 건다.
 # ----------------------------------------------------------------------
 def _streaks(mgr):
-    return mgr.querier._missing_streak
+    return {jsid: {key: entry[1] for key, entry in streaks.items()}
+            for jsid, streaks in mgr.querier._missing_streak.items()}
 
 
 def test_removed_jobset_leaves_no_streak(qtbot, manager, fake_lsf):
