@@ -186,10 +186,7 @@ class InMemoryStore(JobSetStore):
             if jobs is None or record.job_key not in jobs:
                 raise JobNotFoundError(
                     f"{record.jobset_id}/{record.job_key}")
-            record = replace(record, updated_at=datetime.now(),
-                             _revision=jobs[record.job_key]._revision + 1)
-            self._put_rec(record)
-            return record
+            return self._replace_rec(record, datetime.now())
 
     def get_job(self, jobset_id: str, job_key: str) -> JobRecord:
         with self._lock:
@@ -208,6 +205,18 @@ class InMemoryStore(JobSetStore):
             recs = [r for r in recs if r.state in states]
         return recs
 
+    def count_jobs(self, jobset_id: str) -> int:
+        with self._lock:
+            self.get_jobset(jobset_id)
+            return len(self._jobs[jobset_id])
+
+    def _replace_rec(self, record: JobRecord, now: datetime, **fields) -> JobRecord:
+        """[store lock 보유] 기존 레코드 쓰기의 timestamp·revision 규칙."""
+        revision = self._jobs[record.jobset_id][record.job_key]._revision
+        new = replace(record, updated_at=now, _revision=revision + 1, **fields)
+        self._put_rec(new)
+        return new
+
     def transition(self, jobset_id: str, job_key: str,
                    new_state: Optional[JobState],
                    guard=None, **fields: Any) -> Optional[JobRecord]:
@@ -217,12 +226,9 @@ class InMemoryStore(JobSetStore):
             if guard is not None and not guard(old):
                 return None                     # CAS 불일치 — 전이 건너뜀
             # new_state=None = 상태 유지(부분 갱신) — 계약은 base.transition
-            new = replace(old, updated_at=datetime.now(),
-                          _revision=old._revision + 1,
-                          state=old.state if new_state is None else new_state,
-                          **fields)
-            self._put_rec(new)
-            return new
+            return self._replace_rec(
+                old, datetime.now(),
+                state=old.state if new_state is None else new_state, **fields)
 
     def _transition_many_impl(self, jobset_id, specs):
         """lock 1회로 다건 전이 — 건당 lock acquire/release 제거.
@@ -237,11 +243,9 @@ class InMemoryStore(JobSetStore):
                     continue                     # 사이클 도중 remove_jobs 등
                 if guard is not None and not guard(old):
                     continue
-                new = replace(
-                    old, updated_at=now, **fields,
-                    _revision=old._revision + 1,
+                new = self._replace_rec(
+                    old, now, **fields,
                     state=old.state if new_state is None else new_state)
-                self._put_rec(new)
                 out.append(new)
         return out
 

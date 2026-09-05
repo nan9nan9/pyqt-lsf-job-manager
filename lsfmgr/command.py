@@ -163,6 +163,7 @@ _NO_JOB_PATTERNS = ("no unfinished job", "no matching job", "is not found",
 _RUN_TIME_RE = re.compile(r"(\d+)")
 _LSF_TIME_FORMATS = ("%Y-%m-%d %H:%M:%S", "%b %d %H:%M:%S %Y",
                      "%b %d %H:%M %Y", "%b %d %H:%M:%S", "%b %d %H:%M")
+_LSF_TIME_FUTURE_TOLERANCE = timedelta(days=1)
 
 
 # 확장 필드/옵션 오류만 포맷 강등 대상으로 삼는다.
@@ -250,45 +251,48 @@ def _parse_run_time(s: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
-def _parse_lsf_time(s: str) -> Optional[datetime]:
-    """LSF 시각 문자열 → datetime. 파싱 불가/미해당('-')은 None (graceful).
-    'E' 접미(estimated — RUN 중 예상 종료시각)는 실측이 아니므로 버린다.
+def _parse_lsf_time(s: str, now: Optional[datetime] = None) -> Optional[datetime]:
+    """LSF 시각을 파싱한다. 예상 종료 시각은 관측값으로 사용하지 않는다.
 
-    LRU 캐시(리뷰 P2): start/finish 문자열은 job마다 고정이라 매 폴링 같은
-    문자열을 재파싱한다 — strptime 다중 포맷 시도가 10k job 기준 사이클당
-    ~0.5s(실측)를 차지했다. 캐시 크기 65536 ≈ job 3만 개(start+finish).
-    연도 없는 포맷의 연도 판정이 캐시로 고정되지만, 그 판정 자체가 '과거
-    시각' 가정이라 해가 바뀌어도 동일 문자열의 정답은 같다(무해)."""
-    return _parse_lsf_time_cached(s.strip())
+    포맷 해석은 문자열·기준 연도로 캐시하지만, 연도 없는 시각을 현재 시각과
+    비교하는 판단은 매번 수행한다. 같은 문자열도 기준 시각이 바뀌면 다른
+    연도를 가리킬 수 있다.
+    """
+    if now is None:
+        now = datetime.now()
+    parsed = _parse_lsf_time_cached(s.strip(), now.year)
+    if parsed is None:
+        return None
+    dt, yearless = parsed
+    # 연말 경계: 올해로 해석한 시각이 하루보다 더 미래면 작년으로 되돌린다.
+    if yearless and dt > now + _LSF_TIME_FUTURE_TOLERANCE:
+        try:
+            return dt.replace(year=dt.year - 1)
+        except ValueError:
+            return None                    # 2/29 → 비윤년 보정 불가
+    return dt
 
 
 @lru_cache(maxsize=65536)
-def _parse_lsf_time_cached(s: str) -> Optional[datetime]:
+def _parse_lsf_time_cached(s: str, year: int) -> Optional[Tuple[datetime, bool]]:
+    """포맷 해석 결과와 연도 생략 여부. 현재 시각에 따른 연도 보정은 캐시 밖이다."""
     if s.endswith(" E"):
         return None                        # 예상값 — 실제 시각으로 저장 금지
     s = re.sub(r"\s+[A-Z]$", "", s).strip()   # 상태 접미(L/X 등) 제거
     if not s or s == "-":
         return None
-    now = datetime.now()
     for fmt in _LSF_TIME_FORMATS:
         # 연도 없는 포맷은 기본연도 1900(비윤년)이라 "Feb 29" 파싱이 실패해
         # 시각이 통째로 소실된다 — 연도를 명시해 파싱한다(올해 → 불가 시 작년).
         attempts = ([(s, fmt)] if "%Y" in fmt
-                    else [(f"{s} {now.year}", fmt + " %Y"),
-                          (f"{s} {now.year - 1}", fmt + " %Y")])
+                    else [(f"{s} {year}", fmt + " %Y"),
+                          (f"{s} {year - 1}", fmt + " %Y")])
         for text, f in attempts:
             try:
                 dt = datetime.strptime(text, f)
             except ValueError:
                 continue
-            # 연말 경계: 12월에 시작한 job을 1월에 조회하면 '올해 12월'은
-            # 미래가 된다 — 하루 여유를 두고 미래면 작년으로 되돌린다
-            if "%Y" not in fmt and dt > now + timedelta(days=1):
-                try:
-                    dt = dt.replace(year=dt.year - 1)
-                except ValueError:
-                    continue                   # 2/29 → 비윤년 보정 불가
-            return dt
+            return dt, "%Y" not in fmt
     log.debug("LSF 시간 파싱 불가: %r", s)
     return None
 
@@ -582,7 +586,7 @@ class LsfCommand:
                 if (used_idx < len(self._bjobs_formats) - 1
                         and _looks_like_field_error(e.stderr or "")):
                     # e.stderr만 본다 — 필드 오류는 항상 LSF stderr로 온다
-                    # (_run_or_nomatch가 실어줌). str(e) 폴백은 stderr 없는
+                    # (_run_query가 실어줌). str(e) 폴백은 stderr 없는
                     # 예외 메시지의 우연한 단어로 오판 강등할 수 있어 금지.
                     with self._bjobs_fmt_lock:      # CAS — 동시 강등 1단만
                         if self._bjobs_fmt_idx == used_idx:
@@ -612,9 +616,26 @@ class LsfCommand:
             return self._internal.statuses_by_ids(job_ids, fresh=fresh)
         out: List[JobStatus] = []
         ids = [str(i) for i in job_ids]
-        failed = self._query_chunks_isolated(
-            ids, self._bjobs_base_len(),
-            lambda chunk: out.extend(self._bjobs(chunk)), "bjobs")
+        failed: Set[int] = set()
+        chunks = list(chunk_args(ids, self.config.chunk_size,
+                                 self.config.arg_max, self._bjobs_base_len()))
+        consecutive = 0
+        for i, chunk in enumerate(chunks):
+            try:
+                out.extend(self._bjobs(chunk))
+            except LsfCommandError as e:
+                log.warning("조회 실패(bjobs): %s", e)
+                failed.update(int(x) for x in chunk)
+                consecutive += 1
+                if consecutive >= 2 and i + 1 < len(chunks):
+                    log.warning("bjobs 연속 %d회 실패 — 남은 %d개 chunk 조회 "
+                                "중단(전면 장애로 간주)", consecutive,
+                                len(chunks) - i - 1)
+                    for rest in chunks[i + 1:]:
+                        failed.update(int(x) for x in rest)
+                    break
+                continue
+            consecutive = 0
         return out, failed
 
     def _bjobs_base_len(self) -> int:
@@ -622,42 +643,7 @@ class LsfCommand:
         (-noheader -o <fmt>) 여유분."""
         return self._prog_len(self.config.bjobs_path) + 40
 
-    def _query_chunks_isolated(self, ids: List[str], base: int,
-                               run_chunk: Callable[[List[str]], None],
-                               what: str) -> Set[int]:
-        """chunked 조회 공통 골격 — chunk 단위 실패 격리 + 연속 실패 회로 차단.
-
-        run_chunk(chunk)가 LsfCommandError를 던지면 그 chunk의 job_id만
-        실패로 귀속하고 다음 chunk를 계속한다. 연속 2회 실패는 특정 chunk가
-        아니라 조회 수단 자체의 전면 장애로 본다(데몬 hang이면 chunk마다
-        timeout까지 기다린다) — 남은 chunk를 호출 없이 실패 처리하고
-        중단한다. 격리(1개 chunk 실패는 계속)와 fail-fast(전면 장애에
-        chunk 수 × timeout 직렬 블록 방지)를 양립시키는 회로 차단.
-        반환: 조회 실패로 귀속된 job_id 집합."""
-        failed: Set[int] = set()
-        chunks = list(chunk_args(ids, self.config.chunk_size,
-                                 self.config.arg_max, base))
-        consecutive = 0
-        for i, chunk in enumerate(chunks):
-            try:
-                run_chunk(chunk)
-            except LsfCommandError as e:
-                log.warning("조회 실패(%s): %s", what, e)
-                failed.update(int(x) for x in chunk)
-                consecutive += 1
-                if consecutive >= 2 and i + 1 < len(chunks):
-                    log.warning("%s 연속 %d회 실패 — 남은 %d개 chunk 조회 "
-                                "중단(전면 장애로 간주)", what, consecutive,
-                                len(chunks) - i - 1)
-                    for rest in chunks[i + 1:]:
-                        failed.update(int(x) for x in rest)
-                    break
-                continue
-            consecutive = 0
-        return failed
-
-    def _run_or_nomatch(self, argv: List[str],
-                        timeout: float) -> CommandResult:
+    def _run_query(self, argv: List[str]) -> CommandResult:
         """실행 후 결과 반환. '매칭 job 없음'은 **장애가 아니라 정상 결과**로
         보고 그대로 돌려준다 — timeout/그 외 비정상 종료만 LsfCommandError.
 
@@ -669,7 +655,7 @@ class LsfCommand:
         if self._status_shutdown.is_set():
             raise LsfCommandError("상태 조회원이 종료되었습니다")
         try:
-            res = self._run(argv, timeout, query=True)
+            res = self._run(argv, self.config.query_timeout_s, query=True)
         except subprocess.TimeoutExpired:
             raise LsfCommandError(f"{argv[0]} timeout")
         if self._status_shutdown.is_set():
@@ -683,9 +669,6 @@ class LsfCommand:
                     returncode=res.returncode, stderr=res.stderr)
         return res
 
-    def _run_query(self, argv: List[str]) -> CommandResult:
-        return self._run_or_nomatch(argv, self.config.query_timeout_s)
-
     @staticmethod
     def _parse_bjobs(stdout: str) -> List[JobStatus]:
         """bjobs delimiter(';') 출력 파싱 (v10.2: -json에서 복귀).
@@ -696,6 +679,7 @@ class LsfCommand:
         필드를 버린다. 파싱 불가 행은 그 행만 버린다 — 부재 확정은
         호출자(monitor의 LOST 판정)의 몫이다."""
         out: List[JobStatus] = []
+        now = datetime.now()                 # 한 응답의 모든 시각에 같은 기준을 적용한다.
         for line in stdout.splitlines():
             line = line.strip()
             if not line:
@@ -722,11 +706,11 @@ class LsfCommand:
             source_cluster = forward_cluster = None
             if len(parts) in (6, 8):
                 run_time_s = _parse_run_time(parts[3])
-                start_time = _parse_lsf_time(parts[4])
+                start_time = _parse_lsf_time(parts[4], now)
                 # RUN 중 finish_time은 예상치(estimated)일 수 있다 —
                 # 실측만 저장하도록 종료 상태에서만 채운다
                 if state in (JobState.DONE, JobState.EXIT):
-                    finish_time = _parse_lsf_time(parts[5])
+                    finish_time = _parse_lsf_time(parts[5], now)
                 if len(parts) == 8:       # MultiCluster forwarding
                     source_cluster = _clean_field(parts[6])
                     forward_cluster = _clean_field(parts[7])

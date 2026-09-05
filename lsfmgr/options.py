@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import logging
 import math
-
-from .config import NUMERIC_RANGES, _in_range, validate_cmd_path
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import Any, Dict, Optional, Tuple
+
+from .config import LsfConfig, NUMERIC_RANGES, _in_range, validate_cmd_path
 
 log = logging.getLogger("lsfmgr.options")   # 모듈 로거 (코드베이스 관례)
 
@@ -214,3 +214,32 @@ def resolve_options(defaults: Dict[str, Any],
     merged.update(call)
     valid_fields = {f.name for f in fields(Options)}
     return Options(**{k: v for k, v in merged.items() if k in valid_fields})
+
+
+def resolve_manager_options(config: Optional[LsfConfig], kwargs: Dict[str, Any]
+                            ) -> Tuple[LsfConfig, Dict[str, Any]]:
+    """config와 manager 옵션을 해석해 환경 설정과 호출 기본값을 반환한다."""
+    manager = validate_options(
+        {k: v for k, v in kwargs.items() if k in MANAGER_ONLY_KEYS},
+        allowed=MANAGER_ONLY_KEYS, where="LsfJobManager()")
+    shared = validate_options(
+        {k: v for k, v in kwargs.items() if k not in MANAGER_ONLY_KEYS},
+        allowed=SHARED_KEYS, where="LsfJobManager()")
+    if "submit_timeout_s" in shared:
+        manager["submit_timeout_s"] = shared["submit_timeout_s"]
+    base = config or LsfConfig()
+    cfg = replace(base, **manager) if manager else base
+    defaults = {
+        "workers": cfg.workers,
+        "max_retry": cfg.max_retry,
+        "retry_backoff": (f"fixed:{cfg.retry_delay_s:g}" if cfg.retry_backoff <= 1.0
+                          else f"expo:{cfg.retry_delay_s:g}"),
+        "poll_interval_s": cfg.poll_interval_s,
+        "submit_timeout_s": cfg.submit_timeout_s,
+        **shared,
+    }
+    if cfg.retry_backoff > 1.0 and cfg.retry_backoff != 2.0:
+        log.warning("LsfConfig.retry_backoff=%s — v7 옵션 체계의 expo "
+                    "지수 밑은 2로 고정되어 배수가 그대로 반영되지 "
+                    "않습니다", cfg.retry_backoff)
+    return cfg, defaults

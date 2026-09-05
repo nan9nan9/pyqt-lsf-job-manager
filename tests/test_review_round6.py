@@ -29,18 +29,18 @@ def test_set_user_data_does_not_clobber_a_concurrent_submit(manager):
     store.transition(js.id, "a", JobState.SUBMITTING)
 
     # set_user_data가 대상을 읽은 **직후** worker가 제출 성공을 기록하는 순간
-    real_find = manager._find_job
+    real_find = manager.jobsets.resolve_refs
 
-    def find_then_race(jsid, ref):
-        rec = real_find(jsid, ref)
+    def find_then_race(jsid, refs):
+        rec = real_find(jsid, refs)
         store.transition(jsid, "a", JobState.PEND, job_id=98765)
         return rec
 
-    manager._find_job = find_then_race
+    manager.jobsets.resolve_refs = find_then_race
     try:
         new = manager.set_user_data(js, "a", {"n": 1})
     finally:
-        manager._find_job = real_find
+        manager.jobsets.resolve_refs = real_find
 
     assert new.user_data == {"n": 1}
     assert new.job_id == 98765, "제출 성공의 job_id가 지워졌다(추적 불가)"

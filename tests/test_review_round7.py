@@ -42,7 +42,7 @@ def test_retry_ledger_does_not_wait_on_the_busy_context_lock(qtbot, fake_lsf):
         assert held.wait(2.0)
         try:
             t0 = time.perf_counter()
-            sub._on_retry_requested(js.id, "a")   # main 경로
+            sub._on_retry_requested(ctx, "a")   # main 경로
             elapsed = time.perf_counter() - t0
         finally:
             release.set()

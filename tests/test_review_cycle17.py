@@ -53,7 +53,7 @@ def test_only_job_id_picks_array_parent(qtbot, manager, fake_lsf):
         dc_replace(parent, job_id=9500, state=JobState.DONE))
     manager.store.store_add_jobs(_array_records(js.id, 9500, 3))
 
-    targets = manager._submit_targets(js.id, [9500])
+    targets = manager.jobsets.submit_targets(js.id, [9500])
     assert [r.job_key for r in targets] == [parent.job_key]
     assert targets[0].array_index is None
 
@@ -65,7 +65,7 @@ def test_only_job_id_of_element_only_reports_why(qtbot, manager, fake_lsf):
     js = mk_jobset(manager, intended_count=2)
     manager.store.store_add_jobs(_array_records(js.id, 9500, 2))
     with pytest.raises(ValueError, match="array element"):
-        manager._submit_targets(js.id, [9500])
+        manager.jobsets.submit_targets(js.id, [9500])
 
 
 def test_start_polling_is_noop_when_already_running(qtbot):

@@ -4,6 +4,7 @@
 PID 파일로 중복 실행을 막고, 다른 CLI 가 상태를 조회할 수 있게 한다.
 """
 
+from contextlib import closing
 import fcntl
 import os
 import signal
@@ -37,24 +38,22 @@ def is_running() -> bool:
 def _run_scheduler_loop():
     """데몬 프로세스 본체."""
     config.ensure_home()
-    db = Database()
-    sched = Scheduler(db)
-
-    stopped = {"flag": False}
-
-    def _handle(signum, frame):
-        stopped["flag"] = True
-
-    signal.signal(signal.SIGTERM, _handle)
-    signal.signal(signal.SIGINT, _handle)
-
-    sched.run_forever(stop_flag=lambda: stopped["flag"])
-
-    # 정리.
     try:
-        os.remove(config.PID_PATH)
-    except OSError:
-        pass
+        with closing(Database()) as db:
+            sched = Scheduler(db)
+            stopped = {"flag": False}
+
+            def _handle(signum, frame):
+                stopped["flag"] = True
+
+            signal.signal(signal.SIGTERM, _handle)
+            signal.signal(signal.SIGINT, _handle)
+            sched.run_forever(stop_flag=lambda: stopped["flag"])
+    finally:
+        try:
+            os.remove(config.PID_PATH)
+        except OSError:
+            pass
 
 
 def start(foreground: bool = False) -> bool:

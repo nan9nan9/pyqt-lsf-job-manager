@@ -9,46 +9,49 @@ Signal 카탈로그는 [gui.md](gui.md) 참고.
 ```
 main 스레드                  워커                           통지 (→ main, queued)
 ──────────────              ─────────────────────────      ─────────────────────
-mgr.submit(js)    ──────▶   submit pool (jobset당 1개)     progress / jobs_updated /
+mgr.submit(js)    ──────▶   coordinator → 전역 submit pool progress / jobs_updated /
 mgr.kill(js)      ──────▶   killer pool (전역 4스레드)      finished / error ...
 mgr.start_polling(js)───▶   polling QThread (전역 1개)
 ```
 
-- 모든 사용자 명령은 **즉시 반환**(비동기)하고 결과는 Signal로 온다.
+- submit/kill은 실행을 큐에 넣고 반환하며, 결과는 Signal로 온다.
+  create/add/replace/remove 등 로컬 편집과 pull 조회는 동기 API다.
 - 상태 변경은 Store에 먼저 반영된 뒤 Signal로 전달된다. Signal은 그 전이의
   스냅샷이고, `js.jobs()`는 현재 스냅샷이므로 다음 갱신이 이미 반영됐을 수 있다.
 - worker→main Signal은 queued connection — slot은 항상 main에서 실행된다.
 
 ## 1. submit — `mgr.submit(js)` (유일한 제출 경로)
 
-`create_jobset([...])`(CREATED, 표 즉시 채움) 후 jobset 기준으로 전 job을
-(재)제출한다. 가드: 전원 비활성(CREATED/terminal)이어야 한다.
+`create_jobset([...])`(CREATED, 표 즉시 채움) 후 jobset의 작업을 (재)제출한다.
+`only`를 주면 선택분만 제출한다. 가드: 제출 대상 전원이 비활성(CREATED/terminal)이어야 한다.
 
 ```
-main                          submit pool worker (job당 1 task)
-────────────────────────      ──────────────────────────────────
+main                          coordinator                   전역 submit pool
+────────────────────────      ──────────────────────────    ─────────────────────
 mgr.submit(js)
- ├ 가드(전원 비활성) + 레코드 리셋(전원 SUBMITTING)
- │   → jobs_updated([전원])        # 표가 즉시 갱신
- ├ SubmitGate.register(ctx)        # kill barrier 중이면 born-cancelled
- └ pool.start(task × N) → 반환
-                              task._run:
-                                cancel_event?  ──set──▶ CANCELLED 확정(잔재 리셋)
-                                │                        → jobs_updated (배치)
-                                not set
-                                ├ rate limit 대기 (token bucket)
-                                ├ wrapper 커맨드 실행 (submit_timeout_s 상한)
-                                ├ 성공(Job <id> 파싱) → PEND + job_id  ┐ 스로틀 배치
-                                ├ 실패(재시도 가능)                     │ (0.5s 또는 1%)
-                                │   → RETRY_WAIT → QTimer → 재시도(최대 max_retry)
-                                └ 실패(최종) → SUBMIT_FAILED           ┘
-                              마지막 task 완료 시:
-                                jobs_updated(잔여 배치) → submit_finished(report)
-                                → jobset_updated(최종 요약)     # 순서 보장
+ ├ 옵션·대상 검사
+ ├ SubmitGate.register(ctx)       # kill barrier 중이면 born-cancelled
+ └ _LaunchTask 큐잉 → 반환
+                              ├ pre_submit (지정 시)
+                              │  False/예외 → 원본 유지·정산
+                              ├ submit_started
+                              ├ 대상 레코드 리셋(SUBMITTING)
+                              ├ task 전부 생성
+                              ├ records_reset → main에서 완료·handler 무장
+                              ├ jobs_updated(실제 리셋분)
+                              └ pool.start(task × N) ─────▶ 취소 검사·rate limit 대기
+                                                            ├ wrapper 실행
+                                                            ├ 성공 → PEND + job_id
+                                                            ├ 재시도 → RETRY_WAIT
+                                                            │  → main QTimer → task
+                                                            └ 최종 실패 → SUBMIT_FAILED
+
+worker 변경분은 스로틀 배치로 전달한다. 마지막 task 완료 시:
+jobs_updated(잔여 배치) → submit_finished(report) → jobset_updated(최종 요약)
 ```
 
 Signal 순서(보장): `(pre_submit_started → pre_submit_finished)`\* → `submit_started` →
-`jobs_updated[SUBMITTING 전원]` → `submit_progress`+`jobs_updated`(스로틀 배치)
+`jobs_updated[실제 리셋분]` → `submit_progress`+`jobs_updated`(스로틀 배치)
 → `submit_finished` → `jobset_updated`.  (\*pre_submit 게이트 지정 시)
 
 **완료 통지**: 이후 폴링/`query_once`로 **전원 terminal** 감지 시
@@ -92,8 +95,8 @@ mgr.kill(js)
                                     ├ bkill id chunk 실행 + 확인 문구 파싱
                                     │     → kill_progress (스로틀)
                                     │     → 미확인분은 kill_max_retry까지 재시도
-                                    ├ (verify=True) 재조회로 잔존 확인 → still_alive
-                                    ├ optimistic(기본): 확인분 즉시 EXIT
+                                    ├ (verify 또는 수락 없는 해소) 재조회 → 실제 상태·잔존 확인
+                                    ├ optimistic(기본): 수락 이력이 있고 해소된 대상 EXIT
                                     ├ scope.release()        # barrier ↓ (_run의 finally)
                                     └ 결과를 main으로 전달 (활동 등록 유지)
                                           → main에서 활동 해제 → kill_finished

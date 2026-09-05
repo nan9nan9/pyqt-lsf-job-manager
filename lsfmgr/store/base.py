@@ -142,6 +142,10 @@ class JobSetStore(ABC):
     def get_jobs(self, jobset_id: str,
                  states: Optional[Set[JobState]] = None) -> List[JobRecord]: ...
 
+    def count_jobs(self, jobset_id: str) -> int:
+        """실제 레코드 수. intended_count의 미생성 몫은 포함하지 않는다."""
+        return len(self.get_jobs(jobset_id))
+
     def find_jobs(self, job_ids: Set[int]) -> List[JobRecord]:
         """job_id 집합에 해당하는 레코드를 jobset 무관 전역 검색 (kill_jobs
         optimistic 전이용 — 어느 jobset 소속인지 모를 때). 기본 구현은

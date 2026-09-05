@@ -5,7 +5,7 @@
   job_id가 array parent와 element에 겹칠 때 _find_job은 **먼저 나온 것**을
   집으므로, 레코드 삽입 순서에 따라 set_user_data(js, 9500)이 element를,
   remove_jobs(js, [9500])은 parent를 가리킨다. ref는 하나의 어휘여야 한다.
-  → _find_job이 _resolve_refs에 위임한다(해석 규칙 한 벌).
+  → 공용 참조 해석을 사용한다(현재 JobSetManager.resolve_refs).
 
 - C18-3: 교체가 delete+add라 그 job이 목록 **끝으로 밀렸다**. 키는 유지되지만
   get_jobs() 순서가 바뀌어, 순서로 렌더링하는 표에서는 행이 점프한다 —
@@ -45,9 +45,8 @@ def test_job_id_ref_resolves_the_same_everywhere(qtbot, manager, fake_lsf):
     js = mk_jobset(manager, [])
     _elements_first(manager, js.id)
 
-    assert manager._resolve_refs(js.id, [9500])[0].job_key == "p"
-    assert manager._find_job(js.id, 9500).job_key == "p"
-    # 공개 API로도 확인 — set_user_data는 _find_job, remove_jobs는 _resolve_refs
+    assert manager.jobsets.resolve_refs(js.id, [9500])[0].job_key == "p"
+    # 공개 API로도 확인 — 메타데이터 변경과 삭제가 같은 parent를 가리킨다.
     assert manager.set_user_data(js, 9500, {"v": 1}).job_key == "p"
     assert [r.job_key for r in manager.remove_jobs(js, [9500])] == ["p"]
 

@@ -33,10 +33,10 @@ python examples/gui_demo.py   # 통합 GUI 데모
 
 폼의 "MC forward 흉내"를 켜고 제출하면 mocklsf 가 일부 job 을 원격 클러스터로
 forward 합니다(`collect_clusters=True` 폴링이 `forward_cluster` 를 채움 —
-테이블 cluster 열에서 확인). 이후 "Kill+verify (MC-aware)"는 forward job 을
-클러스터별로 분류해 그 env(cshrc)를 `source` 한 bkill 로, 나머지는
-env 지정 없는 일반 bkill 로 죽입니다 — forward job 이 로컬 bkill 로 안 죽는 실제 MC 환경의
-해법 시연입니다. 상세는 [`../docs/mocklsf.md`](../docs/mocklsf.md) 참고.
+테이블 cluster 열에서 확인). "Kill+verify"는 일반 `bkill`로 요청하고 잔존 작업을
+조회합니다. MockLSF의 원격 작업은 로컬 kill을 거부하므로 실패·잔존 보고를
+확인할 수 있습니다. 클러스터별 환경 전환은 라이브러리에서 수행하지 않습니다.
+상세는 [`../docs/mocklsf.md`](../docs/mocklsf.md) 참고.
 
 ## 파일
 

@@ -145,3 +145,19 @@ def test_read_does_not_mutate(store, jobs_by_keys):
     before = store.summary("js")
     jobs_by_keys(store, "js", ["k0", "k1", "없는키"])
     assert store.summary("js") == before
+
+
+@pytest.mark.parametrize("base", [False, True])
+def test_count_jobs_tracks_actual_records_not_intended_count(store, base):
+    count = (lambda: JobSetStore.count_jobs(store, "js")) if base else (
+        lambda: store.count_jobs("js"))
+    store.store_insert_jobset(JobSetRecord(jobset_id="js", intended_count=100))
+    assert count() == 0
+    store.store_add_job(JobRecord(job_id=None, array_index=None, jobset_id="js",
+                                  job_key="a", state=JobState.CREATED))
+    assert count() == 1
+    store.transition("js", "a", JobState.DONE)
+    assert count() == 1
+    store.store_delete_job("js", "a")
+    assert count() == 0
+    assert store.summary("js")["total"] == 100

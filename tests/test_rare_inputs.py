@@ -24,11 +24,18 @@ from lsfmgr.internal_status import parse_internal_jobs, parse_time
     ["tool", "-e", "a\\b"],                      # 역슬래시
     ["tool", ""],                                # 빈 인자
 ])
-def test_command_roundtrip(qtbot, manager, argv):
+def test_command_roundtrip(qtbot, manager, monkeypatch, argv):
     js = manager.create_jobset([argv], job_keys=["k"])
-    rec = js.jobs()[0]
-    assert manager._record_to_item(rec) == argv, (
-        f"왕복 실패: {argv} → {manager._record_to_item(rec)}")
+    seen = []
+
+    def run_submit(tokens, timeout_s=None, cwd=None):
+        seen.append(list(tokens))
+        return 1234
+
+    monkeypatch.setattr(manager.command, "run_submit", run_submit)
+    with qtbot.waitSignal(manager.submit_finished, timeout=3000):
+        manager.submit(js, auto_poll=False)
+    assert seen == [argv]
 
 
 # --- ② ARG_MAX 경계 ---

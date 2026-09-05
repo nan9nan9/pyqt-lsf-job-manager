@@ -324,3 +324,26 @@ def test_chunk_args_by_arg_max():
 def test_chunk_args_single_item_too_long():
     with pytest.raises(ArgMaxExceededError):
         list(chunk_args(["y" * 200], 10, 100))
+
+
+def test_yearless_lsf_date_cache_does_not_freeze_reference_clock(monkeypatch):
+    from datetime import datetime
+    from lsfmgr import command
+
+    class Clock(datetime):
+        current = datetime(2026, 9, 5)
+
+        @classmethod
+        def now(cls):
+            return cls.current
+
+    monkeypatch.setattr(command, "datetime", Clock)
+    command._parse_lsf_time_cached.cache_clear()
+    try:
+        assert command._parse_lsf_time("Sep 06 23:00:00").year == 2025
+        Clock.current = datetime(2026, 9, 5, 23, 30)
+        assert command._parse_lsf_time("Sep 06 23:00:00").year == 2026
+        Clock.current = datetime(2026, 9, 7)
+        assert command._parse_lsf_time("Sep 06 23:00:00").year == 2026
+    finally:
+        command._parse_lsf_time_cached.cache_clear()

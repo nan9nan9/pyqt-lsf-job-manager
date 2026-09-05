@@ -15,13 +15,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
 
-from .command import JobStatus, LsfCommand
+from .command import LsfCommand
 from .errors import JobSetNotFoundError, LsfmgrError
 from .qt import (
     DEFERRED_DELETE, QCoreApplication, QObject, QThread, QTimer, Signal, Slot,
     timer_ms,
 )
-from .states import _ON_LSF, JobRecord, JobState
+from .states import _ON_LSF, JobRecord, JobState, JobStatus
 from .store.base import JobSetStore
 
 log = logging.getLogger("lsfmgr.monitor")

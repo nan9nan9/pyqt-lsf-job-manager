@@ -92,7 +92,7 @@ def test_string_is_not_accepted_where_a_ref_list_is_expected(manager):
     with pytest.raises(TypeError):
         manager.remove_jobs(js, "ab")
     # 목록으로 주면 정상 — 'ab' 하나만 대상
-    assert [r.job_key for r in manager._submit_targets(js.id, ["ab"])] == ["ab"]
+    assert [r.job_key for r in manager.jobsets.submit_targets(js.id, ["ab"])] == ["ab"]
 
 
 # ----------------------------------------------------------------------

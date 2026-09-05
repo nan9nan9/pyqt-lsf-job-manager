@@ -216,38 +216,7 @@ class Database:
     # -- 읽기 --------------------------------------------------------------
 
     def _row_to_job(self, row: sqlite3.Row) -> Job:
-        j = Job(
-            job_id=row["job_id"],
-            user=row["user"],
-            command=row["command"],
-            queue=row["queue"],
-            from_host=row["from_host"],
-            job_name=row["job_name"],
-            submit_time=row["submit_time"],
-            stat=row["stat"],
-        )
-        j.array_index = row["array_index"]
-        j.array_size = row["array_size"]
-        j.array_limit = row["array_limit"]
-        j.exec_host = row["exec_host"]
-        j.start_time = row["start_time"]
-        j.finish_time = row["finish_time"]
-        j.pend_secs = row["pend_secs"]
-        j.run_secs = row["run_secs"]
-        j.planned_outcome = row["planned_outcome"]
-        j.exit_code = row["exit_code"]
-        j.suspend_at = row["suspend_at"]
-        j.suspend_secs = row["suspend_secs"]
-        j.susp_since = row["susp_since"]
-        j.num_cpus = row["num_cpus"]
-        j.requested_hosts = row["requested_hosts"]
-        j.proj = row["proj"]
-        j.job_group = row["job_group"]
-        j.cwd = row["cwd"]
-        j.source_cluster = row["source_cluster"]
-        j.forward_cluster = row["forward_cluster"]
-        j.row_id = row["row_id"]
-        return j
+        return Job(row_id=row["row_id"], **{name: row[name] for name in _COLUMNS})
 
     def all_jobs(self, order: str = "submit_time, row_id") -> List[Job]:
         cur = self.conn.execute(f"SELECT * FROM jobs ORDER BY {order}")

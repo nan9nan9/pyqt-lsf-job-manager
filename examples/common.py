@@ -68,9 +68,11 @@ def _init_mocklsf_home() -> str:
     def _cleanup():
         try:
             subprocess.run([os.path.join(BIN, "mocklsfd"), "stop"],
-                           timeout=10, capture_output=True)
-        except Exception:
-            pass
+                           timeout=10, capture_output=True, check=True)
+        except (OSError, subprocess.SubprocessError):
+            logging.getLogger("lsfmgr.examples").warning(
+                "MockLSF 정지 확인 실패 — 실행 디렉토리 보존: %s", home)
+            return
         shutil.rmtree(home, ignore_errors=True)
 
     return home
@@ -170,4 +172,3 @@ def maybe_autoquit(app) -> None:
     sec = float(os.environ.get("LSFMGR_DEMO_AUTOQUIT", "0"))
     if sec > 0:
         QTimer.singleShot(int(sec * 1000), app.quit)
-

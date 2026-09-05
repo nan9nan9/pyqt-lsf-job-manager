@@ -651,3 +651,29 @@ def test_mc_bkill_error_msg_not_lsfmgr_resolved():
     msg = ("Job <1001>: forwarded to cluster <cluster_b> — "
            "source its cluster env to kill")
     assert _parse_bkill_resolved(msg, {"1001"}) == (set(), set())
+def test_cli_closes_database_when_output_fails(tmp_path, monkeypatch):
+    import getpass
+    import sqlite3
+    from mocklsf import cli, config
+    from mocklsf.db import Database
+    from mocklsf.models import Job, RUN
+
+    monkeypatch.setattr(config, "MOCKLSF_HOME", str(tmp_path))
+    monkeypatch.setattr(config, "JOB_OUT_DIR", str(tmp_path / "jobout"))
+    db = Database(str(tmp_path / "state.db"))
+    db.insert_jobs([Job(job_id=1, user=getpass.getuser(), command="tool",
+                        queue="normal", from_host="master", job_name="a",
+                        submit_time=1, stat=RUN)])
+    monkeypatch.setattr(cli, "Database", lambda: db)
+
+    def broken_output(*args, **kwargs):
+        raise RuntimeError("output failed")
+
+    monkeypatch.setattr(cli.formats, "default_table", broken_output)
+    try:
+        with pytest.raises(RuntimeError, match="output failed"):
+            cli.cmd_bjobs([])
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            db.conn.execute("SELECT 1")
+    finally:
+        db.close()

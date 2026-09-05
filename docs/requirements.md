@@ -41,8 +41,9 @@ GUI 앱이 직접 갖고**, 라이브러리는 그 결정을 실행하는 CRUD +
 **명령은 전부 `mgr.*` 한 곳**이고, **JobSet 핸들은 조회(pull) + Signal 전용 뷰**다.
 
 ```
-명령 (전부 async→Signal)   mgr.submit(js) / mgr.kill(js) / mgr.add_jobs(js,…) / ...
-                          인자는 JobSet 핸들 또는 jobset_id 문자열 (_jsid 정규화)
+실행 명령 (async→Signal)   mgr.submit(js) / mgr.kill(js) / ...
+로컬 편집 (sync)           mgr.create_jobset(...) / mgr.add_jobs(js,…) / ...
+                          JobSet 인자는 핸들 또는 jobset_id 문자열 (_jsid 정규화)
 조회 (전부 sync, snapshot)  js.jobs() / js.summary / js.is_* / mgr.get_jobs(js) ...
 Signal                    js.<signal> (해당 JobSet만) 또는 mgr.<signal>(jsid, ...) (전역)
 ```
@@ -88,6 +89,7 @@ if mgr.can_submit(js):
 
 - **OPT-1** 옵션 해석은 `resolve_options(defaults, call_kwargs) -> Options` 한 함수로 일원화 (호출 지점은 submit 하나 — kill은 verify 인자로만 받는다)
   (defaults → manager → call 순 merge, frozen dataclass 반환).
+  생성 시 config와 manager 기본값 구성도 options 모듈의 `resolve_manager_options`가 맡는다.
 - **OPT-2** 알 수 없는 키워드는 즉시 `TypeError` (오타 조기 발견).
 - **OPT-3** 범위 검증 (workers 1~64 등) 위반 시 `ValueError`.
 - **OPT-4** `LsfConfig` 객체 주입도 지원 (`LsfJobManager(config=cfg)`) — kwargs 우선.
@@ -322,30 +324,29 @@ JobSetStore(ABC) ── InMemoryStore
     `NO_JOBID_PARSED`.
   - **FR-1.3** 제출 subprocess의 cwd는 `work_dir`/`work_dirs`(job별 `submit_cwd`)로
     지정하며 재제출·교체에 보존된다. `os.chdir` 금지(스레드 안전).
-  - **FR-1.4** job_key = `<jsid>_<idx>` (내부 키 — LSF에 부착하지 않음).
+  - **FR-1.4** job_key는 앱이 지정하는 jobset 내 고유 키다. LSF에 부착하지 않는다.
 - **FR-2 Retry**: 실패 감지(exit≠0/파싱 실패/timeout) + fail_reason 분류, 최대
   `max_retry`회, `retry_backoff` 정책(**FR-2.1** timeout, **FR-2.2** backoff),
   재시도는 QTimer 스케줄(sleep 없음). **비정상 종료만 재시도**한다(파싱 실패·timeout은
   중복 제출 위험이라 재시도 안 함). 재제출 리셋 시 이전 실행 흔적 소거.
 - **FR-3 Kill**: job_id chunked `bkill` **단일 경로**, 부분 kill(`only_state`)·
   선택 kill(`kill_jobs`). (v10.6: MC 분류 kill 삭제 — kill은 항상 plain bkill)
-  (`{클러스터명: cshrc경로}`, `"*"`가 기본 env)로 클러스터별 env를 source한 bkill.
   제출 우선권(**FR-3.7**): kill이 **겨냥한 job에만, 항상** 걸린다 — 전체 kill은
   jobset 전체, 선택 kill(`kill_jobs`)은 선택한 key만(대상 아닌 job의 제출은 계속).
   jobset 제출을 통째로 멈추는 것은 `mgr.cancel_submit(js)`의 일이다
   (v10.5: `cancel_submit=True` 옵션 삭제 — 기본값이 유출이었다).
   - **FR-3.7** 어느 경로든 **kill 대상이 제출 중이면 반드시 처리된다** — 미착수분은
-    `CREATED` 복귀, 이미 wrapper가 도는 분은 job_id 확보를 기다렸다가 kill. 제출
+    `CANCELLED` 확정, 이미 wrapper가 도는 분은 job_id 확보를 기다렸다가 kill. 제출
     중인 job은 job_id가 없어 bkill 대상이 될 수 없으므로, 기다리지 않으면 key→id
     해석에서 빠져 kill을 빠져나가고 나중에 `PEND`→`RUN`으로 부활한다. 정지 대기
     초과는 `KillReport.errors`에 남긴다.
   - **FR-3.4** 확인 문구 파싱 + 미확인분 재시도(`kill_max_retry`),
     `KillReport.unconfirmed`/`kill_retries`.
-  - **FR-3.5** `kill_status_policy` — `"optimistic"`=확인 즉시 EXIT /
-    `"actual"`=폴링·verify로만.
-  - **FR-3.6** cluster 미상 대상은 bkill **직전에** 최소 포맷
-    (`jobid source_cluster forward_cluster`)으로 1회 조회해 채운다 — 제출 직후 즉시
-    kill해도 올바른 env로 죽는다.
+  - **FR-3.5** `kill_status_policy` — `"optimistic"`=수락 이력이 있고 해소된 대상 EXIT /
+    `"actual"`=폴링·verify로만. already finished 등 수락 없는 해소분은 실제 상태를
+    조회하며 자연 종료에 killed 표식을 붙이지 않는다.
+  - **FR-3.6** 클러스터별 환경 전환은 지원하지 않는다. 로컬 bkill이 원격 작업을
+    거부하면 미확인·오류로 보고하며, verify는 잔존 상태를 확인한다.
   - **kill 우선권 (구조적 보장)**: kill은 진행 중 submit에 우선. `SubmitGate` barrier —
     barrier 확인과 submit 등록이 한 lock 아래 **원자적**이라 "kill의 취소를 빠져나가는
     늦은 제출"이 불가능(`lifecycle.py` SubmitGate/KillScope). `kill_started`는 접수
@@ -456,24 +457,25 @@ JobSetStore(ABC) ── InMemoryStore
 lsfmgr/
 ├── __init__.py          # LsfJobManager, JobSet, JobState, JobRecord, ... export
 ├── qt.py                # qtpy re-export 단일 지점
-├── options.py           # Options(frozen), resolve_options(), 검증(OPT-1~4)
+├── options.py           # config·manager 기본값 구성, 호출 Options, 검증(OPT-1~4)
 ├── config.py            # LsfConfig (Qt 비의존)
 ├── states.py            # JobState, JobRecord, JobSetRecord
 ├── reports.py           # SubmitReport/Progress, KillReport/Progress
 ├── errors.py            # LsfmgrError 계층 (§3.5)
 ├── command.py           # LsfCommand 래퍼 (Qt 비의존, chunking, ARG_MAX, chunk 격리)
+├── internal_status.py   # 콜백 조회·증분 원장·동시 조회 합치기
 ├── store/               # base(ABC) / memory
 ├── submitter.py         # QThreadPool submit + retry + progress/cancel + pre_submit 게이트
 ├── lifecycle.py         # SubmitGate / KillScope — kill 우선권 barrier (CS-11)
 ├── monitor.py           # PollingService (QThread+QTimer) + query_once + chunk 격리/회로차단
-├── killer.py            # chunked bkill + env 분류 + verify + 확인 재시도
+├── killer.py            # chunked bkill + verify + 확인 재시도
+├── completion.py        # manager 내부 완료 판정·무장·후처리 조정
 ├── handlers.py          # JobSetHandlerService — job별 주기 handler (FR-7)
-├── jobset_core.py       # JobSet 도메인 로직 — local_* (편집/삭제 공용 몸통)
+├── jobset_core.py       # 입력·선택·제출 가능성 검사, local_* 편집/삭제
 ├── handle.py            # JobSet 핸들 (조회 + Signal 전용 뷰)
 ├── pacer.py             # progress throttle / 상태 전이 dwell
 ├── util.py
-└── manager.py           # LsfJobManager: 명령 진입점 + 옵션 해석 + AUTO-1~3 + shutdown
-                         #   (+ _PostProcessTask — 전원 terminal 후처리, FR-10)
+└── manager.py           # LsfJobManager: 명령 진입점·서비스 조립·Signal·shutdown
 ```
 
 Qt 비의존 유지: options/config/states/command/store/jobset_core (Qt 없이 테스트 가능).
@@ -508,5 +510,4 @@ Qt 비의존 유지: options/config/states/command/store/jobset_core (Qt 없이 
 19. **post_process 후처리 (FR-10)**: 전원 terminal(성공/실패 무관) 시 1회 실행,
     최종 레코드 전달, 미완료 시 미발화, 완료 후 재발화 없음, 예외 격리
     (error_occurred + finished(None))
-20. **MC kill (FR-3.6)**: 제출 직후 cluster 미상 상태에서 kill해도 최소 포맷 조회로
-    env를 확정해 forward job이 죽는다
+20. **MC kill (FR-3.6)**: 원격 작업의 로컬 kill 거부가 미확인·잔존 보고로 전달된다

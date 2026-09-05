@@ -34,7 +34,7 @@ from .errors import RECORD_GONE as _RECORD_GONE
 from .lifecycle import SubmitGate
 from .options import Options
 from .qt import (
-    CallTask, QObject, QRunnable, QThreadPool, QTimer, Signal, Slot, timer_ms,
+    QObject, QRunnable, QThreadPool, QTimer, Signal, Slot, timer_ms,
 )
 from .reports import SubmitProgress, SubmitReport
 from .states import JobState
@@ -220,7 +220,7 @@ class BulkSubmitter(QObject):
     pre_submit_started = Signal(str)               # jobset_id — pre_submit 게이트 시작
     pre_submit_finished = Signal(str, bool)        # jobset_id, ok — 게이트 종료(True=통과)
     # 내부용 — worker 스레드에서 emit → submitter 소속 스레드에서 QTimer 스케줄
-    _retry_requested = Signal(str, str)       # jobset_id, 원장 키
+    _retry_requested = Signal(object, str)    # 요청을 만든 context, 원장 key
 
     def __init__(self, store: JobSetStore, command: LsfCommand,
                  config: Optional[LsfConfig] = None,
@@ -282,29 +282,13 @@ class BulkSubmitter(QObject):
             self._safe_emit(self.started, jobset_id)
             self._gate_reject(ctx, finish=True)
             return False
-        if pre_submit is None:
-            # 대량 레코드 리셋과 task 생성을 worker에서 수행해 GUI를 막지 않는다.
-            # 착수 예외도 완료로 정산한다.
-            def _launch_guarded():
-                try:
-                    self._launch_cycle(ctx, keyed)
-                except Exception as e:           # noqa: BLE001
-                    log.exception("제출 착수 실패: %s", jobset_id)
-                    self._gate_fail(ctx, repr(e))
-            self._coord.start(CallTask(_launch_guarded))
-            return True
-        # 게이트 경로 — 리셋 **이전**에 검사하므로 False/예외면 레코드 원상
-        # 유지 (예외 시에도 새 레코드를 만들지 않는다 — error +
-        # finished(failed=N)로만 마무리)
-        commands = [self._item_command(item) for _key, item in keyed]
-        self._coord.start(_GateTask(self, ctx, commands, pre_submit,
-                                 lambda: self._launch_cycle(ctx, keyed)))
+        self._coord.start(_LaunchTask(self, ctx, keyed, pre_submit))
         return True
 
     def _launch_cycle(self, ctx: _SubmitContext, keyed: List) -> None:
         """제출 착수 본체 — **단계 순서 자체가 계약**이다. worker 스레드에서
-        실행되며 게이트 경로(_GateTask)와 비게이트 경로가 공유한다. 예외는
-        caller가 _gate_fail로 마무리한다(ctx 미완 방지).
+        실행되며 pre_submit 유무와 무관하게 _LaunchTask가 호출한다. 착수 예외는
+        여기서 실제 리셋분과 함께 _gate_fail로 정산한다.
 
           ① started 발화 — **실제 착수 지점**에서만. shutdown·born-cancelled로
              여기 못 오면 started도 없어 'started만 나가고 finished는 영영
@@ -315,30 +299,35 @@ class BulkSubmitter(QObject):
              ④가 ⑤보다 앞인 이유: 즉시 완주하는 task의 finished가 무장보다
              먼저 main에 도착하면 post_process 판정이 no-op으로 유실된다.
         """
-        log.info("submit 착수 %s: %d건", ctx.jobset_id, len(keyed))
-        self._safe_emit(self.started, ctx.jobset_id)                   # ①
-        launch, reset_recs = self._reset_records(ctx, keyed)           # ②
-        tasks = [self._make_resubmit_task(ctx, key, item, cwd)         # ③
-                 for key, item, cwd in launch]
-        with ctx.lock:
-            already_finished = ctx.finished
-        if already_finished:
-            # 리셋 단계에서 완료된 사이클에는 handler·후처리를 무장하지 않는다.
-            self._safe_emit(self.gate_rejected, ctx.jobset_id, ctx.arm_token)
-            return
-        self._safe_emit(self.records_reset, ctx.jobset_id, ctx.arm_token,
-                        reset_recs)                                  # ④
-        if reset_recs:
-            self._safe_emit(self.jobs_changed, ctx.jobset_id, reset_recs)
-        for i, task in enumerate(tasks):                               # ⑤
-            # jobset 내 순번을 우선순위로 써 여러 jobset의 작업을 교대로 실행한다.
-            # 큰 jobset 뒤에 들어온 작은 jobset의 대기를 줄이면서 각 집합 내부 순서는 보존한다.
-            self._pool.start(task, -i)
-        if not launch:
-            # 띄운 task가 0건 — 완료를 여기서 직접 확정한다(게이트 경로의
-            # 빈 제출 마무리와 동일). ※ 과거의 QTimer.singleShot(0) 방식은
-            # 이 worker 스레드에 이벤트 루프가 없어 영영 발화하지 않았다.
-            self._finish_if_done(ctx, force=True)
+        reset_recs = []
+        try:
+            log.info("submit 착수 %s: %d건", ctx.jobset_id, len(keyed))
+            self._safe_emit(self.started, ctx.jobset_id)                   # ①
+            launch, reset_recs = self._reset_records(ctx, keyed)           # ②
+            tasks = [self._make_resubmit_task(ctx, key, item, cwd)         # ③
+                     for key, item, cwd in launch]
+            with ctx.lock:
+                already_finished = ctx.finished
+            if already_finished:
+                # 리셋 단계에서 완료된 사이클에는 handler·후처리를 무장하지 않는다.
+                self._safe_emit(self.gate_rejected, ctx.jobset_id, ctx.arm_token)
+                return
+            self._safe_emit(self.records_reset, ctx.jobset_id, ctx.arm_token,
+                            reset_recs)                                  # ④
+            if reset_recs:
+                self._safe_emit(self.jobs_changed, ctx.jobset_id, reset_recs)
+            for i, task in enumerate(tasks):                               # ⑤
+                # jobset 내 순번을 우선순위로 써 여러 jobset의 작업을 교대로 실행한다.
+                # 큰 jobset 뒤에 들어온 작은 jobset의 대기를 줄이면서 각 집합 내부 순서는 보존한다.
+                self._pool.start(task, -i)
+            if not launch:
+                # 띄운 task가 0건 — 완료를 여기서 직접 확정한다(게이트 경로의
+                # 빈 제출 마무리와 동일). ※ 과거의 QTimer.singleShot(0) 방식은
+                # 이 worker 스레드에 이벤트 루프가 없어 영영 발화하지 않았다.
+                self._finish_if_done(ctx, force=True)
+        except Exception as e:  # 착수 실패도 이 cycle의 실제 리셋분만 정산한다.
+            log.exception("제출 착수 실패: %s", ctx.jobset_id)
+            self._gate_fail(ctx, repr(e), reset_recs)
 
     def _reset_records(self, ctx: _SubmitContext, keyed: List):
         """② 이전 실행의 흔적을 지우고 SUBMITTING으로 — 반환: (착수 목록,
@@ -577,11 +566,7 @@ class BulkSubmitter(QObject):
         self._pool.waitForDone(-1)
         # worker 종료 후 남은 재시도를 정산한다. 이벤트 루프 종료 뒤에는 타이머가 발화하지 않는다.
         for ctx in contexts:
-            with ctx.retry_lock:
-                entries = list(ctx.pending_retries.values())
-                ctx.pending_retries.clear()
-            for entry in entries:
-                self._finalize_retry(ctx, entry, "SHUTDOWN")
+            self._abort_retries_ctx(ctx, reason="SHUTDOWN")
 
     def _abort_retries_ctx(self, ctx: _SubmitContext,
                            keys: Optional[Sequence[str]] = None,
@@ -783,13 +768,10 @@ class BulkSubmitter(QObject):
         """RETRY_WAIT 전이 직후 worker 스레드에서 호출 — 원장에 등록한다."""
         with ctx.retry_lock:
             ctx.pending_retries[key] = _PendingRetry(key, delay_s, make_task)
-        self._retry_requested.emit(ctx.jobset_id, key)
+        self._retry_requested.emit(ctx, key)
 
-    @Slot(str, str)
-    def _on_retry_requested(self, jobset_id: str, entry_key: str) -> None:
-        ctx = self._ctx(jobset_id)
-        if ctx is None:
-            return
+    @Slot(object, str)
+    def _on_retry_requested(self, ctx: _SubmitContext, entry_key: str) -> None:
 
         def fire():
             with ctx.retry_lock:
@@ -1006,27 +988,18 @@ class BulkSubmitter(QObject):
                  ctx.jobset_id, finish)
         self._drop_ctx(ctx)
 
-    def _gate_fail(self, ctx: _SubmitContext, msg: str) -> None:
+    def _gate_fail(self, ctx: _SubmitContext, msg: str, reset_records=()) -> None:
         """게이트/착수 예외 — 실패 확정. 리셋됐지만 착수 못 한 SUBMITTING
         레코드를 SUBMIT_FAILED로 되돌려 고착을 막고(비게이트 착수 예외
         대비), error + finished + gate_rejected(무장 정리)로 마무리한다."""
         # 착수하지 못한 SUBMITTING만 해제한다. 이미 PEND가 된 작업은 CAS로 보호한다.
         stuck = []
-        try:
-            recs = self.store.get_jobs(ctx.jobset_id)
-        except Exception:                    # noqa: BLE001
-            log.exception("착수 실패 레코드 조회 실패: %s", ctx.jobset_id)
-            recs = []
-        for r in recs:
-            if r.state is not JobState.SUBMITTING:
-                continue
-            # 개별 transition을 각자 try로 — 한 key가 remove_jobs 경합으로
-            # JobNotFoundError를 던져도 루프가 통째로 죽어 나머지가 SUBMITTING에
-            # 갇히면(재제출 busy 가드에 걸려 영구 잠김) 안 된다. 그 key만 건너뛴다.
+        for r in reset_records:
             try:
                 nr = self.store.transition(
                     ctx.jobset_id, r.job_key, JobState.SUBMIT_FAILED,
-                    guard=lambda cur: cur.state is JobState.SUBMITTING,
+                    guard=lambda cur, target=r: (cur.same_execution(target)
+                                                 and cur.state is JobState.SUBMITTING),
                     fail_reason="LAUNCH_FAILED", fail_message=msg[:MAX_FAIL_MESSAGE_CHARS])
                 if nr is not None:
                     stuck.append(nr)
@@ -1044,58 +1017,40 @@ class BulkSubmitter(QObject):
         self._drop_ctx(ctx)
 
 
-class _GateTask(QRunnable):
-    """pre_submit 게이트 워커 — 단일 스레드에서 커맨드 리스트 전체를
-    1회 검사. True면 do_launch()로 실제 제출 착수, False/예외면 거부/실패."""
+class _LaunchTask(QRunnable):
+    """coordinator의 단일 착수 경로: 선택적 pre_submit → 레코드 리셋 → 제출."""
 
-    def __init__(self, submitter: "BulkSubmitter", ctx: _SubmitContext,
-                 commands: list, pre_submit, do_launch):
+    def __init__(self, submitter: BulkSubmitter, ctx: _SubmitContext,
+                 keyed: list, pre_submit):
         super().__init__()
         self.setAutoDelete(True)
         self.submitter = submitter
         self.ctx = ctx
-        self.commands = commands
+        self.keyed = keyed
         self.pre_submit = pre_submit
-        self.do_launch = do_launch
 
     def run(self):
         sub, ctx = self.submitter, self.ctx
-        # 착수 없는 모든 종료 경로의 gate_rejected(무장 정리)는 _gate_reject/
-        # _gate_fail이 발행한다 — 여기서 중복 emit하지 않는다.
-        sub.pre_submit_started.emit(ctx.jobset_id)
-        if sub._shutdown or ctx.cancel_event.is_set():
-            sub.pre_submit_finished.emit(ctx.jobset_id, False)
-            sub._gate_reject(ctx, finish=True)      # 취소 — 항상 finished
-            return
-        try:
-            ok = bool(self.pre_submit(list(self.commands)))
-        except Exception as e:                       # noqa: BLE001
-            log.exception("pre_submit 게이트 예외: %s", ctx.jobset_id)
-            sub.pre_submit_finished.emit(ctx.jobset_id, False)
-            sub._gate_fail(ctx, repr(e))
-            return
-        if ok and (ctx.cancel_event.is_set() or sub._shutdown):
-            # 통과했지만 그새 취소/종료 — ok=True를 먼저 알리면 manager가
-            # rearm 폴링 재개를 수행해, 재실행이 없는데 terminal
-            # 레코드의 최종 핸들러가 중복 발화한다. False로 강등해 알린다.
-            sub.pre_submit_finished.emit(ctx.jobset_id, False)
-            sub._gate_reject(ctx, finish=True)
-            return
-        sub.pre_submit_finished.emit(ctx.jobset_id, ok)
-        if not ok:
-            sub._gate_reject(
-                ctx, finish=sub.config.submit_finished_on_gate_reject)
-            return
-        # started(submit_started)는 do_launch가 착수 지점에서 발화한다 — 여기서
-        # 중복 발화하지 않는다 (started/finished 짝 계약, 단일 발화점).
-        try:
-            self.do_launch()
-        except Exception as e:                       # noqa: BLE001
-            # do_launch(레코드 add_jobs / 워커 spawn)에서 store 장애 등으로
-            # 예외가 나면 게이트 워커가 여기서 죽어 finished가 영영 미발화 →
-            # jobset이 잠긴다. error + finished(failed=N)로 반드시 마무리한다.
-            log.exception("게이트 통과 후 제출 착수 실패: %s", ctx.jobset_id)
-            sub._gate_fail(ctx, repr(e))
-            return
-        if ctx.total == 0:                           # 빈 제출 — 직접 마무리
-            sub._finish_if_done(ctx, force=True)
+        if self.pre_submit is not None:
+            sub.pre_submit_started.emit(ctx.jobset_id)
+            if sub._shutdown or ctx.cancel_event.is_set():
+                sub.pre_submit_finished.emit(ctx.jobset_id, False)
+                sub._gate_reject(ctx, finish=True)
+                return
+            try:
+                ok = bool(self.pre_submit([
+                    sub._item_command(item) for _key, item in self.keyed]))
+            except Exception as e:
+                log.exception("pre_submit 게이트 예외: %s", ctx.jobset_id)
+                sub.pre_submit_finished.emit(ctx.jobset_id, False)
+                sub._gate_fail(ctx, repr(e))
+                return
+            if ok and (ctx.cancel_event.is_set() or sub._shutdown):
+                sub.pre_submit_finished.emit(ctx.jobset_id, False)
+                sub._gate_reject(ctx, finish=True)
+                return
+            sub.pre_submit_finished.emit(ctx.jobset_id, ok)
+            if not ok:
+                sub._gate_reject(ctx, finish=sub.config.submit_finished_on_gate_reject)
+                return
+        sub._launch_cycle(ctx, self.keyed)

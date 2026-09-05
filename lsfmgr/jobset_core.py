@@ -16,6 +16,7 @@ local_remove_jobs/local_clear_jobs, local_remove_jobset), 저장소=store_*
 from __future__ import annotations
 
 import logging
+import shlex
 import threading
 import uuid
 from dataclasses import replace
@@ -27,6 +28,7 @@ from .errors import (
     JobNotFoundError,
     RemoveJobSetNotAllowedError,
     RemoveNotAllowedError,
+    SubmitNotAllowedError,
 )
 from .states import JobRecord, JobSetRecord, JobState
 from .store.base import JobSetStore
@@ -49,9 +51,147 @@ class JobSetManager:
         # 한쪽 갱신이 유실된다 (예: local_create_jobs vs local_edit_jobs).
         self._meta_lock = threading.RLock()
 
+    @staticmethod
+    def _check_records(jobset_id: str, records: Sequence[JobRecord]) -> None:
+        """생성·편집 배치의 소속과 key 유일성을 쓰기 전에 검사한다."""
+        keys = set()
+        for rec in records:
+            if rec.jobset_id != jobset_id:
+                raise ValueError(
+                    f"레코드 jobset_id 불일치: {rec.jobset_id!r} != "
+                    f"{jobset_id!r} ({rec.job_key})")
+            if not isinstance(rec.job_key, str) or not rec.job_key.strip():
+                raise ValueError(f"job_key는 비어있지 않은 문자열이어야 합니다: {rec.job_key!r}")
+            if rec.job_key in keys:
+                raise ValueError(f"job_key 중복(한 호출 안에서): {rec.job_key!r}")
+            keys.add(rec.job_key)
+
     # ------------------------------------------------------------------
     # 생성
     # ------------------------------------------------------------------
+    @staticmethod
+    def build_records(jsid: str, commands: Sequence,
+                      job_keys: Optional[Sequence[str]],
+                      user_datas: Optional[Sequence[Optional[dict]]],
+                      work_dir: Optional[str],
+                      work_dirs: Optional[Sequence[Optional[str]]]) -> List[JobRecord]:
+        """commands → CREATED JobRecord 목록 (create_jobset / _edit_jobs 공용).
+        submit_cwd: work_dir(전체 단일) 또는 work_dirs(job별) — 동시 지정 불가.
+        job_keys: job별 키 — **필수**이며 jobset 안에서 유일해야 한다."""
+        if isinstance(commands, (str, bytes)):
+            raise TypeError("commands는 문자열이 아닌 커맨드 목록이어야 합니다")
+        items = list(commands)
+        if not items:
+            return []
+        if work_dir is not None and work_dirs is not None:
+            raise ValueError(
+                "work_dir와 work_dirs는 동시에 지정할 수 없습니다(둘 중 하나)")
+        if job_keys is None:
+            raise ValueError(
+                "job_keys는 필수입니다 — 각 job의 키를 앱이 정해야 합니다"
+                " (commands와 같은 길이)")
+        keys_in = list(job_keys)
+        uds = list(user_datas) if user_datas is not None else [None] * len(items)
+        # work_dir 단일 지정이면 전 job에 적용, 아니면 work_dirs(job별) 사용
+        wds = (list(work_dirs) if work_dirs is not None
+               else [work_dir] * len(items))
+        if (len(keys_in) != len(items) or len(uds) != len(items)
+                or len(wds) != len(items)):
+            raise ValueError(
+                "job_keys/user_datas/work_dirs 길이가 commands와 다릅니다")
+
+        # 기존 키와의 충돌은 add/replace/upsert 정책을 아는 local_edit_jobs가 검사한다.
+        records = []
+        for item, key, ud, cwd in zip(items, keys_in, uds, wds):
+            argv = (shlex.split(item) if isinstance(item, str)
+                    else [str(t) for t in item])
+            if not argv:
+                raise ValueError("빈 커맨드는 job으로 만들 수 없습니다")
+            records.append(JobRecord(
+                job_id=None, array_index=None, jobset_id=jsid,
+                job_key=key, state=JobState.CREATED,
+                command=shlex.join(argv),
+                user_data=ud, submit_cwd=cwd))
+        JobSetManager._check_records(jsid, records)
+        return records
+
+    def resolve_refs(self, jobset_id: str,
+                      refs: Sequence) -> List[JobRecord]:
+        """ref 목록 → 레코드 목록 — remove_jobs·submit(only=) 공용.
+
+        ref는 job_key(str) 또는 job_id(int). 같은 job을 두 형태로 지정하면
+        1회로 접히고, 순서는 지정 순서를 따른다. 없는 ref는 JobNotFoundError.
+
+        job_id 색인은 **parent만** 담는다 — array element는 parent와 job_id를
+        공유하므로 전부 넣으면 마지막 element가 parent를 덮어, job_id로 지정한
+        parent가 엉뚱하게 element로 해석된다. element를 콕 집으려면 그
+        element의 job_key를 쓴다."""
+        if isinstance(refs, str):
+            # 문자열은 시퀀스라 글자 단위로 분해된다 — only="ab"가 key "a"와
+            # "b"를 가리키게 되어, 그런 key가 실제로 있으면 **엉뚱한 job이
+            # 조용히 제출/삭제된다**. kill_jobs와 같은 규칙으로 막는다.
+            raise TypeError(
+                f"job 지정은 문자열이 아니라 목록이어야 합니다 — "
+                f"하나면 [{refs!r}] (got {refs!r})")
+        self.store.get_jobset(jobset_id)
+        refs = list(refs)
+        if any(isinstance(ref, int) for ref in refs):
+            jobs = self.store.get_jobs(jobset_id)
+            by_key = {r.job_key: r for r in jobs}
+        else:
+            jobs = []
+            by_key = self.store.get_jobs_by_keys(jobset_id, refs)
+        by_jid = {r.job_id: r for r in jobs
+                  if r.job_id is not None and r.array_index is None}
+        out: List[JobRecord] = []
+        seen = set()
+        for ref in refs:
+            rec = (by_jid.get(ref) if isinstance(ref, int)
+                   else by_key.get(ref))
+            if rec is None:
+                if isinstance(ref, int) and any(r.job_id == ref for r in jobs):
+                    # element의 허용 여부는 명령마다 다르므로 여기서는 해당 ID의 형태만 알린다.
+                    raise ValueError(
+                        f"job_id={ref}에 해당하는 job이 array element뿐입니다"
+                        f" (그 id의 parent 레코드가 없음)")
+                raise JobNotFoundError(f"{jobset_id}/{ref}")
+            if rec.job_key in seen:              # 같은 job을 두 형태로 지정
+                continue
+            seen.add(rec.job_key)
+            out.append(rec)
+        return out
+
+    def submit_targets(self, jobset_id: str,
+                        only: Optional[Sequence]) -> List[JobRecord]:
+        """제출 대상 레코드 — only=None이면 전 job, 아니면 지정분만.
+
+        array element(array_index 지정분)는 개별 제출 대상이 아니다 — parent
+        job 하나가 element 전체를 만들므로 element만 따로 제출할 수 없다.
+        전체 제출에서는 조용히 걸러지고, only로 콕 집으면 오류로 알린다
+        (조용히 무시하면 '선택했는데 안 돌았다'가 된다)."""
+        if only is None:
+            targets = [r for r in self.store.get_jobs(jobset_id)
+                       if r.array_index is None]
+        else:
+            targets = self.resolve_refs(jobset_id, only)
+        for rec in targets:
+            if rec.array_index is not None:
+                raise ValueError(
+                    f"array element는 개별 제출할 수 없습니다:"
+                    f" {rec.job_key!r} (parent job을 제출하세요)")
+        if not targets:
+            raise SubmitNotAllowedError(
+                f"{jobset_id}: 제출할 job이 없습니다"
+                + (" (only=[] — 빈 선택)" if only is not None else ""),
+                jobset_id=jobset_id)
+        busy = [r.job_key for r in targets if not r.state.is_inactive]
+        if busy:
+            raise SubmitNotAllowedError(
+                f"{jobset_id}: 활성(진행 중) job이 있어 submit 불가 — "
+                f"{busy[:5]} (먼저 kill 하거나 완료를 기다리세요)",
+                jobset_id=jobset_id, job_keys=busy)
+        return targets
+
     def local_create_jobset(self, intended_count: int, *, label: str = "",
                             tags: Sequence[str] = (),
                             jobset_id: Optional[str] = None) -> JobSetRecord:
@@ -80,24 +220,19 @@ class JobSetManager:
         if not records:
             return []
         with self._meta_lock:
-            existing = self.store.get_jobs(jobset_id)
-            keys = {r.job_key for r in existing}
+            self.store.get_jobset(jobset_id)
+            self._check_records(jobset_id, records)
+            existing = self.store.get_jobs_by_keys(
+                jobset_id, [r.job_key for r in records])
             for rec in records:
-                if rec.jobset_id != jobset_id:
-                    # 남의 jobset에 끼워 넣으면 그 jobset의 summary 불변식이
-                    # 깨지고 이 jobset엔 유령 intended_count가 남는다
-                    raise ValueError(
-                        f"레코드 jobset_id 불일치: {rec.jobset_id!r} != "
-                        f"{jobset_id!r} ({rec.job_key})")
-                if rec.job_key in keys:
-                    raise ValueError(
-                        f"job 이름 중복: {jobset_id}/{rec.job_key}")
-                keys.add(rec.job_key)
+                if rec.job_key in existing:
+                    raise ValueError(f"job 이름 중복: {jobset_id}/{rec.job_key}")
             out = self.store.store_add_jobs(records)
             js = self.store.get_jobset(jobset_id)
-            if len(keys) > js.intended_count:
+            count = self.store.count_jobs(jobset_id)
+            if count > js.intended_count:
                 self.store.update_jobset(
-                    replace(js, intended_count=len(keys)))
+                    replace(js, intended_count=count))
         return out
 
     def local_edit_jobs(self, jobset_id: str, records: List[JobRecord], *,
@@ -114,19 +249,19 @@ class JobSetManager:
         JobEditNotAllowedError (force=True면 레코드만 강제 교체 — LSF 정리는
         caller 책임).
 
-        검증은 **변경 시작 전에 전부** 끝낸다(원자성). 루프 도중 예외가 나면
-        일부만 반영된 채 중단돼, intended_count가 실제 레코드 수와 어긋나
-        summary 불변식(합계 == intended_count)이 영구 파손된다.
+        소속·중복 key·활성 상태 검증은 변경 전에 모두 끝낸다.
+        잘못된 입력 때문에 배치의 일부만 변경되지 않도록 한다.
 
         반환: 추가·교체된 레코드 목록 (신호 발행용)."""
         if policy not in ("add", "replace", "upsert"):
             raise ValueError(f"policy는 add/replace/upsert (got {policy!r})")
         with self._meta_lock:
-            jobs = self.store.get_jobs(jobset_id)     # 존재 검증 겸함
-            by_key = {r.job_key: r for r in jobs}
+            self.store.get_jobset(jobset_id)
+            self._check_records(jobset_id, records)
+            by_key = self.store.get_jobs_by_keys(
+                jobset_id, [r.job_key for r in records])
 
             # 정책별 매칭 — (새 레코드, 교체 대상 or None)
-            # (한 호출 안의 job_key 중복은 레코드를 만드는 쪽에서 이미 걸렀다)
             plan: List[tuple] = []
             for rec in records:
                 old = by_key.get(rec.job_key)
@@ -172,7 +307,7 @@ class JobSetManager:
         예외적으로 '늘리기만' 한다 — 빈 jobset의 intended_count 선지정을
         보존하기 위해서다."""
         js = self.store.get_jobset(jobset_id)
-        n = len(self.store.get_jobs(jobset_id))
+        n = self.store.count_jobs(jobset_id)
         if js.intended_count != n:
             self.store.update_jobset(replace(js, intended_count=n))
 
@@ -195,7 +330,8 @@ class JobSetManager:
             raise ValueError("remove_jobs: 지울 job을 지정하세요"
                              " (전부 지우려면 clear_jobs)")
         with self._meta_lock:
-            by_key = {r.job_key: r for r in self.store.get_jobs(jobset_id)}
+            self.store.get_jobset(jobset_id)
+            by_key = self.store.get_jobs_by_keys(jobset_id, keys)
             targets = []
             for k in keys:
                 rec = by_key.get(k)
@@ -231,9 +367,9 @@ class JobSetManager:
                 jobset_id=jobset_id, job_keys=busy)
         _warn_orphans(jobset_id, targets, what)
         # 건별이 아니라 일괄 — 이유는 store.store_delete_jobs 참고
-        self.store.store_delete_jobs(jobset_id, [r.job_key for r in targets])
+        removed = self.store.store_delete_jobs(jobset_id, [r.job_key for r in targets])
         self._sync_intended_count(jobset_id)
-        return targets
+        return removed
 
     # ------------------------------------------------------------------
     # 손실 감지
