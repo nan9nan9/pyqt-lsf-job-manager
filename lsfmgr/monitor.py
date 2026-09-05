@@ -13,7 +13,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, FrozenSet, List, Optional, Tuple
+from typing import Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
 
 from .command import JobStatus, LsfCommand
 from .errors import JobSetNotFoundError, LsfmgrError
@@ -73,6 +73,9 @@ class JobsetQuerier:
         # 같은 jobset의 폴링·verify를 직렬화해 미발견 횟수의 유실·이중 증가를 막는다.
         # 잠금 항목은 조회가 사용하는 동안만 유지한다.
         self._query_locks: Dict[str, "_QLock"] = {}
+        # 같은 ID의 겹친 조회가 결과를 모두 읽은 뒤 관심을 정리한다.
+        self._id_queries: Dict[int, int] = {}
+        self._id_query_lock = threading.Lock()
 
     def _pop_streaks(self, jobset_id: str) -> Dict[str, int]:
         with self._streak_lock:
@@ -156,6 +159,49 @@ class JobsetQuerier:
         with self._serialized_query(jobset_id):   # 직렬화 근거는 __init__ 주석
             return self._query_serialized(jobset_id, fresh=fresh)
 
+    def query_ids(self, job_ids: Sequence[int], *, fresh: bool = False,
+                  jobset_id: str = "", job_keys: Optional[Sequence[str]] = None
+                  ) -> Tuple[List[JobStatus], Set[int]]:
+        """상태 조회와 관심 ID 정리 — 폴링·kill 직접 조회의 공통 경계.
+
+        조회가 관심을 등록한 뒤 삭제·재제출된 ID와 미등록 ID를 정리한다.
+        Store 상태 전이는 호출자의 몫이며, 조회 실패 시에도 관심은 정리한다.
+        소속 jobset을 알면 그 안에서만 확인하고, 폴링은 이미 고른 key를
+        함께 넘겨 완료 레코드까지 다시 훑지 않는다. 소속을 모를 때만 전역 검색한다.
+        """
+        if self.command.internal_status is None:
+            return self.command.bjobs_by_ids(job_ids, fresh=fresh)
+        ids = set(job_ids)
+        with self._id_query_lock:
+            for jid in ids:
+                self._id_queries[jid] = self._id_queries.get(jid, 0) + 1
+        try:
+            return self.command.bjobs_by_ids(job_ids, fresh=fresh)
+        finally:
+            # 조회 중에는 lock을 잡지 않는다. 마지막 독자의 정리와 다음 조회의
+            # 등록만 직렬화해, 다른 조회가 아직 읽는 원장을 먼저 지우지 않는다.
+            with self._id_query_lock:
+                finished = set()
+                for jid in ids:
+                    self._id_queries[jid] -= 1
+                    if not self._id_queries[jid]:
+                        self._id_queries.pop(jid)
+                        finished.add(jid)
+                if not jobset_id:
+                    records = self.store.find_jobs(finished)
+                elif job_keys is not None:
+                    records = self.store.get_jobs_by_keys(
+                        jobset_id, job_keys).values()
+                else:
+                    try:
+                        records = self.store.get_jobs(jobset_id)
+                    except JobSetNotFoundError:
+                        records = []          # 조회 중 jobset이 삭제됨
+                tracked = {r.job_id for r in records}
+                stale = finished - tracked
+                if stale:
+                    self.command.forget_status(sorted(stale))
+
     def _query_serialized(self, jobset_id: str, *,
                           fresh: bool = False) -> QueryResult:
         self.store.get_jobset(jobset_id)     # 존재 검증 (없으면 예외)
@@ -173,20 +219,12 @@ class JobsetQuerier:
         ids = sorted({r.job_id for r in targets if r.job_id is not None})
         bjobs_failed: set = set()
         if ids:
-            sts, bjobs_failed = self.command.bjobs_by_ids(ids, fresh=fresh)
+            sts, bjobs_failed = self.query_ids(
+                ids, fresh=fresh, jobset_id=jobset_id,
+                job_keys=[r.job_key for r in targets])
             for st in sts:
                 statuses[(st.job_id, st.array_index)] = st
                 by_id.setdefault(st.job_id, {})[st.array_index] = st
-            # 스냅샷(targets)과 조회원의 관심 등록 사이에 삭제·교체·재제출로
-            # 떨어진 id는 그쪽의 forget보다 등록이 늦어 조회원에 유령으로
-            # 남는다 — 현재 레코드와 대조해 되돌아온 id를 다시 버린다.
-            cur = self.store.get_jobs_by_keys(
-                jobset_id, [r.job_key for r in targets])
-            stale = [r.job_id for r in targets if r.job_id is not None
-                     and (r.job_key not in cur
-                          or cur[r.job_key].job_id != r.job_id)]
-            if stale:
-                self.command.forget_status(stale)
 
         # --- 2) 레코드 ↔ 조회 결과 매칭 ---
         def lookup(rec: JobRecord) -> Optional[JobStatus]:

@@ -9,12 +9,18 @@
 규칙: **id를 지우는 쪽이 버리는 것도 책임진다.**
 경로마다 주인이 다르므로(삭제=remove_*, 재제출=submitter, 교체=
 _rearm_tracking) 새 경로가 생기면 여기 한 줄을 추가하도록 강제한다.
+삭제 뒤 늦게 등록되거나 미등록 ID를 직접 조회하는 경우는 query_ids가 정리한다.
 """
 from __future__ import annotations
 
+import subprocess
+import threading
+
 import pytest
 
-from lsfmgr import InMemoryStore, LsfConfig, LsfJobManager
+from lsfmgr import InMemoryStore, JobState, LsfConfig, LsfJobManager
+from lsfmgr.command import CommandResult
+from tests.fake_lsf import FakeLsf
 
 
 @pytest.fixture
@@ -144,3 +150,177 @@ def test_query_snapshot_older_than_removal_does_not_revive_the_id(mgr, qtbot):
     src = mgr.command.internal_status
     assert fired and ids[0] not in src._interest, sorted(src._interest)
     assert ids[1] in src._interest               # 남은 job은 그대로 추적
+
+
+def test_poll_cleanup_reads_only_queried_keys(mgr, qtbot, monkeypatch):
+    """정리 비용은 전체 Store나 완료 작업 수가 아닌 조회한 key 수에 비례한다."""
+    js, ids = _submitted(qtbot, mgr, ["a", "b", "done"])
+    mgr.store.transition(js.id, "done", JobState.DONE)
+    mgr.create_jobset(["unrelated task"], job_keys=["other"])
+    real = mgr.store
+    reads = []
+
+    class BoundedReads:
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def find_jobs(self, job_ids):
+            pytest.fail("폴링의 관심 ID 정리가 Store 전역을 검색했다")
+
+        def get_jobs(self, jobset_id, states=None):
+            assert jobset_id == js.id and states is not None
+            return real.get_jobs(jobset_id, states=states)
+
+        def get_jobs_by_keys(self, jobset_id, job_keys):
+            reads.append((jobset_id, set(job_keys)))
+            return real.get_jobs_by_keys(jobset_id, job_keys)
+
+    monkeypatch.setattr(mgr.querier, "store", BoundedReads())
+    mgr._probe_live.clear()                    # 증분 응답이 비어도 원장은 보존
+    mgr.querier.query(js.id, fresh=True)
+    assert reads == [(js.id, {"a", "b"})]
+    assert mgr.command.internal_status._interest == set(ids)
+    assert js.jobs()[0].state is JobState.RUN
+
+
+@pytest.mark.parametrize("job_keys", [None, ["a"]], ids=["jobset", "keys"])
+@pytest.mark.parametrize("query_fails", [False, True])
+def test_scoped_query_cleans_ids_after_jobset_removal(
+        mgr, qtbot, monkeypatch, job_keys, query_fails):
+    """소속을 아는 조회도 jobset 삭제·조회 실패 뒤 관심을 되살리지 않는다."""
+    js, ids = _submitted(qtbot, mgr, ["a"])
+    original = mgr.command.bjobs_by_ids
+
+    def query_after_removal(job_ids, *, fresh=False):
+        mgr.remove_jobset(js, force=True)
+        result = original(job_ids, fresh=fresh)  # 삭제의 forget보다 늦은 등록
+        if query_fails:
+            raise RuntimeError("query interrupted")
+        return result
+
+    monkeypatch.setattr(mgr.command, "bjobs_by_ids", query_after_removal)
+    if query_fails:
+        with pytest.raises(RuntimeError, match="query interrupted"):
+            mgr.querier.query_ids(ids, jobset_id=js.id, job_keys=job_keys)
+    else:
+        statuses, failed = mgr.querier.query_ids(
+            ids, jobset_id=js.id, job_keys=job_keys)
+        assert not failed and [st.job_id for st in statuses] == ids
+    src = mgr.command.internal_status
+    assert not src._interest and not src._ledger
+    assert not mgr.querier._id_queries
+
+
+@pytest.mark.parametrize("route", ["already_finished", "verify", "timeout"])
+@pytest.mark.parametrize("remove_during_kill", [False, True])
+@pytest.mark.parametrize("query_fails", [False, True])
+def test_direct_kill_query_cleans_untracked_ids(
+        qtbot, route, remove_during_kill, query_fails):
+    """kill의 직접 조회도 삭제 뒤 늦게 등록한 ID와 미등록 ID를 정리한다.
+    조회 장애로 상태를 확인하지 못했어도 추적할 레코드가 없다는 사실은 같다."""
+    fake = FakeLsf()
+    entered, release = threading.Event(), threading.Event()
+
+    def runner(argv, timeout, cwd=None):
+        if argv[0] != "bkill":
+            return fake(argv, timeout, cwd)
+        entered.set()
+        assert release.wait(3)
+        if route == "timeout":
+            raise subprocess.TimeoutExpired(argv, timeout)
+        message = ("is being terminated" if route == "verify"
+                   else "Job has already finished")
+        return CommandResult(0, f"Job <{argv[1]}>: {message}\n", "")
+
+    def fetcher():
+        if query_fails:
+            raise RuntimeError("status source unavailable")
+        return {"jobs": []}
+
+    cfg = LsfConfig(job_status_fetcher=fetcher, internal_refresh_min_s=0,
+                    kill_max_retry=0)
+    mgr = LsfJobManager(runner=runner, config=cfg)
+    try:
+        job_id = 987654
+        if remove_during_kill:
+            js = mgr.create_jobset(["wrapper task"], job_keys=["a"])
+            with qtbot.waitSignal(mgr.submit_finished, timeout=3000):
+                mgr.submit(js, auto_poll=False)
+            job_id = js.jobs()[0].job_id
+        with qtbot.waitSignal(mgr.kill_finished, timeout=3000) as result:
+            mgr.kill_jobs([job_id], verify=(route == "verify"))
+            assert entered.wait(3)
+            if remove_during_kill:
+                mgr.remove_jobs(js, ["a"], force=True)
+            release.set()
+        report = result.args[1]
+        assert not any("internal:" in error for error in report.errors), report
+        assert report.unconfirmed == int(route == "timeout" and query_fails)
+        assert mgr.store.find_jobs({job_id}) == []
+        src = mgr.command.internal_status
+        assert job_id not in src._interest
+        assert job_id not in src._ledger
+        assert not mgr.querier._id_queries
+    finally:
+        release.set()
+        mgr.shutdown()
+
+
+def test_direct_query_preserves_tracked_incremental_status(mgr, qtbot):
+    """조회 대상인 RUN과 대상 밖 RUN의 원장은 모두 보존한다. 콜백은 증분이라
+    다음 응답에서 빠진다고 지우면 그 작업은 LOST로 잘못 판정될 수 있다."""
+    js, ids = _submitted(qtbot, mgr, ["a", "b"])
+    with qtbot.waitSignal(mgr.kill_finished, timeout=3000):
+        mgr.kill_jobs([ids[0], 987654], verify=True)
+    src = mgr.command.internal_status
+    assert src._interest == set(ids)
+    assert set(src._ledger) == set(ids)
+    mgr._probe_live.clear()                    # 이후 payload는 변경분 없음
+    mgr.querier.query(js.id, fresh=True)
+    assert all(r.state is JobState.RUN for r in js.jobs())
+
+
+def test_overlapping_queries_keep_results_until_both_read(qtbot, monkeypatch):
+    """같은 미등록 ID를 조회 중인 다른 호출이 결과를 읽기 전에 지우지 않는다."""
+    payloads = iter([{"jobs": [{"dataId": "987654.c1", "stat": "RUN"}]},
+                     {"jobs": []}])          # 두 번째 응답은 증분
+    mgr = LsfJobManager(runner=FakeLsf(), config=LsfConfig(
+        job_status_fetcher=lambda: next(payloads), internal_refresh_min_s=0))
+    ready, release = threading.Event(), threading.Event()
+    results, errors = {}, []
+    src = mgr.command.internal_status
+    ensure_fetched = src._ensure_fetched
+
+    def pause_before_read(*, fresh):
+        ok = ensure_fetched(fresh=fresh)
+        if threading.current_thread().name == "held-reader":
+            ready.set()
+            assert release.wait(3)
+        return ok
+
+    monkeypatch.setattr(src, "_ensure_fetched", pause_before_read)
+
+    def held_query():
+        try:
+            results["held"] = mgr.querier.query_ids([987654], fresh=True)
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=held_query, name="held-reader")
+    try:
+        worker.start()
+        assert ready.wait(3)
+        results["other"] = mgr.querier.query_ids([987654], fresh=True)
+        release.set()
+        worker.join(3)
+        assert not worker.is_alive() and not errors
+        for statuses, failed in results.values():
+            assert not failed
+            assert [(st.job_id, st.state) for st in statuses] == [
+                (987654, JobState.RUN)]
+        assert not src._interest and not src._ledger
+        assert not mgr.querier._id_queries
+    finally:
+        release.set()
+        worker.join(3)
+        mgr.shutdown()

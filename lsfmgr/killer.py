@@ -454,7 +454,7 @@ class _KillTask(QRunnable):
         try:
             # fresh — 방금 bkill한 job의 생사는 캐시로 답할 수 없다
             # (internal 조회원의 스냅샷 TTL을 건너뛴다).
-            sts, failed = self.killer.command.bjobs_by_ids(pids, fresh=True)
+            sts, failed = self.killer.querier.query_ids(pids, fresh=True)
         except LsfmgrError as e:
             log.warning("kill verify 직접 조회 실패: %s", e)
             return None
@@ -540,7 +540,8 @@ class _KillTask(QRunnable):
             return set(), set(), 0
         try:
             # fresh — 방금 kill을 쏜 job의 생사는 캐시로 답할 수 없다
-            sts, failed = self.killer.command.bjobs_by_ids(pids, fresh=True)
+            sts, failed = self.killer.querier.query_ids(
+                pids, fresh=True, jobset_id=self.jobset_id)
         except Exception as e:               # noqa: BLE001 — 부기용 조회다
             log.warning("kill timeout 후 생사 조회 실패(재시도로 넘김): %r", e)
             return set(), set(), 1
