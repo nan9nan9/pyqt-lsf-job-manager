@@ -329,9 +329,9 @@ class JobSetHandlerService(QObject):
         finally:
             self._clear_inflight(h, rec.job_key)
         self.finished.emit(h.jobset_id, h.name, result)
-        if not final:
-            # 실행 사이 job이 종료됐을 수 있다 — main에서 재평가해 final 보충
-            self._recheck.emit(h.jobset_id, h.name, rec.job_key)
+        # 이전 final 실행 중 재제출한 job도 종료됐을 수 있다.
+        # 현재 실행의 _FINISHED 판정이 중복 final을 막는다.
+        self._recheck.emit(h.jobset_id, h.name, rec.job_key)
 
 
 class _DrainTask(QRunnable):

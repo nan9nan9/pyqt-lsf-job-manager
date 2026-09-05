@@ -22,7 +22,12 @@ TransitionSpec = Tuple[
 
 
 class JobSetStore(ABC):
-    """JobSet/JobRecord 저장소 계약."""
+    """JobSet/JobRecord 저장소 계약.
+
+    기존 JobRecord를 갱신하는 쓰기는 잠금/트랜잭션 안에서 현재 레코드의
+    _revision을 1 증가시켜 저장하고 반환한다. 실행 교체와 부분 갱신도 포함한다.
+    이 순서로 Manager가 같은 실행에서 역순 도착한 신호를 구별한다.
+    """
 
     def exists(self, jobset_id: str) -> bool:
         """jobset이 아직 있는가 — **늦게 도착한 쓰기를 버릴지**의 단일 술어.

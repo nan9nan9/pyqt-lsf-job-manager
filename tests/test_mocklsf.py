@@ -70,7 +70,7 @@ def test_concurrent_updates_preserve_other_fields(tmp_path, monkeypatch,
 
             def interleaved_update(pairs):
                 concurrent_change()
-                original_update(pairs)
+                return original_update(pairs)
 
             monkeypatch.setattr(database, "update_guarded_many", interleaved_update)
             schedmod.Scheduler(database).tick(time.time() + 1)

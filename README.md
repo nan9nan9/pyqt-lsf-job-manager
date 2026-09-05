@@ -336,13 +336,11 @@ mgr.jobset_finished.connect(                   # 전역 계층 — (jobset_id, s
 - 둘 다 쓰면 순서는 **`jobset_finished` → `post_processing_started`**.
 - **성공 여부와 무관** — 전원 실패로 끝나도 발화합니다("끝났다"는 신호이지
   "전부 성공"이 아님). 성공/실패는 요약이나 `js.failed_jobs`로 판단하세요.
-- **내가 건 kill로 끝났으면 발화하지 않습니다.** `mgr.kill(js)`/`kill_jobs`로
-  전 job이 EXIT가 된 완료는 사용자가 스스로 끝낸 것이라 알림이 필요 없습니다.
-  반대로 **의도치 않은 종료**(자연 종료, LSF/관리자의 외부 `bkill`, 비정상 EXIT)는
-  kill 요청을 거치지 않으므로 그대로 통지됩니다 — 알아야 하는 쪽만 옵니다.
-  **부분 kill**(PEND만/선택 행)은 억제 대상이 아니라, 남은 job이 끝나면 통지됩니다.
-  구분 근거는 레코드의 `rec.killed`(위 "실패 원인 표시" 참고)와 "kill이 끝낸
-  완료냐"입니다 — 전원이 `killed`면 EXIT가 폴링으로 나중에 확인돼도 조용합니다.
+- **전원이 `rec.killed`이면 발화하지 않습니다.** 이 manager가 수락받은 kill과
+  제출 취소로 끝난 경우이며, actual 정책으로 종료를 나중에 확인해도 같습니다.
+  자연 종료·외부 `bkill`·비정상 EXIT처럼 `killed=False`인 job이 섞여 있으면
+  전원 terminal이 될 때 통지합니다. 자연 종료와 부분 kill의 발생 순서는 무관합니다.
+  `already finished` 응답만 받은 job은 kill 수락이 아니므로 자연 완료 통지를 유지합니다.
   `post_process`는 이와 무관하게 kill로 끝나도 실행됩니다(결과 수집은 별개 계약).
 - **1회**만 발화하지만, 재제출하거나 job이 추가돼 다시 미완료가 되면 재무장돼
   다음 완료에 또 발화합니다. job이 하나도 없는 빈 jobset에서는 발화하지 않습니다.

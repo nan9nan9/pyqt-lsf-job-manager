@@ -186,7 +186,8 @@ class InMemoryStore(JobSetStore):
             if jobs is None or record.job_key not in jobs:
                 raise JobNotFoundError(
                     f"{record.jobset_id}/{record.job_key}")
-            record = replace(record, updated_at=datetime.now())
+            record = replace(record, updated_at=datetime.now(),
+                             _revision=jobs[record.job_key]._revision + 1)
             self._put_rec(record)
             return record
 
@@ -217,6 +218,7 @@ class InMemoryStore(JobSetStore):
                 return None                     # CAS 불일치 — 전이 건너뜀
             # new_state=None = 상태 유지(부분 갱신) — 계약은 base.transition
             new = replace(old, updated_at=datetime.now(),
+                          _revision=old._revision + 1,
                           state=old.state if new_state is None else new_state,
                           **fields)
             self._put_rec(new)
@@ -237,6 +239,7 @@ class InMemoryStore(JobSetStore):
                     continue
                 new = replace(
                     old, updated_at=now, **fields,
+                    _revision=old._revision + 1,
                     state=old.state if new_state is None else new_state)
                 self._put_rec(new)
                 out.append(new)

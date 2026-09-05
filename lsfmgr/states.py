@@ -139,6 +139,8 @@ class JobRecord:
     # job_key는 재사용되고 job_id는 제출 전에는 없으므로 늦은 신호를 구별할 수 없다.
     _generation: str = field(default_factory=lambda: uuid4().hex,
                              repr=False, compare=False)
+    # Store가 같은 key의 쓰기마다 증가시킨다. worker 신호의 역순 도착 판정용.
+    _revision: int = field(default=0, repr=False, compare=False)
 
 
 @dataclass(frozen=True)

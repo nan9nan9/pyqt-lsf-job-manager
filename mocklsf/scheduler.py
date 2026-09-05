@@ -88,11 +88,6 @@ class Scheduler:
             new_stat = SSUSP if in_susp else RUN
             if new_stat != j.stat:
                 j.stat = new_stat
-                self.db.log_event(
-                    j.job_id, j.array_index,
-                    "suspend" if new_stat == SSUSP else "resume",
-                    "system",
-                )
                 changed.append((j, prev))
 
         # 종료된 job 을 반영하고, 남은 active 로 슬롯 재계산.
@@ -130,8 +125,21 @@ class Scheduler:
             changed.append((j, PEND))  # PEND 였던 job 만 dispatch 대상
             dispatched += 1
 
-        if changed:
-            self.db.update_guarded_many(changed)
+        # 경쟁 갱신으로 거부된 전이는 이벤트와 bpeek 출력에도 남기지 않는다.
+        for j, prev in self.db.update_guarded_many(changed):
+            if prev == PEND:
+                self.db.log_event(j.job_id, j.array_index, "dispatch",
+                                  j.exec_host, ts=now)
+                self._write_job_banner(j, j.exec_host)
+            elif j.stat in (DONE, EXIT):
+                self.db.log_event(j.job_id, j.array_index,
+                                  "done" if j.stat == DONE else "exit",
+                                  f"exit_code={j.exit_code}", ts=now)
+                self._write_job_result(j)
+            else:
+                self.db.log_event(j.job_id, j.array_index,
+                                  "suspend" if j.stat == SSUSP else "resume",
+                                  "system", ts=now)
 
     # -- 전이 헬퍼 ----------------------------------------------------------
 
@@ -141,8 +149,6 @@ class Scheduler:
         j.start_time = now
         # 실제 종료 예정 시각 = 실행시간 + (있다면) suspend 로 지연되는 시간.
         j.finish_time = now + j.run_secs + j.suspend_secs
-        self.db.log_event(j.job_id, j.array_index, "dispatch", host, ts=now)
-        self._write_job_banner(j, host)
 
     def _finish(self, j: Job, now: float):
         j.stat = j.planned_outcome  # DONE or EXIT
@@ -151,12 +157,6 @@ class Scheduler:
             j.exit_code = 1
         if j.stat == DONE:
             j.exit_code = 0
-        self.db.log_event(
-            j.job_id, j.array_index,
-            "done" if j.stat == DONE else "exit",
-            f"exit_code={j.exit_code}", ts=now,
-        )
-        self._write_job_result(j)
 
     # -- job 가상 출력 (bpeek 용) -------------------------------------------
 

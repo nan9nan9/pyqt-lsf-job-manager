@@ -89,12 +89,15 @@ def test_every_public_member_is_documented():
     mgr.resolve_options는 (b)였다 — 둘 다 이 검사로 드러났다.
     """
     import pathlib
+    from lsfmgr.qt import QObject
 
     readme = pathlib.Path("README.md").read_text()
+    # PySide는 staticMetaObject 같은 Qt 공통 멤버를 각 subclass에도 생성한다.
+    qt_members = set(dir(QObject))
     missing = []
     for cls in (LsfJobManager, JobSet):
         for name in vars(cls):
-            if name.startswith("_") or name in readme:
+            if name.startswith("_") or name in qt_members or name in readme:
                 continue
             missing.append(f"{cls.__name__}.{name}")
     assert not missing, ("README에 없는 공개 멤버(문서 누락이거나 "

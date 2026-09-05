@@ -160,31 +160,6 @@ class CompletionTracker:
             return
         self._pool.start(_PostProcessTask(mgr, jobset_id, fn, recs))
 
-    def mute_after_kill(self, jobset_id: str) -> None:
-        """**사용자가 건 kill로** 전원 terminal이 된 완료는 통지하지 않는다 —
-        스스로 끝낸 것이라 "다 끝났다"는 알림이 필요 없다. 발화 없이 latch만
-        세워, 이어지는 폴링 tick의 완료 감지가 조용히 지나가게 한다.
-
-        의도치 않은 종료(자연 종료, LSF/관리자의 외부 bkill, EXIT)는 이 경로를
-        타지 않으므로 그대로 통지된다 — 사용자가 알아야 하는 쪽만 남는다.
-
-        여기서 '전원 terminal'인지를 보므로 **부분 kill은 억제되지 않는다**:
-        PEND만/선택 행만 죽이면 남은 job이 아직 non-terminal이라 latch가 안
-        서고, 그 job들이 나중에 끝나면 정상적으로 통지된다.
-
-        ※ kill_status_policy="actual"이면 이 시점에 레코드가 아직 EXIT가
-          아니라 억제되지 않는다 — 폴링이 EXIT를 확인하는 순간 통지가 나간다.
-        ※ post_process는 억제하지 않는다 — "전원 terminal이면 실행"이라는
-          별개 계약이고, kill로 끝난 결과도 수집 대상이다."""
-        if not jobset_id or jobset_id in self._finished_latch:
-            return
-        try:
-            recs = self._mgr.store.get_jobs(jobset_id)
-        except LsfmgrError:
-            return
-        if self._all_terminal(recs):
-            self._finished_latch.add(jobset_id)
-
     # ------------------------------------------------------------------
     # 정리
     # ------------------------------------------------------------------

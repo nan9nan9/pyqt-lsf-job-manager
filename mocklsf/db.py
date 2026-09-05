@@ -169,16 +169,20 @@ class Database:
         DB 의 현재 stat 이 prev_stat 과 같을 때만 갱신한다. 스케줄러가 tick
         시작 시 읽은 이후 다른 프로세스(bkill/bstop 등)가 그 job 을 바꿨다면
         stat 이 달라져 갱신이 no-op 되고, 상대의 변경이 보존된다(lost-update 방지).
+        실제 적용된 (job, prev_stat) 쌍만 반환한다. 이벤트·출력은 이 결과로 기록한다.
         """
         if not pairs:
-            return
+            return []
         columns = ("stat", "exec_host", "start_time", "finish_time", "exit_code")
         assigns = ", ".join(f"{c}=?" for c in columns)
         sql = f"UPDATE jobs SET {assigns} WHERE row_id=? AND stat=?"
-        rows = [[getattr(j, c) for c in columns] + [j.row_id, prev]
-                for j, prev in pairs]
-        self.conn.executemany(sql, rows)
-        self.conn.commit()
+        applied = []
+        with self.conn:
+            for j, prev in pairs:
+                vals = [getattr(j, c) for c in columns] + [j.row_id, prev]
+                if self.conn.execute(sql, vals).rowcount:
+                    applied.append((j, prev))
+        return applied
 
     def update_if_stat_in(self, job: Job, allowed, *, columns) -> bool:
         """DB 의 현재 stat 이 allowed 집합에 있을 때만 job 을 갱신.

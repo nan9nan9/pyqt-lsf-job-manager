@@ -360,12 +360,8 @@ class BulkSubmitter(QObject):
         # 이번에 리셋할 key의 옛 job_id만 조회원에서 제거한다.
         # 다른 RUN job을 제거하면 증분 응답에 다시 오지 않아 LOST로 오판할 수 있다.
         cycle_keys = [key for key, _item in keyed if key not in blocked]
-        stale_ids = [r.job_id for r in
-                     self.store.get_jobs_by_keys(ctx.jobset_id,
-                                                 cycle_keys).values()
-                     if r.job_id is not None]
-        if stale_ids:
-            self.command.forget_status(stale_ids)
+        previous = self.store.get_jobs_by_keys(ctx.jobset_id, cycle_keys)
+        stale_ids = []
         launch, reset_recs, skipped = [], [], 0
         for key, item in keyed:
             if key in blocked:
@@ -400,8 +396,15 @@ class BulkSubmitter(QObject):
                 continue
             if rec is not None:
                 reset_recs.append(rec)
+                old = previous.get(key)
+                if old is not None and old.job_id is not None:
+                    stale_ids.append(old.job_id)
             launch.append((key, item,
                            rec.submit_cwd if rec is not None else None))
+        # 먼저 Store에서 ID를 지워야 동시 조회의 정리가 옛 ID를 보존하지 않는다.
+        # 리셋 실패로 여전히 추적하는 ID는 잊지 않는다.
+        if stale_ids:
+            self.command.forget_status(stale_ids)
         if skipped:
             # barrier 거부분은 **한 번에** 계상한다 — 건당 계상은 대형
             # 재제출에서 O(N)회 lock/신호 발화가 된다.

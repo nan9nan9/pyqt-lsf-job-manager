@@ -134,11 +134,11 @@ js.kill_finished.connect(on_kill_done)           # (KillReport)
 - `job_lost`는 `mgr.*`에만 있다 — 단일 JobSet에서도 `mgr.job_lost`를 jsid로 걸러
   쓰거나, `jobs_updated`의 LOST 레코드로 처리한다.
 
-> ⚠️ **`mgr.kill_jobs(job_ids)`를 jobset 컨텍스트 없이 부르면** 결과가 특정 JobSet
-> Signal로 중계되지 않고 `verify`도 스킵된다. 결과는 Manager `kill_finished`로만
-> 온다(단 optimistic 정책의 EXIT 전이는 전역 검색으로 적용되어 `jobs_updated`/
-> `jobset_updated`는 해당 JobSet으로 발화된다). 특정 JobSet의 일부 job만 죽이려면
-> **`mgr.kill_jobs(js, job_keys)`** 를 쓰면 중계·verify가 모두 켜진다.
+> **`mgr.kill_jobs(job_ids)`를 jobset 컨텍스트 없이 부르면** kill 진행·완료 Signal은
+> Manager에서 받는다. `verify=True`는 이 경로에서도 재조회하며, 추적 중인
+> 레코드의 상태 변경은 해당 JobSet의 `jobs_updated`/`jobset_updated`로 전달된다.
+> 특정 JobSet의 일부 job을 종료하고 그 핸들에서 kill 진행·완료도 받으려면
+> **`mgr.kill_jobs(js, job_keys)`** 를 사용한다.
 
 ---
 

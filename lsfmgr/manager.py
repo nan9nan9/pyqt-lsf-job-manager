@@ -202,6 +202,8 @@ class LsfJobManager(QObject):
         self._pacer = (StatePacer(self.config.min_state_dwell_s,
                                   self.jobs_updated.emit, parent=self)
                        if self.config.min_state_dwell_s > 0 else None)
+        # 전달 경계에서 수락한 마지막 Store 갱신 순서(jobset → key → revision).
+        self._emitted_revisions: Dict[str, Dict[str, int]] = {}
 
         # --- JobSet별 신호 중계 ---
         self._handles: Dict[str, JobSet] = {}
@@ -963,6 +965,14 @@ class LsfJobManager(QObject):
           create/remove를 반복하는 세션에서 계속 커지지 않는다."""
         if self._pacer is not None:
             self._pacer.forget(jobset_id, job_keys)
+        if job_keys is None:
+            self._emitted_revisions.pop(jobset_id, None)
+        else:
+            revisions = self._emitted_revisions.get(jobset_id, {})
+            for key in job_keys:
+                revisions.pop(key, None)
+            if not revisions:
+                self._emitted_revisions.pop(jobset_id, None)
         self.querier.forget(jobset_id, job_keys)
         if job_ids:
             self.command.forget_status(job_ids)
@@ -1296,8 +1306,8 @@ class LsfJobManager(QObject):
     def _current_records(self, jsid: str, records: list) -> list:
         """Qt 큐에서 기다린 결과 중 아직 같은 실행에 속한 레코드만 남긴다.
 
-        같은 실행의 과거 상태는 표시해야 하므로 updated_at/현재 상태로
-        거르지 않는다. 교체·재제출·삭제 전 결과만 전달 경계에서 버린다.
+        같은 실행의 정상 중간 상태는 표시해야 하므로 현재 Store 상태와
+        비교하지 않는다. 역순 도착은 _emit_jobs에서 마지막 전달 순서로 거른다.
         """
         current = self.store.get_jobs_by_keys(jsid, [r.job_key for r in records])
         return [r for r in records if r.job_key in current
@@ -1309,6 +1319,16 @@ class LsfJobManager(QObject):
         (jobset_updated)과 pull(get_jobs)은 늦추지 않는다 — 요약은 store에서
         바로 계산되므로, dwell 동안 배지 카운트가 표보다 앞선다(의도된 시차)."""
         records = self._current_records(jsid, records)
+        if not records:
+            return
+        revisions = self._emitted_revisions.setdefault(jsid, {})
+        accepted = []
+        for rec in records:
+            if rec._revision < revisions.get(rec.job_key, -1):
+                continue
+            revisions[rec.job_key] = rec._revision
+            accepted.append(rec)
+        records = accepted
         if not records:
             return
         if self._pacer is None:
@@ -1370,7 +1390,6 @@ class LsfJobManager(QObject):
             if recs:
                 self._emit_jobs(j, recs)
             self._emit_summary(j)
-            self._completion.mute_after_kill(j)
 
     def _handle_of(self, jobset_id: str) -> Optional[JobSet]:
         h = self._handles.get(jobset_id)

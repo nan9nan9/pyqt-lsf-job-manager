@@ -79,7 +79,7 @@ def test_selfcheck_help_works():
     ({"jobs": [{"dataId": "1.c1", "stat": "Bogus"}]},
      True, "상태를 못 알아본"),
     ({"data": [{"jobNumber": 1, "stat": "RUN"}]},
-     True, "id 필드를 못 찾음"),
+     True, "상태 판단을 보류한다"),
 ])
 def test_payload_mode_diagnoses(tmp_path, payload, expect_fail, needle):
     """콜백 조회원(REST)을 쓰는 앱에는 --payload가 유일한 실환경 점검이다 —

@@ -98,6 +98,22 @@ def test_transition_missing_job(store):
         store.transition("js1", "nope", JobState.PEND)
 
 
+def test_revisions_follow_successful_writes_even_with_stale_update_input(store):
+    store.store_insert_jobset(make_jobset(n=1))
+    first = store.store_add_job(make_job())
+    pend = store.transition("js1", "js1_0", JobState.PEND)
+    assert store.transition("js1", "js1_0", JobState.EXIT,
+                            guard=lambda _rec: False) is None
+    run, done = store.transition_many("js1", [
+        ("js1_0", JobState.RUN, None, {}),
+        ("js1_0", JobState.DONE, None, {}),
+    ])
+    # update_job의 입력 스냅샷이 오래돼도 갱신 순서는 현재 Store에서 이어간다.
+    updated = store.update_job(first)
+    assert [r._revision for r in (first, pend, run, done, updated)] == list(range(5))
+    assert store.get_job("js1", "js1_0")._revision == updated._revision
+
+
 def test_remove_job(store):
     store.store_insert_jobset(make_jobset(n=3))
     for i in range(3):

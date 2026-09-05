@@ -158,9 +158,9 @@ class JobSetManager:
             changed: List[JobRecord] = []
             for rec, old in plan:
                 if old is not None:
-                    self.store.update_job(rec)
+                    rec = self.store.update_job(rec)
                 else:
-                    self.store.store_add_job(rec)
+                    rec = self.store.store_add_job(rec)
                 changed.append(rec)
             self._sync_intended_count(jobset_id)
         return changed

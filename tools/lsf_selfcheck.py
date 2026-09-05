@@ -190,7 +190,7 @@ def check_payload(path):
 
     조회를 job_status_fetcher로 하는 앱에는 이게 유일한 실환경 점검이다 —
     bjobs 출력 가정은 애초에 타지 않는다. 흔한 어긋남 셋을 잡는다:
-    ① id 필드를 못 찾음 → 응답 전체가 "job 0건"이 되어 전 job이 LOST
+    ① id 필드를 못 찾음 → 조회 실패로 처리되어 상태 판단을 보류
     ② 상태 표기 불일치 → 전부 UNKWN, terminal이 아니라 폴링이 안 멈춤
     ③ 시각 표기 불일치 → 경과시간/종료시각이 비고 원장 만료가 안 걸림
     """
@@ -208,8 +208,9 @@ def check_payload(path):
     try:
         statuses = parse_internal_jobs(payload)
     except ValueError as e:
-        report(BAD, "id 필드를 못 찾음 — 응답이 통째로 '0건'이 된다", 
-               f"{e}\n→ 이 상태면 폴링마다 전 job이 미발견으로 세어져 LOST로 확정된다.")
+        report(BAD, "응답 해석 실패 — 상태 판단을 보류한다",
+               f"{e}\n→ 이 응답은 조회 실패로 처리되어 상태를 갱신하지 않는다. "
+               "미발견 횟수도 증가시키지 않는다.")
         return
     except Exception as e:                                   # noqa: BLE001
         report(BAD, "응답 해석 중 예외", repr(e))
